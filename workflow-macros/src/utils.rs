@@ -166,10 +166,11 @@ pub(crate) fn transform_returns(stmts: &[Stmt]) -> Vec<Stmt> {
     for stmt in stmts {
         if let Stmt::Expr(expr, _) = stmt
             && let syn::Expr::Return(ret) = expr
-                && let Some(ret_expr) = &ret.expr {
-                    new_stmts.push(wrap_return_expr(ret_expr));
-                    continue;
-                }
+            && let Some(ret_expr) = &ret.expr
+        {
+            new_stmts.push(wrap_return_expr(ret_expr));
+            continue;
+        }
         new_stmts.push(stmt.clone());
     }
     new_stmts
