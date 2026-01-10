@@ -5,6 +5,28 @@ use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
 use workflow_core::codec::{Decoder, Encoder};
 
+/// A codec that can serialize and deserialize values using rkyv.
+///
+/// This codec uses rkyv's zero-copy deserialization framework to serialize and deserialize values.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use rkyv::{Archive, Deserialize, Serialize};
+/// use workflow_runtime::serialization::RkyvCodec;
+/// use workflow_core::codec::*;
+///
+/// #[derive(Archive, Serialize, Deserialize, Debug, PartialEq)]
+/// struct Example {
+///     value: i32,
+/// }
+///
+/// let codec = RkyvCodec;
+/// let value = Example { value: 42 };
+/// let encoded = codec.encode(&value).unwrap();
+/// let decoded: Example = codec.decode(encoded).unwrap();
+/// assert_eq!(decoded, value);
+/// ```
 pub struct RkyvCodec;
 
 impl<T> Encoder<T> for RkyvCodec

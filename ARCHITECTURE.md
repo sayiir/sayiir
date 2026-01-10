@@ -21,16 +21,22 @@ Serialization is a runtime execution concern, not a task definition concern. Tas
 
 **Runtime codec selection**
 
-The workflow runtime uses codecs to serialize task inputs/outputs when crossing boundaries. Codecs implement the `Encoder<T>` and `Decoder<T>` traits from `workflow-core::codec` to convert between typed values and byte streams.
+Each workflow uses a single codec for all serialization operations. The codec is configured when the workflow is created and is used consistently across all task boundaries (input/output serialization, checkpointing, etc.). This ensures:
+
+- Consistency: All serialized data in a workflow uses the same format
+- Simplicity: No need for codec registry or per-task codec selection
+- Type safety: All task `Input`/`Output` types must satisfy the workflow's codec trait bounds
+
+Codecs implement the `Encoder<T>` and `Decoder<T>` traits from `workflow-core::codec` to convert between typed values and byte streams.
 
 **Built-in codecs:**
 
 The `workflow-runtime` crate provides built-in codec implementations:
 
+- `RkyvCodec` - **Default** (zero-copy deserialization framework) - enabled by default via `rkyv` feature
 - `JsonCodec` - Available when `json` feature is enabled (uses serde_json)
-- `RkyvCodec` - Available when `rkyv` feature is enabled (zero-copy deserialization)
 
-Both codecs are optional and can be enabled independently via feature flags.
+The `rkyv` feature is enabled by default. To use JSON instead, disable default features and enable `json`: `--no-default-features --features json`.
 
 **Custom serialization formats**
 

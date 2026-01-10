@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [features]
-default = []
+default = ["rkyv", "json"]
 json = ["dep:serde_json"]
 rkyv = ["dep:rkyv", "dep:bytecheck"]
 
