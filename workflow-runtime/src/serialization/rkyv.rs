@@ -3,7 +3,7 @@ use bytecheck::CheckBytes;
 use bytes::Bytes;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
-use workflow_core::codec::{sealed, Decoder, Encoder};
+use workflow_core::codec::{Decoder, Encoder, sealed};
 
 /// A codec that can serialize and deserialize values using rkyv.
 ///
