@@ -4,6 +4,9 @@ use bytes::Bytes;
 use std::future::Future;
 use std::sync::Arc;
 
+/// A boxed future type used in the `CoreTask` trait.
+///
+/// This is primarily an implementation detail for the task system.
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A core task is a task that can be run by the workflow runtime.
@@ -12,7 +15,7 @@ pub trait CoreTask: Send + Sync {
     fn run(&self, input: Bytes) -> BoxFuture<'static, Result<Bytes>>;
 }
 
-/// Internal wrapper that implements CoreTask for async functions
+/// Internal wrapper that implements CoreTask for async functions.
 struct TaskFnWrapper<F, I, O, Fut> {
     func: Arc<F>,
     _phantom: std::marker::PhantomData<fn(I) -> (O, Fut)>,

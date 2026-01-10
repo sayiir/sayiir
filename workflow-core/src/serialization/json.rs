@@ -11,7 +11,14 @@ use bytes::Bytes;
 /// # Example
 /// ```
 /// use workflow_core::serialization::json::Json;
-pub struct Json<T>(pub(crate) T);
+/// let _t = Json::new(5);
+pub struct Json<T>(T);
+
+impl<T> Json<T> {
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+}
 
 impl<T> AsRef<T> for Json<T> {
     fn as_ref(&self) -> &T {
