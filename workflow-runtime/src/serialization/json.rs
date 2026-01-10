@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use workflow_core::codec::{Decoder, Encoder};
+use workflow_core::codec::{Decoder, Encoder, sealed};
 
 /// A codec that can serialize and deserialize values using serde_json.
 ///
@@ -21,20 +21,24 @@ use workflow_core::codec::{Decoder, Encoder};
 /// ```
 pub struct JsonCodec;
 
-impl<T> Encoder<T> for JsonCodec
+impl Encoder for JsonCodec {}
+
+impl<T> sealed::EncodeValue<T> for JsonCodec
 where
     T: Serialize,
 {
-    fn encode(&self, value: &T) -> Result<Bytes> {
+    fn encode_value(&self, value: &T) -> Result<Bytes> {
         Ok(Bytes::from(serde_json::to_vec(value)?))
     }
 }
 
-impl<T> Decoder<T> for JsonCodec
+impl Decoder for JsonCodec {}
+
+impl<T> sealed::DecodeValue<T> for JsonCodec
 where
     T: for<'de> Deserialize<'de>,
 {
-    fn decode(&self, bytes: Bytes) -> Result<T> {
+    fn decode_value(&self, bytes: Bytes) -> Result<T> {
         Ok(serde_json::from_slice(&bytes)?)
     }
 }

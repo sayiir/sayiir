@@ -27,7 +27,7 @@ Each workflow uses a single codec for all serialization operations. The codec is
 - Simplicity: No need for codec registry or per-task codec selection
 - Type safety: All task `Input`/`Output` types must satisfy the workflow's codec trait bounds
 
-Codecs implement the `Encoder<T>` and `Decoder<T>` traits from `workflow-core::codec` to convert between typed values and byte streams.
+Codecs implement the `Encoder` and `Decoder` traits from `workflow-core::codec` to convert between typed values and byte streams. The type parameter is specified at the method call site rather than the trait level, allowing for more flexible usage.
 
 **Built-in codecs:**
 
@@ -40,7 +40,11 @@ The `rkyv` feature is enabled by default. To use JSON instead, disable default f
 
 **Custom serialization formats**
 
-The architecture is not opinionated about serialization formats. Users can implement custom codecs by implementing the `Encoder<T>` and `Decoder<T>` traits from `workflow-core::codec`. The runtime can then use these codecs to serialize/deserialize task inputs and outputs as needed.
+The architecture is not opinionated about serialization formats. Users can implement custom codecs by implementing the `Encoder` and `Decoder` traits from `workflow-core::codec`. To implement a codec, you need to:
+1. Implement the `Encoder` or `Decoder` trait (empty impl is fine)
+2. Implement `sealed::EncodeValue<T>` or `sealed::DecodeValue<T>` with your desired type bounds
+
+The runtime can then use these codecs to serialize/deserialize task inputs and outputs as needed.
 
 Available serialization options in the Rust ecosystem that could be integrated:
 
