@@ -2,11 +2,12 @@
 
 ## Core workflow design choices
 
-### Minimal typing overhead
+### Typed tasks with runtime serialization
 
-- in/out data for tasks are just `Bytes`. Computations and IO are all about processing bytes!
-- Errors cross task boundaries, types won't align anyway
-- Traits associated types add significant overhead and gymanastics.
+- Tasks are strongly typed with `Input` and `Output` associated types via the `CoreTask` trait
+- Tasks operate on typed values in memory - no serialization overhead during task execution
+- Serialization to/from `Bytes` happens at runtime boundaries (e.g., when tasks are distributed or checkpointed)
+- This separation allows tasks to be written with natural Rust types while maintaining flexibility for distributed execution
 
 Using `anyhow::Result` is a relevant choice because:
 
@@ -16,25 +17,36 @@ Using `anyhow::Result` is a relevant choice because:
 
 ### Serialization
 
-As workflows are distributed, serializing/deserializing activities in/out is needed.
+Serialization is a runtime execution concern, not a task definition concern. Tasks are defined with typed inputs and outputs, and codecs handle the conversion between typed values and `Bytes` when needed (e.g., for distributed execution, checkpointing, or persistence).
 
-**Default: JSON (serde_json)**
+**Runtime codec selection**
 
-The `task` macro defaults to JSON serialization via `Json<T>` wrapper, providing a clean API where users write functions with plain types that are automatically wrapped/unwrapped. This makes JSON the default choice for most use cases.
+Each workflow uses a single codec for all serialization operations. The codec is configured when the workflow is created and is used consistently across all task boundaries (input/output serialization, checkpointing, etc.). This ensures:
 
-**Flexible: Any serialization format**
+- Consistency: All serialized data in a workflow uses the same format
+- Simplicity: No need for codec registry or per-task codec selection
+- Type safety: All task `Input`/`Output` types must satisfy the workflow's codec trait bounds
 
-The architecture is not opinionated - nothing prevents using any other serialization format. Users can:
+Codecs implement the `Encoder<T>` and `Decoder<T>` traits from `workflow-core::codec` to convert between typed values and byte streams.
 
-- Use custom wrappers that implement `TaskInput`/`TaskOutput` (e.g., `Bincode<T>`, `Postcard<T>`)
-- The macro automatically detects these wrappers and won't double-wrap them
-- Opt out of automatic wrapping entirely with `#[task(custom_serialization)]`
+**Built-in codecs:**
 
-Available serialization options in the Rust ecosystem:
+The `workflow-runtime` crate provides built-in codec implementations:
+
+- `RkyvCodec` - **Default** (zero-copy deserialization framework) - enabled by default via `rkyv` feature
+- `JsonCodec` - Available when `json` feature is enabled (uses serde_json)
+
+The `rkyv` feature is enabled by default. To use JSON instead, disable default features and enable `json`: `--no-default-features --features json`.
+
+**Custom serialization formats**
+
+The architecture is not opinionated about serialization formats. Users can implement custom codecs by implementing the `Encoder<T>` and `Decoder<T>` traits from `workflow-core::codec`. The runtime can then use these codecs to serialize/deserialize task inputs and outputs as needed.
+
+Available serialization options in the Rust ecosystem that could be integrated:
 
 ✅ True Serde-based serializers
 
-- serde_json (default)
+- serde_json - **Built-in via `json` feature**
 - [postcard](https://crates.io/crates/postcard) - compact binary format
 - serde_cbor - CBOR format
 - rmp-serde (msgpack) - MessagePack format
@@ -45,6 +57,4 @@ Available serialization options in the Rust ecosystem:
 
 - prost / protobuf
 - avro-rs
-- rkyv
-
-All of these can be used by implementing `TaskInput` and `TaskOutput` traits on custom wrapper types.
+- rkyv - **Built-in via `rkyv` feature** (zero-copy deserialization framework)
