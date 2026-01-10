@@ -4,12 +4,21 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[features]
+default = []
+json = ["dep:serde_json"]
+rkyv = ["dep:rkyv", "dep:bytecheck"]
+
 [dependencies]
 workflow-core = { path = "../workflow-core" }
+workflow-macros = { path = "../workflow-macros" }
+tracing = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 bytes = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true, optional = true }
+rkyv = { workspace = true, optional = true }
+bytecheck = { workspace = true, optional = true }
 
 [lib]
 name = "workflow_runtime"
