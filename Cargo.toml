@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "workflow-core",
+    "workflow-runtime",
+]
+resolver = "2"
+
+[workspace.package]
+license = "MIT"
+
+[workspace.dependencies]
+tracing = "0.1"
+petgraph = "0.8"

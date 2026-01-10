@@ -1,0 +1,11 @@
+{
+    "editor.formatOnSave": true,
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.cargo.allTargets": false,
+    "[rust]": {
+      "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    },
+    "rust-analyzer.cargo.targetDir": true,
+    "rust-analyzer.checkOnSave": true,
+  }

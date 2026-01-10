@@ -1,0 +1,12 @@
+[package]
+name = "workflow-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+workflow-core = { path = "../workflow-core" }
+
+[lib]
+name = "workflow_runtime"
+path = "src/lib.rs"

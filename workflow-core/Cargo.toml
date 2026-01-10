@@ -1,0 +1,12 @@
+[package]
+name = "workflow-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+name = "workflow_core"
+path = "src/lib.rs"
+
+[dependencies]
+petgraph = { workspace = true }
