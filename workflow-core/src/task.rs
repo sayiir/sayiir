@@ -117,6 +117,49 @@ impl<C: Codec> BranchOutputs<C> {
 
 /// A core task is a task that can be run by the workflow runtime.
 ///
+/// Tasks can be defined either as closures (via `WorkflowBuilder::then`) or as
+/// structs implementing this trait directly. Struct-based tasks are useful for:
+/// - Reusable task logic across workflows
+/// - Tasks with configuration/state
+/// - Serializable workflows (tasks can be registered by ID)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use workflow_core::task::CoreTask;
+/// use anyhow::Result;
+/// use std::pin::Pin;
+/// use std::future::Future;
+///
+/// /// A task that doubles its input.
+/// struct DoubleTask;
+///
+/// impl CoreTask for DoubleTask {
+///     type Input = u32;
+///     type Output = u32;
+///     type Future = Pin<Box<dyn Future<Output = Result<u32>> + Send>>;
+///
+///     fn run(&self, input: u32) -> Self::Future {
+///         Box::pin(async move { Ok(input * 2) })
+///     }
+/// }
+///
+/// /// A configurable task with state.
+/// struct MultiplyTask {
+///     factor: u32,
+/// }
+///
+/// impl CoreTask for MultiplyTask {
+///     type Input = u32;
+///     type Output = u32;
+///     type Future = Pin<Box<dyn Future<Output = Result<u32>> + Send>>;
+///
+///     fn run(&self, input: u32) -> Self::Future {
+///         let factor = self.factor;
+///         Box::pin(async move { Ok(input * factor) })
+///     }
+/// }
+/// ```
 pub trait CoreTask: Send + Sync {
     type Input;
     type Output;
