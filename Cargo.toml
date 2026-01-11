@@ -16,3 +16,4 @@ serde_json = "1"
 rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 bytecheck = "0.8"
 tokio = { version = "1", features = ["rt", "macros"] }
+sha2 = "0.10"

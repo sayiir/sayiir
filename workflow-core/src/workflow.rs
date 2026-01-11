@@ -1,35 +1,15 @@
 use crate::codec::Codec;
 use crate::codec::sealed;
 use crate::context::WorkflowContext;
+use crate::error::WorkflowError;
 use crate::task::{
     BranchOutputs, ErasedBranch, UntypedCoreTask, branch, to_core_task_arc,
     to_heterogeneous_join_task_arc,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
-
-/// Error returned when building a workflow fails.
-#[derive(Debug)]
-pub enum WorkflowBuildError {
-    /// A duplicate task ID was found.
-    DuplicateId(String),
-    /// A referenced task ID was not found in the registry.
-    TaskNotFound(String),
-}
-
-impl std::fmt::Display for WorkflowBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WorkflowBuildError::DuplicateId(id) => write!(f, "Duplicate task id: '{}'", id),
-            WorkflowBuildError::TaskNotFound(id) => {
-                write!(f, "Task '{}' not found in registry", id)
-            }
-        }
-    }
-}
-
-impl std::error::Error for WorkflowBuildError {}
 
 /// A workflow structure representing the tasks to execute.
 pub enum WorkflowContinuation {
@@ -107,23 +87,6 @@ pub enum SerializableContinuation {
     },
 }
 
-/// Error when hydrating a serializable continuation.
-#[derive(Debug)]
-pub enum ToRunnableError {
-    /// A task ID was not found in the registry.
-    TaskNotFound(String),
-}
-
-impl std::fmt::Display for ToRunnableError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ToRunnableError::TaskNotFound(id) => write!(f, "Task '{}' not found in registry", id),
-        }
-    }
-}
-
-impl std::error::Error for ToRunnableError {}
-
 impl SerializableContinuation {
     /// Convert this serializable continuation into a runnable WorkflowContinuation.
     ///
@@ -131,19 +94,31 @@ impl SerializableContinuation {
     ///
     /// # Errors
     ///
-    /// Returns `ToRunnableError::TaskNotFound` if any task ID is not in the registry.
+    /// Returns `WorkflowError::TaskNotFound` if any task ID is not in the registry.
     pub fn to_runnable(
         &self,
         registry: &crate::registry::TaskRegistry,
-    ) -> Result<WorkflowContinuation, ToRunnableError> {
+    ) -> Result<WorkflowContinuation, WorkflowError> {
+        if let Some(dup) = self.find_duplicate_id() {
+            return Err(WorkflowError::DuplicateTaskId(dup));
+        }
+
+        self.to_runnable_unchecked(registry)
+    }
+
+    /// Convert without duplicate check (called after validation).
+    fn to_runnable_unchecked(
+        &self,
+        registry: &crate::registry::TaskRegistry,
+    ) -> Result<WorkflowContinuation, WorkflowError> {
         match self {
             SerializableContinuation::Task { id, next } => {
                 let func = registry
                     .get(id)
-                    .ok_or_else(|| ToRunnableError::TaskNotFound(id.clone()))?;
+                    .ok_or_else(|| WorkflowError::TaskNotFound(id.clone()))?;
                 let next = next
                     .as_ref()
-                    .map(|n| n.to_runnable(registry).map(Box::new))
+                    .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
                     .transpose()?;
                 Ok(WorkflowContinuation::Task {
                     id: id.clone(),
@@ -154,11 +129,11 @@ impl SerializableContinuation {
             SerializableContinuation::Fork { branches, join } => {
                 let branches: Result<Vec<_>, _> = branches
                     .iter()
-                    .map(|b| b.to_runnable(registry).map(Arc::new))
+                    .map(|b| b.to_runnable_unchecked(registry).map(Arc::new))
                     .collect();
                 let join = join
                     .as_ref()
-                    .map(|j| j.to_runnable(registry).map(Box::new))
+                    .map(|j| j.to_runnable_unchecked(registry).map(Box::new))
                     .transpose()?;
                 Ok(WorkflowContinuation::Fork {
                     branches: branches?.into_boxed_slice(),
@@ -192,6 +167,84 @@ impl SerializableContinuation {
         collect(self, &mut ids);
         ids
     }
+
+    /// Find the first duplicate ID in this continuation, if any.
+    ///
+    /// Used to detect tampering in serialized workflow states.
+    fn find_duplicate_id(&self) -> Option<String> {
+        fn collect(cont: &SerializableContinuation, seen: &mut HashSet<String>) -> Option<String> {
+            match cont {
+                SerializableContinuation::Task { id, next } => {
+                    if !seen.insert(id.clone()) {
+                        return Some(id.clone());
+                    }
+                    next.as_ref().and_then(|n| collect(n, seen))
+                }
+                SerializableContinuation::Fork { branches, join } => branches
+                    .iter()
+                    .find_map(|b| collect(b, seen))
+                    .or_else(|| join.as_ref().and_then(|j| collect(j, seen))),
+            }
+        }
+        collect(self, &mut HashSet::new())
+    }
+
+    /// Compute a SHA256 hash of this continuation's structure.
+    ///
+    /// This hash serves as a "version" identifier for the workflow definition.
+    /// It can be used to detect when a serialized workflow state was created
+    /// with a different workflow definition than the current one.
+    ///
+    /// The hash is computed from the canonical structure of task IDs and their
+    /// arrangement.
+    pub fn compute_definition_hash(&self) -> String {
+        fn hash_continuation(cont: &SerializableContinuation, hasher: &mut Sha256) {
+            match cont {
+                SerializableContinuation::Task { id, next } => {
+                    hasher.update(b"T:"); // Tag for Task
+                    hasher.update(id.as_bytes());
+                    hasher.update(b";");
+                    if let Some(n) = next {
+                        hash_continuation(n, hasher);
+                    }
+                }
+                SerializableContinuation::Fork { branches, join } => {
+                    hasher.update(b"F:["); // Tag for Fork
+                    for branch in branches.iter() {
+                        hash_continuation(branch, hasher);
+                        hasher.update(b",");
+                    }
+                    hasher.update(b"]");
+                    if let Some(j) = join {
+                        hasher.update(b"J:");
+                        hash_continuation(j, hasher);
+                    }
+                }
+            }
+        }
+
+        let mut hasher = Sha256::new();
+        hash_continuation(self, &mut hasher);
+        let result = hasher.finalize();
+        format!("{:x}", result)
+    }
+}
+
+/// A complete serializable workflow state including version information.
+///
+/// This type wraps `SerializableContinuation` with workflow identification and
+/// a definition hash that serves as a version check. When deserializing, the
+/// hash is verified to ensure the serialized state matches the current workflow
+/// definition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SerializedWorkflowState {
+    /// The workflow identifier.
+    pub workflow_id: String,
+    /// SHA256 hash of the workflow definition structure.
+    /// Used to detect version mismatches during deserialization.
+    pub definition_hash: String,
+    /// The serializable continuation structure.
+    pub continuation: SerializableContinuation,
 }
 
 /// The status of a workflow execution.
@@ -305,6 +358,7 @@ pub struct WorkflowBuilder<C, Input, Output, M = (), Cont = NoContinuation, R = 
 
 /// A built workflow that can be executed.
 pub struct Workflow<C, Input, M = ()> {
+    definition_hash: String,
     context: WorkflowContext<C, M>,
     continuation: WorkflowContinuation,
     _phantom: PhantomData<Input>,
@@ -313,7 +367,7 @@ pub struct Workflow<C, Input, M = ()> {
 impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry> {
     /// Create a new workflow builder with a context object.
     ///
-    /// The context contains both the codec and metadata that will be available
+    /// The context contains the workflow ID, codec and metadata that will be available
     /// at any execution point via the `sayiir_ctx!` macro.
     pub fn new(ctx: WorkflowContext<C, M>) -> Self
     where
@@ -333,6 +387,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// # Example
     ///
     /// ```rust,ignore
+    /// let ctx = WorkflowContext::new("my-workflow", codec, metadata);
     /// let workflow = WorkflowBuilder::new(ctx)
     ///     .with_registry()  // Enable serialization
     ///     .then("step1", |i: u32| async move { Ok(i + 1) })
@@ -365,6 +420,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     ///
     /// // Build workflow
     /// let registry = build_registry(codec.clone());
+    /// let ctx = WorkflowContext::new("my-workflow", codec.clone(), metadata);
     /// let workflow = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
     ///     .then_registered::<u32>("step1")
@@ -445,7 +501,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns `WorkflowBuildError::TaskNotFound` if the task ID is not in the registry.
+    /// Returns `WorkflowError::TaskNotFound` if the task ID is not in the registry.
     ///
     /// # Example
     ///
@@ -463,7 +519,7 @@ where
         id: &str,
     ) -> Result<
         WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>,
-        WorkflowBuildError,
+        WorkflowError,
     >
     where
         Output: Send + 'static,
@@ -472,7 +528,7 @@ where
         let func = self
             .registry
             .get(id)
-            .ok_or_else(|| WorkflowBuildError::TaskNotFound(id.to_string()))?;
+            .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
@@ -555,7 +611,7 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     /// # Errors
     ///
     /// Returns an error if duplicate task IDs are found.
-    pub fn build(self) -> Result<Workflow<C, Input, M>, WorkflowBuildError>
+    pub fn build(self) -> Result<Workflow<C, Input, M>, WorkflowError>
     where
         Input: Send + 'static,
         Output: Send + 'static,
@@ -567,10 +623,16 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             + sealed::EncodeValue<Output>,
     {
         if let Some(dup) = self.continuation.find_duplicate_id() {
-            return Err(WorkflowBuildError::DuplicateId(dup));
+            return Err(WorkflowError::DuplicateTaskId(dup));
         }
 
+        let definition_hash = self
+            .continuation
+            .to_serializable()
+            .compute_definition_hash();
+
         Ok(Workflow {
+            definition_hash,
             continuation: self.continuation,
             context: self.context,
             _phantom: PhantomData,
@@ -585,7 +647,7 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     /// # Errors
     ///
     /// Returns an error if duplicate task IDs are found.
-    pub fn build(self) -> Result<SerializableWorkflow<C, Input, M>, WorkflowBuildError>
+    pub fn build(self) -> Result<SerializableWorkflow<C, Input, M>, WorkflowError>
     where
         Input: Send + 'static,
         Output: Send + 'static,
@@ -597,10 +659,16 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             + sealed::EncodeValue<Output>,
     {
         if let Some(dup) = self.continuation.find_duplicate_id() {
-            return Err(WorkflowBuildError::DuplicateId(dup));
+            return Err(WorkflowError::DuplicateTaskId(dup));
         }
 
+        let definition_hash = self
+            .continuation
+            .to_serializable()
+            .compute_definition_hash();
+
         let inner = Workflow {
+            definition_hash,
             continuation: self.continuation,
             context: self.context,
             _phantom: PhantomData,
@@ -759,15 +827,15 @@ where
     ///
     /// # Errors
     ///
-    /// Returns `WorkflowBuildError::TaskNotFound` if the task ID is not in the registry.
-    pub fn branch_registered(mut self, id: &str) -> Result<Self, WorkflowBuildError>
+    /// Returns `WorkflowError::TaskNotFound` if the task ID is not in the registry.
+    pub fn branch_registered(mut self, id: &str) -> Result<Self, WorkflowError>
     where
         Output: Send + 'static,
     {
         let task = self
             .registry
             .get(id)
-            .ok_or_else(|| WorkflowBuildError::TaskNotFound(id.to_string()))?;
+            .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
 
         self.branches.push(ErasedBranch {
             id: id.to_string(),
@@ -780,13 +848,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns `WorkflowBuildError::TaskNotFound` if the task ID is not in the registry.
+    /// Returns `WorkflowError::TaskNotFound` if the task ID is not in the registry.
     pub fn join_registered<JoinOutput>(
         self,
         id: &str,
     ) -> Result<
         WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, TaskRegistry>,
-        WorkflowBuildError,
+        WorkflowError,
     >
     where
         Output: Send + 'static,
@@ -795,7 +863,7 @@ where
         let join_task_fn = self
             .registry
             .get(id)
-            .ok_or_else(|| WorkflowBuildError::TaskNotFound(id.to_string()))?;
+            .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
 
         let branch_continuations: Vec<Arc<WorkflowContinuation>> = self
             .branches
@@ -832,6 +900,20 @@ where
 }
 
 impl<C, Input, M> Workflow<C, Input, M> {
+    /// Get the workflow ID.
+    pub fn workflow_id(&self) -> &str {
+        &self.context.workflow_id
+    }
+
+    /// Get the definition hash.
+    ///
+    /// This hash is computed from the workflow's continuation structure and serves
+    /// as a version identifier. It can be used to detect when a serialized workflow
+    /// state was created with a different workflow definition.
+    pub fn definition_hash(&self) -> &str {
+        &self.definition_hash
+    }
+
     /// Get a reference to the context of this workflow.
     pub fn context(&self) -> &WorkflowContext<C, M> {
         &self.context
@@ -871,14 +953,14 @@ impl<C, Input, M> Workflow<C, Input, M> {
 ///     .with_registry()  // Enable serialization
 ///     .then("step1", |i: u32| async move { Ok(i + 1) })
 ///     .then("step2", |i: u32| async move { Ok(i * 2) })
-///     .build()?;
+///     .build("my-workflow")?;
 ///
 /// // Serialize
 /// let serialized = workflow.to_serializable();
 /// let json = serde_json::to_string(&serialized)?;
 ///
 /// // Deserialize (uses internal registry)
-/// let deserialized: SerializableContinuation = serde_json::from_str(&json)?;
+/// let deserialized: SerializedWorkflowState = serde_json::from_str(&json)?;
 /// let restored = workflow.to_runnable(&deserialized)?;
 /// ```
 pub struct SerializableWorkflow<C, Input, M = ()> {
@@ -887,6 +969,16 @@ pub struct SerializableWorkflow<C, Input, M = ()> {
 }
 
 impl<C, Input, M> SerializableWorkflow<C, Input, M> {
+    /// Get the workflow ID.
+    pub fn workflow_id(&self) -> &str {
+        self.inner.workflow_id()
+    }
+
+    /// Get the definition hash.
+    pub fn definition_hash(&self) -> &str {
+        self.inner.definition_hash()
+    }
+
     /// Get a reference to the inner workflow.
     pub fn workflow(&self) -> &Workflow<C, Input, M> {
         &self.inner
@@ -917,17 +1009,39 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
         &self.registry
     }
 
-    /// Convert to a serializable representation.
-    pub fn to_serializable(&self) -> SerializableContinuation {
-        self.inner.continuation().to_serializable()
+    /// Convert to a serializable state representation.
+    ///
+    /// Returns a `SerializedWorkflowState` that includes the workflow ID,
+    /// definition hash, and continuation structure. This can be serialized
+    /// and later deserialized to resume the workflow.
+    pub fn to_serializable(&self) -> SerializedWorkflowState {
+        SerializedWorkflowState {
+            workflow_id: self.inner.workflow_id().to_string(),
+            definition_hash: self.inner.definition_hash.clone(),
+            continuation: self.inner.continuation().to_serializable(),
+        }
     }
 
-    /// Convert a serializable continuation to runnable using the internal registry.
+    /// Convert a serialized workflow state to runnable using the internal registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WorkflowError::DefinitionMismatch` if the definition hash doesn't
+    /// match this workflow's hash, indicating the serialized state was created with
+    /// a different workflow definition.
+    ///
+    /// Returns `WorkflowError::TaskNotFound` if any task ID is not in the registry.
     pub fn to_runnable(
         &self,
-        serializable: &SerializableContinuation,
-    ) -> Result<WorkflowContinuation, ToRunnableError> {
-        serializable.to_runnable(&self.registry)
+        state: &SerializedWorkflowState,
+    ) -> Result<WorkflowContinuation, WorkflowError> {
+        if state.definition_hash != self.inner.definition_hash {
+            return Err(WorkflowError::DefinitionMismatch {
+                expected: self.inner.definition_hash.clone(),
+                found: state.definition_hash.clone(),
+            });
+        }
+        state.continuation.to_runnable(&self.registry)
     }
 }
 
@@ -960,7 +1074,7 @@ mod tests {
         use crate::workflow::Workflow;
         use std::sync::Arc;
 
-        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
             .then("test", |i: u32| async move { Ok(i + 1) })
             .build()
@@ -977,7 +1091,11 @@ mod tests {
         use crate::workflow::Workflow;
         use std::sync::Arc;
 
-        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new("test_metadata"));
+        let ctx = WorkflowContext::new(
+            "test-workflow",
+            Arc::new(DummyCodec),
+            Arc::new("test_metadata"),
+        );
         let workflow: Workflow<DummyCodec, u32, &str> = WorkflowBuilder::new(ctx)
             .then("test", |i: u32| async move { Ok(i + 1) })
             .build()
@@ -992,7 +1110,7 @@ mod tests {
         use crate::workflow::Workflow;
         use std::sync::Arc;
 
-        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
             .then("first", |i: u32| async move { Ok(i + 1) })
             .then("second", |i: u32| async move { Ok(i + 2) })
@@ -1018,8 +1136,11 @@ mod tests {
             }
         }
 
-        // Tasks should execute in the order they were added
-        assert_eq!(task_ids, vec!["first", "second", "third"]);
+        assert_eq!(
+            task_ids,
+            vec!["first", "second", "third"],
+            "Tasks should execute in the order they were added"
+        );
     }
 
     #[test]
@@ -1029,7 +1150,7 @@ mod tests {
         use crate::workflow::Workflow;
         use std::sync::Arc;
 
-        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         // This test verifies that the heterogeneous fork-join API compiles correctly.
         // Each branch can return a different type thanks to type erasure.
         let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
@@ -1061,10 +1182,10 @@ mod tests {
     #[test]
     fn test_duplicate_branch_id_returns_error() {
         use crate::context::WorkflowContext;
-        use crate::workflow::WorkflowBuildError;
+        use crate::error::WorkflowError;
         use std::sync::Arc;
 
-        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         let result = WorkflowBuilder::<_, u32, _>::new(ctx)
             .then("prepare", |i: u32| async move { Ok(i) })
             .branches(|b| {
@@ -1076,20 +1197,20 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(WorkflowBuildError::DuplicateId(id)) if id == "count"
+            Err(WorkflowError::DuplicateTaskId(id)) if id == "count"
         ));
     }
 
     #[test]
     fn test_serializable_continuation() {
         use crate::context::WorkflowContext;
+        use crate::error::WorkflowError;
         use crate::registry::TaskRegistry;
-        use crate::workflow::ToRunnableError;
         use std::sync::Arc;
 
         // Build a workflow
         let codec = Arc::new(DummyCodec);
-        let ctx = WorkflowContext::new(codec.clone(), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", codec.clone(), Arc::new(()));
         let workflow = WorkflowBuilder::new(ctx)
             .then("step1", |i: u32| async move { Ok(i + 1) })
             .then("step2", |i: u32| async move { Ok(i * 2) })
@@ -1106,7 +1227,7 @@ mod tests {
         // Hydration fails without registry
         let empty_registry = TaskRegistry::new();
         let result = serializable.to_runnable(&empty_registry);
-        assert!(matches!(result, Err(ToRunnableError::TaskNotFound(id)) if id == "step1"));
+        assert!(matches!(result, Err(WorkflowError::TaskNotFound(id)) if id == "step1"));
 
         // Hydration succeeds with proper registry
         let mut registry = TaskRegistry::new();
@@ -1123,7 +1244,7 @@ mod tests {
         use crate::task::BranchOutputs;
         use std::sync::Arc;
 
-        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
         let workflow = WorkflowBuilder::new(ctx)
             .then("prepare", |i: u32| async move { Ok(i) })
             .branches(|b| {
@@ -1154,7 +1275,7 @@ mod tests {
         use std::sync::Arc;
 
         let codec = Arc::new(DummyCodec);
-        let ctx = WorkflowContext::new(codec, Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", codec, Arc::new(()));
 
         // Build with with_registry() - registry is auto-populated
         let workflow = WorkflowBuilder::new(ctx)
@@ -1171,7 +1292,7 @@ mod tests {
 
         // Can serialize
         let serializable = workflow.to_serializable();
-        assert_eq!(serializable.task_ids(), vec!["step1", "step2"]);
+        assert_eq!(serializable.continuation.task_ids(), vec!["step1", "step2"]);
 
         // Can hydrate using internal registry
         let hydrated = workflow.to_runnable(&serializable);
@@ -1193,7 +1314,7 @@ mod tests {
         registry.register_fn("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
 
         // Build workflow using existing registry and referencing pre-registered tasks
-        let ctx = WorkflowContext::new(codec.clone(), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", codec.clone(), Arc::new(()));
         let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
             .with_existing_registry(registry)
             .then_registered::<u32>("double")
@@ -1209,7 +1330,10 @@ mod tests {
 
         // Workflow structure should reference those tasks
         let serializable = workflow.to_serializable();
-        assert_eq!(serializable.task_ids(), vec!["double", "add_ten"]);
+        assert_eq!(
+            serializable.continuation.task_ids(),
+            vec!["double", "add_ten"]
+        );
 
         // Can hydrate using the same registry
         let hydrated = workflow.to_runnable(&serializable);
@@ -1234,7 +1358,7 @@ mod tests {
         );
 
         // Build workflow mixing pre-registered and inline tasks
-        let ctx = WorkflowContext::new(codec.clone(), Arc::new(()));
+        let ctx = WorkflowContext::new("test-workflow", codec.clone(), Arc::new(()));
         let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
             .with_existing_registry(registry)
             .then_registered::<u32>("preregistered") // Use pre-registered
@@ -1247,5 +1371,110 @@ mod tests {
         assert!(workflow.registry().contains("preregistered"));
         assert!(workflow.registry().contains("inline"));
         assert_eq!(workflow.registry().len(), 2);
+    }
+
+    #[test]
+    fn test_workflow_id_and_definition_hash() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("my-workflow-id", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Check workflow_id is set correctly
+        assert_eq!(workflow.workflow_id(), "my-workflow-id");
+
+        // Definition hash should be non-empty
+        assert!(!workflow.definition_hash().is_empty());
+
+        // Serializable state should contain the same id and hash
+        let state = workflow.to_serializable();
+        assert_eq!(state.workflow_id, "my-workflow-id");
+        assert_eq!(state.definition_hash, workflow.definition_hash());
+    }
+
+    #[test]
+    fn test_definition_hash_changes_with_structure() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+
+        // Build two workflows with different structures
+        let ctx1 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow1 = WorkflowBuilder::new(ctx1)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        let ctx2 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow2 = WorkflowBuilder::new(ctx2)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        assert_ne!(workflow1.definition_hash(), workflow2.definition_hash());
+    }
+
+    #[test]
+    fn test_definition_mismatch_error() {
+        use crate::context::WorkflowContext;
+        use crate::error::WorkflowError;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        // Create a state with wrong hash
+        let mut state = workflow.to_serializable();
+        state.definition_hash = "wrong-hash".to_string();
+
+        // to_runnable should fail with DefinitionMismatch
+        let result = workflow.to_runnable(&state);
+        assert!(matches!(
+            result,
+            Err(WorkflowError::DefinitionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_duplicate_id_tampering_detection() {
+        use crate::error::WorkflowError;
+        use crate::registry::TaskRegistry;
+        use crate::workflow::SerializableContinuation;
+        use std::sync::Arc;
+
+        let codec = Arc::new(DummyCodec);
+
+        // Create a registry with tasks
+        let mut registry = TaskRegistry::new();
+        registry.register_fn("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
+        registry.register_fn("step2", codec.clone(), |i: u32| async move { Ok(i * 2) });
+
+        // Manually construct a tampered continuation with duplicate IDs
+        let tampered = SerializableContinuation::Task {
+            id: "step1".to_string(),
+            next: Some(Box::new(SerializableContinuation::Task {
+                id: "step1".to_string(), // Duplicate!
+                next: None,
+            })),
+        };
+
+        // to_runnable should detect the tampering
+        let result = tampered.to_runnable(&registry);
+        assert!(matches!(
+            result,
+            Err(WorkflowError::DuplicateTaskId(id)) if id == "step1"
+        ));
     }
 }
