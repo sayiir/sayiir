@@ -62,3 +62,99 @@ Available serialization options in the Rust ecosystem that could be integrated:
 - prost / protobuf
 - avro-rs
 - rkyv - **Built-in via `rkyv` feature** (zero-copy deserialization framework)
+
+### Task Registry and Composability
+
+The `TaskRegistry` maps task IDs to their implementations, enabling workflow serialization and extensibility.
+
+**Registry as Code, Not Data**
+
+The registry contains closures/functions and cannot be serialized. Both serializing and deserializing sides must build the same registry from code. This is the standard pattern in workflow engines.
+
+```rust
+// Shared function - called on both sides
+fn build_registry(codec: Arc<MyCodec>) -> TaskRegistry {
+    let mut registry = TaskRegistry::new();
+    registry.register_fn("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
+    registry
+}
+
+// Serialization side
+let workflow = WorkflowBuilder::new(ctx)
+    .with_existing_registry(build_registry(codec.clone()))
+    .then_registered::<u32>("step1")
+    .build()?;
+let serialized = serde_json::to_string(&workflow.to_serializable())?;
+
+// Deserialization side (possibly different process)
+let registry = build_registry(codec.clone());
+let continuation = serde_json::from_str::<SerializableContinuation>(&serialized)?;
+let runnable = continuation.to_runnable(&registry)?;
+```
+
+**Registration API**
+
+Two approaches for registering tasks:
+
+1. **`register_fn`** - Convenience method for closures:
+   ```rust
+   registry.register_fn("double", codec, |i: u32| async move { Ok(i * 2) });
+   ```
+
+2. **`register`** - Unified API for `CoreTask` implementations (including `fn_task`-wrapped closures):
+   ```rust
+   use workflow_core::task::fn_task;
+
+   // Register a struct implementing CoreTask
+   registry.register("my_task", codec.clone(), MyTask::new());
+
+   // Register a closure via fn_task wrapper
+   registry.register("double", codec.clone(), fn_task(|i: u32| async move { Ok(i * 2) }));
+   ```
+
+**Layered Composition**
+
+Registries enable extension and composition of task libraries:
+
+```rust
+// Core library provides base activities
+pub fn core_registry(codec: Arc<C>) -> TaskRegistry {
+    TaskRegistry::with_codec(codec)
+        .register_fn("core::sleep", activities::sleep)
+        .register_fn("core::delay", activities::delay)
+        .register_fn("core::http_get", activities::http_get)
+        .register_fn("core::send_email", activities::send_email)
+        .build()
+}
+
+// Domain module extends with business logic
+pub fn payments_registry(codec: Arc<C>) -> TaskRegistry {
+    TaskRegistry::with_codec(codec)
+        .register_fn("core::sleep", activities::sleep)
+        .register_fn("core::delay", activities::delay)
+        .register_fn("core::http_get", activities::http_get)
+        .register_fn("core::send_email", activities::send_email)
+        .register_fn("payments::charge", charge_card)
+        .register_fn("payments::refund", refund)
+        .build()
+}
+
+// User composes workflow using all available activities
+let workflow = WorkflowBuilder::new(ctx)
+    .with_existing_registry(payments_registry(codec))
+    .then_registered::<Response>("core::http_get")
+    .then_registered::<PaymentResult>("payments::charge")
+    .then_registered::<()>("core::send_email")
+    .then("custom_logic", |r| async move { ... })  // inline custom
+    .build()?;
+```
+
+This enables:
+
+- **Core libraries** providing standard activities (sleep, HTTP, email, etc.)
+- **Domain modules** with business-specific tasks (payments, notifications)
+- **Plugin systems** via dynamically loaded registries
+- **Testing** by swapping real tasks with mocks via different registries
+- **Mixed composition** of pre-registered and inline custom tasks
+
+The registry becomes the extension point - like Temporal/Cadence's activity model but with compile-time type safety.

@@ -117,6 +117,49 @@ impl<C: Codec> BranchOutputs<C> {
 
 /// A core task is a task that can be run by the workflow runtime.
 ///
+/// Tasks can be defined either as closures (via `WorkflowBuilder::then`) or as
+/// structs implementing this trait directly. Struct-based tasks are useful for:
+/// - Reusable task logic across workflows
+/// - Tasks with configuration/state
+/// - Serializable workflows (tasks can be registered by ID)
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use workflow_core::task::CoreTask;
+/// use anyhow::Result;
+/// use std::pin::Pin;
+/// use std::future::Future;
+///
+/// /// A task that doubles its input.
+/// struct DoubleTask;
+///
+/// impl CoreTask for DoubleTask {
+///     type Input = u32;
+///     type Output = u32;
+///     type Future = Pin<Box<dyn Future<Output = Result<u32>> + Send>>;
+///
+///     fn run(&self, input: u32) -> Self::Future {
+///         Box::pin(async move { Ok(input * 2) })
+///     }
+/// }
+///
+/// /// A configurable task with state.
+/// struct MultiplyTask {
+///     factor: u32,
+/// }
+///
+/// impl CoreTask for MultiplyTask {
+///     type Input = u32;
+///     type Output = u32;
+///     type Future = Pin<Box<dyn Future<Output = Result<u32>> + Send>>;
+///
+///     fn run(&self, input: u32) -> Self::Future {
+///         let factor = self.factor;
+///         Box::pin(async move { Ok(input * factor) })
+///     }
+/// }
+/// ```
 pub trait CoreTask: Send + Sync {
     type Input;
     type Output;
@@ -124,6 +167,55 @@ pub trait CoreTask: Send + Sync {
 
     /// Run the task with the given input and return the output.
     fn run(&self, input: Self::Input) -> Self::Future;
+}
+
+/// Wrapper that enables closures to implement `CoreTask`.
+///
+/// Use the [`fn_task`] helper function to create instances with inferred types.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use workflow_core::task::fn_task;
+///
+/// // Both work with the same `register` method:
+/// registry.register("closure", codec.clone(), fn_task(|i: u32| async move { Ok(i * 2) }));
+/// registry.register("struct", codec.clone(), MyTask::new());
+/// ```
+pub struct FnTask<F, I, O, Fut>(F, PhantomData<fn(I) -> (O, Fut)>);
+
+impl<F, I, O, Fut> CoreTask for FnTask<F, I, O, Fut>
+where
+    F: Fn(I) -> Fut + Send + Sync,
+    I: Send,
+    O: Send,
+    Fut: Future<Output = Result<O>> + Send,
+{
+    type Input = I;
+    type Output = O;
+    type Future = Fut;
+
+    fn run(&self, input: I) -> Self::Future {
+        (self.0)(input)
+    }
+}
+
+/// Create a `FnTask` from a closure with inferred types.
+///
+/// This is the preferred way to wrap closures for use with the unified `register` API.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use workflow_core::task::fn_task;
+///
+/// registry.register("double", codec, fn_task(|i: u32| async move { Ok(i * 2) }));
+/// ```
+pub fn fn_task<F, I, O, Fut>(f: F) -> FnTask<F, I, O, Fut>
+where
+    F: Fn(I) -> Fut,
+{
+    FnTask(f, PhantomData)
 }
 
 /// A boxed core task that can be used to run a task without knowing the input and output types.
@@ -181,6 +273,25 @@ where
 {
     Box::new(UntypedTaskFnWrapper {
         func: Arc::new(func),
+        codec,
+        _phantom: std::marker::PhantomData,
+    })
+}
+
+/// Create a new untyped task from an Arc-wrapped function.
+///
+/// This variant accepts an already-Arc'd function, avoiding the need
+/// for the function to implement Clone.
+pub fn to_core_task_arc<F, I, O, Fut, C>(func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
+where
+    F: Fn(I) -> Fut + Send + Sync + 'static,
+    I: Send + 'static,
+    O: Send + 'static,
+    Fut: Future<Output = Result<O>> + Send + 'static,
+    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+{
+    Box::new(UntypedTaskFnWrapper {
+        func,
         codec,
         _phantom: std::marker::PhantomData,
     })
@@ -335,6 +446,27 @@ where
 {
     Box::new(HeterogeneousJoinTaskWrapper {
         func: Arc::new(func),
+        codec,
+        _phantom: PhantomData,
+    })
+}
+
+/// Create a join task from an Arc-wrapped function.
+///
+/// This variant accepts an already-Arc'd function, avoiding the need
+/// for the function to implement Clone.
+pub fn to_heterogeneous_join_task_arc<F, JoinOutput, Fut, C>(
+    func: Arc<F>,
+    codec: Arc<C>,
+) -> UntypedCoreTask
+where
+    F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+    JoinOutput: Send + 'static,
+    Fut: Future<Output = Result<JoinOutput>> + Send + 'static,
+    C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
+{
+    Box::new(HeterogeneousJoinTaskWrapper {
+        func,
         codec,
         _phantom: PhantomData,
     })

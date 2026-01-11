@@ -70,7 +70,6 @@ impl InProcessRunner {
     {
         Box::pin(async move {
             match continuation {
-                WorkflowContinuation::Done(bytes) => Ok(bytes.clone()),
                 WorkflowContinuation::Task { func, next, .. } => {
                     let output = func.run(input).await?;
                     match next {
