@@ -1,9 +1,9 @@
-use crate::primitives::TaskId;
 use chrono::{DateTime, Utc};
 
-/// Context to pass to a task when it is run.
+/// A context to pass to a task when it is run.
 ///
+#[derive(Debug, Clone)]
 pub struct TaskContext {
-    pub task_id: TaskId,
+    pub task_id: u64,
     pub created_at: DateTime<Utc>,
 }
