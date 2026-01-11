@@ -270,8 +270,7 @@ impl<C: Codec> RegistryBuilder<C> {
         Fut: Future<Output = Result<O>> + Send + 'static,
         C: sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
-        self.registry
-            .register_fn(id, Arc::clone(&self.codec), func);
+        self.registry.register_fn(id, Arc::clone(&self.codec), func);
         self
     }
 

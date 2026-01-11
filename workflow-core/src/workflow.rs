@@ -14,12 +14,17 @@ use std::sync::Arc;
 pub enum WorkflowBuildError {
     /// A duplicate task ID was found.
     DuplicateId(String),
+    /// A referenced task ID was not found in the registry.
+    TaskNotFound(String),
 }
 
 impl std::fmt::Display for WorkflowBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorkflowBuildError::DuplicateId(id) => write!(f, "Duplicate task id: '{}'", id),
+            WorkflowBuildError::TaskNotFound(id) => {
+                write!(f, "Task '{}' not found in registry", id)
+            }
         }
     }
 }
@@ -438,9 +443,9 @@ where
     /// Type safety is maintained through the `NewOutput` type parameter - ensure it
     /// matches the registered task's output type.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the task ID is not found in the registry.
+    /// Returns `WorkflowBuildError::TaskNotFound` if the task ID is not in the registry.
     ///
     /// # Example
     ///
@@ -450,13 +455,16 @@ where
     ///
     /// let workflow = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
-    ///     .then_registered::<u32>("double")
+    ///     .then_registered::<u32>("double")?
     ///     .build()?;
     /// ```
     pub fn then_registered<NewOutput>(
         self,
         id: &str,
-    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>
+    ) -> Result<
+        WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>,
+        WorkflowBuildError,
+    >
     where
         Output: Send + 'static,
         NewOutput: Send + 'static,
@@ -464,7 +472,7 @@ where
         let func = self
             .registry
             .get(id)
-            .unwrap_or_else(|| panic!("Task '{}' not found in registry", id));
+            .ok_or_else(|| WorkflowBuildError::TaskNotFound(id.to_string()))?;
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
@@ -474,12 +482,12 @@ where
 
         let continuation = self.continuation.append(new_task);
 
-        WorkflowBuilder {
+        Ok(WorkflowBuilder {
             continuation,
             context: self.context,
             registry: self.registry,
             _phantom: PhantomData,
-        }
+        })
     }
 }
 
@@ -749,34 +757,37 @@ where
 {
     /// Add a pre-registered branch task by ID.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the task ID is not found in the registry.
-    pub fn branch_registered(mut self, id: &str) -> Self
+    /// Returns `WorkflowBuildError::TaskNotFound` if the task ID is not in the registry.
+    pub fn branch_registered(mut self, id: &str) -> Result<Self, WorkflowBuildError>
     where
         Output: Send + 'static,
     {
         let task = self
             .registry
             .get(id)
-            .unwrap_or_else(|| panic!("Task '{}' not found in registry", id));
+            .ok_or_else(|| WorkflowBuildError::TaskNotFound(id.to_string()))?;
 
         self.branches.push(ErasedBranch {
             id: id.to_string(),
             task,
         });
-        self
+        Ok(self)
     }
 
     /// Join using a pre-registered join task by ID.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the task ID is not found in the registry.
+    /// Returns `WorkflowBuildError::TaskNotFound` if the task ID is not in the registry.
     pub fn join_registered<JoinOutput>(
         self,
         id: &str,
-    ) -> WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, TaskRegistry>
+    ) -> Result<
+        WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, TaskRegistry>,
+        WorkflowBuildError,
+    >
     where
         Output: Send + 'static,
         JoinOutput: Send + 'static,
@@ -784,7 +795,7 @@ where
         let join_task_fn = self
             .registry
             .get(id)
-            .unwrap_or_else(|| panic!("Task '{}' not found in registry", id));
+            .ok_or_else(|| WorkflowBuildError::TaskNotFound(id.to_string()))?;
 
         let branch_continuations: Vec<Arc<WorkflowContinuation>> = self
             .branches
@@ -811,12 +822,12 @@ where
 
         let continuation = self.continuation.append(fork_continuation);
 
-        WorkflowBuilder {
+        Ok(WorkflowBuilder {
             continuation,
             context: self.context,
             registry: self.registry,
             _phantom: PhantomData,
-        }
+        })
     }
 }
 
@@ -1186,7 +1197,9 @@ mod tests {
         let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
             .with_existing_registry(registry)
             .then_registered::<u32>("double")
+            .unwrap()
             .then_registered::<u32>("add_ten")
+            .unwrap()
             .build()
             .unwrap();
 
@@ -1225,6 +1238,7 @@ mod tests {
         let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
             .with_existing_registry(registry)
             .then_registered::<u32>("preregistered") // Use pre-registered
+            .unwrap()
             .then("inline", |i: u32| async move { Ok(i + 5) }) // Define inline
             .build()
             .unwrap();
