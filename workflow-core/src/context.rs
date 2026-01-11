@@ -8,6 +8,8 @@ use tokio::task_local;
 /// from within any task execution via the `sayiir_ctx!` macro.
 ///
 pub struct WorkflowContext<C, M> {
+    /// The unique workflow identifier.
+    pub workflow_id: String,
     /// The codec used for serialization/deserialization.
     pub codec: Arc<C>,
     /// Immutable metadata attached to the workflow.
@@ -17,6 +19,7 @@ pub struct WorkflowContext<C, M> {
 impl<C, M> Clone for WorkflowContext<C, M> {
     fn clone(&self) -> Self {
         Self {
+            workflow_id: self.workflow_id.clone(),
             codec: Arc::clone(&self.codec),
             metadata: Arc::clone(&self.metadata),
         }
@@ -25,8 +28,16 @@ impl<C, M> Clone for WorkflowContext<C, M> {
 
 impl<C, M> WorkflowContext<C, M> {
     /// Create a new workflow context.
-    pub fn new(codec: Arc<C>, metadata: Arc<M>) -> Self {
-        Self { codec, metadata }
+    pub fn new(workflow_id: impl Into<String>, codec: Arc<C>, metadata: Arc<M>) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            codec,
+            metadata,
+        }
+    }
+
+    pub fn workflow_id(&self) -> &str {
+        &self.workflow_id
     }
 
     pub fn codec(&self) -> Arc<C> {
@@ -63,7 +74,13 @@ impl ErasedContext {
             .clone()
             .downcast::<WorkflowContext<C, M>>()
             .ok()
-            .map(|arc| WorkflowContext::new(Arc::clone(&arc.codec), Arc::clone(&arc.metadata)))
+            .map(|arc| {
+                WorkflowContext::new(
+                    arc.workflow_id.clone(),
+                    Arc::clone(&arc.codec),
+                    Arc::clone(&arc.metadata),
+                )
+            })
     }
 }
 
