@@ -12,10 +12,10 @@
 //! ```rust,ignore
 //! // Shared function - called on both sides (serializer and deserializer)
 //! fn build_task_registry(codec: Arc<MyCodec>) -> TaskRegistry {
-//!     let mut registry = TaskRegistry::new();
-//!     registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
-//!     registry.register_fn("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
-//!     registry
+//!     TaskRegistry::with_codec(codec)
+//!         .register("double", |i: u32| async move { Ok(i * 2) })
+//!         .register("add_ten", |i: u32| async move { Ok(i + 10) })
+//!         .build()
 //! }
 //!
 //! // === Serialization side ===
@@ -76,20 +76,12 @@ impl TaskRegistry {
 
     /// Register a task using a closure.
     ///
-    /// This is a convenience method for registering simple async functions.
-    ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// registry.register_fn::<u32, u32, _, _, _>(
-    ///     "double",
-    ///     codec.clone(),
-    ///     |input| async move { Ok(input * 2) }
-    /// );
+    /// registry.register("double", codec.clone(), |input: u32| async move { Ok(input * 2) });
     /// ```
-    /// Register a task using a closure.
-    ///
-    pub fn register_fn<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
+    pub fn register<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
     where
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
@@ -97,13 +89,11 @@ impl TaskRegistry {
         Fut: Future<Output = Result<O>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
-        self.register_arc_fn(id, codec, Arc::new(func));
+        self.register_arc(id, codec, Arc::new(func));
     }
 
     /// Register a task using an Arc-wrapped closure.
-    ///
-    /// This is the internal implementation that works with pre-wrapped Arcs.
-    pub fn register_arc_fn<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
+    pub(crate) fn register_arc<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
     where
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
@@ -123,23 +113,50 @@ impl TaskRegistry {
         self.tasks.insert(id.to_string(), factory);
     }
 
-    /// Register a join task using a closure.
+    /// Register a struct implementing `CoreTask`.
     ///
-    /// The closure is wrapped in Arc internally, so Clone is not required.
-    pub fn register_join_fn<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// struct DoubleTask;
+    /// impl CoreTask for DoubleTask {
+    ///     type Input = u32;
+    ///     type Output = u32;
+    ///     // ...
+    /// }
+    ///
+    /// registry.register_task("double", codec.clone(), DoubleTask);
+    /// ```
+    pub fn register_task<T, C>(&mut self, id: &str, codec: Arc<C>, task: T)
+    where
+        T: CoreTask + Send + Sync + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        let task = Arc::new(task);
+        let factory = Box::new(move || -> UntypedCoreTask {
+            let task = Arc::clone(&task);
+            let codec = Arc::clone(&codec);
+            Box::new(TaskWrapper { task, codec })
+        });
+        self.tasks.insert(id.to_string(), factory);
+    }
+
+    /// Register a join task using a closure.
+    pub fn register_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
-        self.register_arc_join_fn(id, codec, Arc::new(func));
+        self.register_arc_join(id, codec, Arc::new(func));
     }
 
     /// Register a join task using an Arc-wrapped closure.
-    ///
-    /// This is the internal implementation that works with pre-wrapped Arcs.
-    pub fn register_arc_join_fn<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
+    pub(crate) fn register_arc_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
@@ -178,6 +195,82 @@ impl TaskRegistry {
     pub fn task_ids(&self) -> impl Iterator<Item = &str> {
         self.tasks.keys().map(|s| s.as_str())
     }
+
+    /// Create a builder with a codec for ergonomic task registration.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let registry = TaskRegistry::with_codec(codec)
+    ///     .register("double", |i: u32| async move { Ok(i * 2) })
+    ///     .register("add_ten", |i: u32| async move { Ok(i + 10) })
+    ///     .build();
+    /// ```
+    pub fn with_codec<C>(codec: Arc<C>) -> RegistryBuilder<C>
+    where
+        C: Codec,
+    {
+        RegistryBuilder {
+            codec,
+            registry: TaskRegistry::new(),
+        }
+    }
+}
+
+/// Builder for ergonomic task registration with a shared codec.
+///
+/// Created via [`TaskRegistry::with_codec`]. The codec is held internally
+/// and used for all registrations, avoiding repetitive `codec.clone()` calls.
+pub struct RegistryBuilder<C> {
+    codec: Arc<C>,
+    registry: TaskRegistry,
+}
+
+impl<C: Codec> RegistryBuilder<C> {
+    /// Register a task using a closure.
+    pub fn register<I, O, F, Fut>(mut self, id: &str, func: F) -> Self
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        self.registry.register(id, Arc::clone(&self.codec), func);
+        self
+    }
+
+    /// Register a struct implementing `CoreTask`.
+    pub fn register_task<T>(mut self, id: &str, task: T) -> Self
+    where
+        T: CoreTask + Send + Sync + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.registry
+            .register_task(id, Arc::clone(&self.codec), task);
+        self
+    }
+
+    /// Register a join task using a closure.
+    pub fn register_join<O, F, Fut>(mut self, id: &str, func: F) -> Self
+    where
+        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: sealed::EncodeValue<O> + Send + Sync + 'static,
+    {
+        self.registry
+            .register_join(id, Arc::clone(&self.codec), func);
+        self
+    }
+
+    /// Finish building and return the registry.
+    pub fn build(self) -> TaskRegistry {
+        self.registry
+    }
 }
 
 /// Wrapper for closure-based tasks.
@@ -210,6 +303,35 @@ where
     }
 }
 
+/// Wrapper for struct-based tasks implementing `CoreTask`.
+struct TaskWrapper<T, C> {
+    task: Arc<T>,
+    codec: Arc<C>,
+}
+
+impl<T, C> CoreTask for TaskWrapper<T, C>
+where
+    T: CoreTask + Send + Sync + 'static,
+    T::Input: Send + 'static,
+    T::Output: Send + 'static,
+    T::Future: Send + 'static,
+    C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output>,
+{
+    type Input = Bytes;
+    type Output = Bytes;
+    type Future = Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+
+    fn run(&self, input: Bytes) -> Self::Future {
+        let task = Arc::clone(&self.task);
+        let codec = Arc::clone(&self.codec);
+        Box::pin(async move {
+            let decoded_input = codec.decode::<T::Input>(input)?;
+            let output = task.run(decoded_input).await?;
+            codec.encode(&output)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,11 +352,11 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_register_fn() {
+    fn test_registry_register() {
         let mut registry = TaskRegistry::new();
         let codec = Arc::new(DummyCodec);
 
-        registry.register_fn("double", codec, |input: u32| async move { Ok(input * 2) });
+        registry.register("double", codec, |input: u32| async move { Ok(input * 2) });
 
         assert!(registry.contains("double"));
         assert_eq!(registry.len(), 1);
@@ -245,7 +367,7 @@ mod tests {
         let mut registry = TaskRegistry::new();
         let codec = Arc::new(DummyCodec);
 
-        registry.register_fn("double", codec, |input: u32| async move { Ok(input * 2) });
+        registry.register("double", codec, |input: u32| async move { Ok(input * 2) });
 
         let task = registry.get("double");
         assert!(task.is_some());
@@ -259,9 +381,9 @@ mod tests {
         let mut registry = TaskRegistry::new();
         let codec = Arc::new(DummyCodec);
 
-        registry.register_fn("task_a", codec.clone(), |i: u32| async move { Ok(i) });
-        registry.register_fn("task_b", codec.clone(), |i: u32| async move { Ok(i) });
-        registry.register_fn("task_c", codec, |i: u32| async move { Ok(i) });
+        registry.register("task_a", codec.clone(), |i: u32| async move { Ok(i) });
+        registry.register("task_b", codec.clone(), |i: u32| async move { Ok(i) });
+        registry.register("task_c", codec, |i: u32| async move { Ok(i) });
 
         let mut ids: Vec<_> = registry.task_ids().collect();
         ids.sort();

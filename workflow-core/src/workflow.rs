@@ -277,7 +277,7 @@ impl RegistryBehavior for TaskRegistry {
         Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
-        self.register_arc_fn(id, codec, Arc::clone(func));
+        self.register_arc(id, codec, Arc::clone(func));
     }
 
     fn maybe_register_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
@@ -287,7 +287,7 @@ impl RegistryBehavior for TaskRegistry {
         Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
-        self.register_arc_join_fn(id, codec, Arc::clone(func));
+        self.register_arc_join(id, codec, Arc::clone(func));
     }
 }
 
@@ -354,7 +354,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// // Shared function for building registry (called on both sides)
     /// fn build_registry(codec: Arc<MyCodec>) -> TaskRegistry {
     ///     let mut registry = TaskRegistry::new();
-    ///     registry.register_fn("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
+    ///     registry.register("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
     ///     registry
     /// }
     ///
@@ -446,7 +446,7 @@ where
     ///
     /// ```rust,ignore
     /// let mut registry = TaskRegistry::new();
-    /// registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
+    /// registry.register("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
     ///
     /// let workflow = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
@@ -1099,8 +1099,8 @@ mod tests {
 
         // Hydration succeeds with proper registry
         let mut registry = TaskRegistry::new();
-        registry.register_fn("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
-        registry.register_fn("step2", codec.clone(), |i: u32| async move { Ok(i * 2) });
+        registry.register("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
+        registry.register("step2", codec.clone(), |i: u32| async move { Ok(i * 2) });
 
         let hydrated = serializable.to_runnable(&registry);
         assert!(hydrated.is_ok());
@@ -1178,8 +1178,8 @@ mod tests {
 
         // Pre-register tasks in a registry
         let mut registry = TaskRegistry::new();
-        registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
-        registry.register_fn("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
+        registry.register("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
+        registry.register("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
 
         // Build workflow using existing registry and referencing pre-registered tasks
         let ctx = WorkflowContext::new(codec.clone(), Arc::new(()));
@@ -1214,7 +1214,7 @@ mod tests {
 
         // Pre-register one task
         let mut registry = TaskRegistry::new();
-        registry.register_fn(
+        registry.register(
             "preregistered",
             codec.clone(),
             |i: u32| async move { Ok(i * 2) },
