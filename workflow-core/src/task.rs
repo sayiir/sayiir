@@ -190,14 +190,14 @@ where
 type BoxedBranchFn<I, O> =
     Box<dyn Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O>> + Send>> + Send + Sync>;
 
-/// A named branch for use with `fork()` (internal).
+/// A branch for use with `fork()` (internal).
 pub(crate) struct Branch<I, O> {
-    name: String,
+    id: String,
     func: BoxedBranchFn<I, O>,
 }
 
-/// Create a named branch (internal helper used by ForkBuilder).
-pub(crate) fn branch<F, Fut, I, O>(name: &str, f: F) -> Branch<I, O>
+/// Create a branch (internal helper used by ForkBuilder).
+pub(crate) fn branch<F, Fut, I, O>(id: &str, f: F) -> Branch<I, O>
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<O>> + Send + 'static,
@@ -205,14 +205,14 @@ where
     O: 'static,
 {
     Branch {
-        name: name.to_string(),
+        id: id.to_string(),
         func: Box::new(move |i| Box::pin(f(i))),
     }
 }
 
 /// A type-erased branch for heterogeneous fork operations (internal).
 pub(crate) struct ErasedBranch {
-    pub(crate) name: String,
+    pub(crate) id: String,
     pub(crate) task: UntypedCoreTask,
 }
 
@@ -227,7 +227,7 @@ impl<I, O> Branch<I, O> {
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
     {
         ErasedBranch {
-            name: self.name.clone(),
+            id: self.id.clone(),
             task: branch_to_core_task(self, codec),
         }
     }

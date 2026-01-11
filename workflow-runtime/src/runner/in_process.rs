@@ -24,7 +24,7 @@ use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 /// let ctx = WorkflowContext::new(Arc::new(RkyvCodec), Arc::new(()));
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("test", |i: u32| async move { Ok(i + 1) })
-///     .build();
+///     .build()?;
 /// let runner = InProcessRunner::default();
 /// let status = runner.run(&workflow, 1).await?;
 /// # Ok(())
@@ -85,9 +85,9 @@ impl InProcessRunner {
                     let branch_handles: Vec<_> = branches
                         .iter()
                         .map(|branch| {
-                            // Extract the branch name from the Task continuation
-                            let name = match branch.as_ref() {
-                                WorkflowContinuation::Task { name, .. } => name.clone(),
+                            // Extract the branch id from the Task continuation
+                            let id = match branch.as_ref() {
+                                WorkflowContinuation::Task { id, .. } => id.clone(),
                                 _ => String::from("unnamed"),
                             };
                             let branch = Arc::clone(branch);
@@ -95,7 +95,7 @@ impl InProcessRunner {
                             tokio::task::spawn(async move {
                                 let result =
                                     Self::execute_continuation(&branch, branch_input).await?;
-                                Ok::<_, anyhow::Error>((name, result))
+                                Ok::<_, anyhow::Error>((id, result))
                             })
                         })
                         .collect();
