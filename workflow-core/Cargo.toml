@@ -14,3 +14,4 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }

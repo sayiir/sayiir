@@ -1,0 +1,270 @@
+//! Task registry for serializable workflows.
+//!
+//! The registry maps task IDs to their implementations, enabling workflow serialization.
+//! Only IDs and structure are serialized; implementations are looked up at runtime.
+//!
+//! # Registry as Code, Not Data
+//!
+//! The registry contains closures/functions and cannot be serialized itself.
+//! Both the serializing and deserializing sides must build the same registry from code.
+//! This is the standard pattern in workflow engines.
+//!
+//! ```rust,ignore
+//! // Shared function - called on both sides (serializer and deserializer)
+//! fn build_task_registry(codec: Arc<MyCodec>) -> TaskRegistry {
+//!     let mut registry = TaskRegistry::new();
+//!     registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
+//!     registry.register_fn("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
+//!     registry
+//! }
+//!
+//! // === Serialization side ===
+//! let registry = build_task_registry(codec.clone());
+//! let workflow = WorkflowBuilder::new(ctx)
+//!     .with_existing_registry(registry)
+//!     .then_registered::<u32>("double")
+//!     .then_registered::<u32>("add_ten")
+//!     .build()?;
+//! let serialized = serde_json::to_string(&workflow.to_serializable())?;
+//!
+//! // === Deserialization side (possibly different process) ===
+//! let registry = build_task_registry(codec.clone());  // Rebuild same registry
+//! let continuation: SerializableContinuation = serde_json::from_str(&serialized)?;
+//! let runnable = continuation.to_runnable(&registry)?;
+//! ```
+
+use crate::codec::{Codec, sealed};
+use crate::task::{BranchOutputs, CoreTask, UntypedCoreTask, to_heterogeneous_join_task_arc};
+use anyhow::Result;
+use bytes::Bytes;
+use std::collections::HashMap;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::sync::Arc;
+
+/// A factory function that creates an UntypedCoreTask.
+pub type TaskFactory = Box<dyn Fn() -> UntypedCoreTask + Send + Sync>;
+
+/// Registry for task implementations.
+///
+/// Maps task IDs to factory functions that create task instances.
+/// This enables workflow serialization: only IDs and structure are serialized,
+/// and implementations are looked up from the registry at runtime.
+///
+/// **Important**: The registry is code, not data. It contains closures and cannot
+/// be serialized. Both serialization and deserialization sides must construct
+/// the same registry by calling the same registration functions. See module docs
+/// for the recommended pattern.
+pub struct TaskRegistry {
+    tasks: HashMap<String, TaskFactory>,
+}
+
+impl Default for TaskRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TaskRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            tasks: HashMap::new(),
+        }
+    }
+
+    /// Register a task using a closure.
+    ///
+    /// This is a convenience method for registering simple async functions.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// registry.register_fn::<u32, u32, _, _, _>(
+    ///     "double",
+    ///     codec.clone(),
+    ///     |input| async move { Ok(input * 2) }
+    /// );
+    /// ```
+    /// Register a task using a closure.
+    ///
+    pub fn register_fn<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        self.register_arc_fn(id, codec, Arc::new(func));
+    }
+
+    /// Register a task using an Arc-wrapped closure.
+    ///
+    /// This is the internal implementation that works with pre-wrapped Arcs.
+    pub fn register_arc_fn<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        let factory = Box::new(move || -> UntypedCoreTask {
+            let func = Arc::clone(&func);
+            let codec = Arc::clone(&codec);
+            Box::new(FnTaskWrapper {
+                func,
+                codec,
+                _phantom: PhantomData,
+            })
+        });
+        self.tasks.insert(id.to_string(), factory);
+    }
+
+    /// Register a join task using a closure.
+    ///
+    /// The closure is wrapped in Arc internally, so Clone is not required.
+    pub fn register_join_fn<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
+    where
+        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
+    {
+        self.register_arc_join_fn(id, codec, Arc::new(func));
+    }
+
+    /// Register a join task using an Arc-wrapped closure.
+    ///
+    /// This is the internal implementation that works with pre-wrapped Arcs.
+    pub fn register_arc_join_fn<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
+    where
+        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
+    {
+        let factory = Box::new(move || -> UntypedCoreTask {
+            to_heterogeneous_join_task_arc(Arc::clone(&func), Arc::clone(&codec))
+        });
+        self.tasks.insert(id.to_string(), factory);
+    }
+
+    /// Get a task by ID, creating a new instance.
+    ///
+    /// Returns `None` if the task ID is not registered.
+    pub fn get(&self, id: &str) -> Option<UntypedCoreTask> {
+        self.tasks.get(id).map(|factory| factory())
+    }
+
+    /// Check if a task ID is registered.
+    pub fn contains(&self, id: &str) -> bool {
+        self.tasks.contains_key(id)
+    }
+
+    /// Get the number of registered tasks.
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Check if the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    /// Get an iterator over registered task IDs.
+    pub fn task_ids(&self) -> impl Iterator<Item = &str> {
+        self.tasks.keys().map(|s| s.as_str())
+    }
+}
+
+/// Wrapper for closure-based tasks.
+struct FnTaskWrapper<F, I, O, C> {
+    func: Arc<F>,
+    codec: Arc<C>,
+    _phantom: PhantomData<fn(I) -> O>,
+}
+
+impl<F, I, O, Fut, C> CoreTask for FnTaskWrapper<F, I, O, C>
+where
+    F: Fn(I) -> Fut + Send + Sync + 'static,
+    I: Send + 'static,
+    O: Send + 'static,
+    Fut: Future<Output = Result<O>> + Send + 'static,
+    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+{
+    type Input = Bytes;
+    type Output = Bytes;
+    type Future = Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+
+    fn run(&self, input: Bytes) -> Self::Future {
+        let func = Arc::clone(&self.func);
+        let codec = Arc::clone(&self.codec);
+        Box::pin(async move {
+            let decoded_input = codec.decode::<I>(input)?;
+            let output = func(decoded_input).await?;
+            codec.encode(&output)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{Decoder, Encoder};
+
+    struct DummyCodec;
+    impl Encoder for DummyCodec {}
+    impl Decoder for DummyCodec {}
+    impl sealed::EncodeValue<u32> for DummyCodec {
+        fn encode_value(&self, _: &u32) -> Result<Bytes> {
+            Ok(Bytes::from_static(b"encoded"))
+        }
+    }
+    impl sealed::DecodeValue<u32> for DummyCodec {
+        fn decode_value(&self, _: Bytes) -> Result<u32> {
+            Ok(42)
+        }
+    }
+
+    #[test]
+    fn test_registry_register_fn() {
+        let mut registry = TaskRegistry::new();
+        let codec = Arc::new(DummyCodec);
+
+        registry.register_fn("double", codec, |input: u32| async move { Ok(input * 2) });
+
+        assert!(registry.contains("double"));
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_registry_get() {
+        let mut registry = TaskRegistry::new();
+        let codec = Arc::new(DummyCodec);
+
+        registry.register_fn("double", codec, |input: u32| async move { Ok(input * 2) });
+
+        let task = registry.get("double");
+        assert!(task.is_some());
+
+        let missing = registry.get("nonexistent");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_registry_task_ids() {
+        let mut registry = TaskRegistry::new();
+        let codec = Arc::new(DummyCodec);
+
+        registry.register_fn("task_a", codec.clone(), |i: u32| async move { Ok(i) });
+        registry.register_fn("task_b", codec.clone(), |i: u32| async move { Ok(i) });
+        registry.register_fn("task_c", codec, |i: u32| async move { Ok(i) });
+
+        let mut ids: Vec<_> = registry.task_ids().collect();
+        ids.sort();
+        assert_eq!(ids, vec!["task_a", "task_b", "task_c"]);
+    }
+}

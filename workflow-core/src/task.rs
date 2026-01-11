@@ -229,6 +229,25 @@ where
     })
 }
 
+/// Create a new untyped task from an Arc-wrapped function.
+///
+/// This variant accepts an already-Arc'd function, avoiding the need
+/// for the function to implement Clone.
+pub fn to_core_task_arc<F, I, O, Fut, C>(func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
+where
+    F: Fn(I) -> Fut + Send + Sync + 'static,
+    I: Send + 'static,
+    O: Send + 'static,
+    Fut: Future<Output = Result<O>> + Send + 'static,
+    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+{
+    Box::new(UntypedTaskFnWrapper {
+        func,
+        codec,
+        _phantom: std::marker::PhantomData,
+    })
+}
+
 /// A boxed async function for use in fork branches (internal).
 type BoxedBranchFn<I, O> =
     Box<dyn Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O>> + Send>> + Send + Sync>;
@@ -378,6 +397,27 @@ where
 {
     Box::new(HeterogeneousJoinTaskWrapper {
         func: Arc::new(func),
+        codec,
+        _phantom: PhantomData,
+    })
+}
+
+/// Create a join task from an Arc-wrapped function.
+///
+/// This variant accepts an already-Arc'd function, avoiding the need
+/// for the function to implement Clone.
+pub fn to_heterogeneous_join_task_arc<F, JoinOutput, Fut, C>(
+    func: Arc<F>,
+    codec: Arc<C>,
+) -> UntypedCoreTask
+where
+    F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+    JoinOutput: Send + 'static,
+    Fut: Future<Output = Result<JoinOutput>> + Send + 'static,
+    C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
+{
+    Box::new(HeterogeneousJoinTaskWrapper {
+        func,
         codec,
         _phantom: PhantomData,
     })
