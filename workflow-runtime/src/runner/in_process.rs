@@ -141,34 +141,4 @@ impl InProcessRunner {
 
         Ok(Bytes::from(buffer))
     }
-
-    /// Deserialize branch results from the format produced by `serialize_branch_results`.
-    ///
-    /// This is a helper for join tasks that need to deserialize the fork results.
-    pub fn deserialize_branch_results(bytes: Bytes) -> anyhow::Result<Vec<Bytes>> {
-        use std::io::Read;
-
-        let mut reader = bytes.as_ref();
-        let mut results = Vec::new();
-
-        // Read number of branches
-        let mut branch_count_bytes = [0u8; 4];
-        reader.read_exact(&mut branch_count_bytes)?;
-        let branch_count = u32::from_le_bytes(branch_count_bytes) as usize;
-
-        // Read each branch result
-        for _ in 0..branch_count {
-            // Read length
-            let mut length_bytes = [0u8; 4];
-            reader.read_exact(&mut length_bytes)?;
-            let length = u32::from_le_bytes(length_bytes) as usize;
-
-            // Read data
-            let mut data = vec![0u8; length];
-            reader.read_exact(&mut data)?;
-            results.push(Bytes::from(data));
-        }
-
-        Ok(results)
-    }
 }

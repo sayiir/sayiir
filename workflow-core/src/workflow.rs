@@ -1,7 +1,7 @@
 use crate::codec::Codec;
 use crate::codec::sealed;
 use crate::context::WorkflowContext;
-use crate::task::{UntypedCoreTask, to_core_task};
+use crate::task::{branch_to_core_task, to_core_task, to_typed_join_task, Branch, UntypedCoreTask};
 use bytes::Bytes;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -29,10 +29,17 @@ pub enum WorkflowStatus {
     Failed(anyhow::Error),
 }
 
-pub struct WorkflowBuilder<C, Input, Output, M = ()> {
+/// Marker type indicating the workflow is in sequential (normal) state.
+pub struct Sequential;
+
+/// Marker type indicating the workflow is in a forked state awaiting join.
+/// The type parameter tracks the output type of each branch.
+pub struct Forked<BranchOutput>(PhantomData<BranchOutput>);
+
+pub struct WorkflowBuilder<C, Input, Output, M = (), State = Sequential> {
     context: Option<WorkflowContext<C, M>>,
     continuation: Option<WorkflowContinuation>,
-    _phantom: PhantomData<(Input, Output)>,
+    _phantom: PhantomData<(Input, Output, State)>,
 }
 
 /// A built workflow that can be executed.
@@ -42,7 +49,8 @@ pub struct Workflow<C, Input, M = ()> {
     _phantom: PhantomData<Input>,
 }
 
-impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
+/// Implementation for WorkflowBuilder in Sequential state (normal workflow building).
+impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, Sequential> {
     /// Create a new workflow builder with a context object.
     ///
     /// The context contains both the codec and metadata that will be available
@@ -59,13 +67,18 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
         }
     }
 
-    pub fn then<F, Fut>(self, name: &str, func: F) -> Self
+    /// Add a sequential task to the workflow.
+    pub fn then<F, Fut, NewOutput>(
+        self,
+        name: &str,
+        func: F,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, Sequential>
     where
-        F: Fn(Input) -> Fut + Send + Sync + 'static,
-        Input: Send + 'static,
+        F: Fn(Output) -> Fut + Send + Sync + 'static,
         Output: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<Output>> + Send + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Output>,
+        NewOutput: Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<NewOutput>> + Send + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput>,
     {
         let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
         let task = to_core_task(func, codec);
@@ -84,7 +97,7 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
             None => Some(new_task),
         };
 
-        Self {
+        WorkflowBuilder {
             continuation,
             context: self.context,
             _phantom: PhantomData,
@@ -94,42 +107,48 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
     /// Fork the workflow into multiple parallel branches.
     ///
     /// Each branch receives the same input (the current workflow's output) and executes in parallel.
-    /// After all branches complete, their results are collected and can be joined using `join()`.
+    /// After all branches complete, use `join()` to combine the results.
+    ///
+    /// # Type Safety
+    ///
+    /// After calling `fork`, you must call `join` before you can call `then` or `build`.
+    /// The `join` function receives `Vec<BranchOutput>` with full type safety.
     ///
     /// # Example
     ///
     /// ```rust,ignore
+    /// use workflow_core::task::branch;
+    ///
     /// workflow
     ///     .then("prepare", |input| async { Ok(input) })
     ///     .fork(vec![
-    ///         ("branch1", |i: u32| async move { Ok(i * 2) }),
-    ///         ("branch2", |i: u32| async move { Ok(i * 3) }),
+    ///         branch("double", |i: u32| async move { Ok(i * 2) }),
+    ///         branch("triple", |i: u32| async move { Ok(i * 3) }),
+    ///         branch("square", |i: u32| async move { Ok(i * i) }),
     ///     ])
-    ///     .join("combine", |results: Vec<Bytes>| async move {
-    ///         // Process results from all branches
-    ///         Ok(())
+    ///     .join("combine", |results: Vec<u32>| async move {
+    ///         Ok(results.into_iter().sum::<u32>())
     ///     })
     /// ```
-    pub fn fork<F, Fut, BranchOutput>(
+    pub fn fork<BranchOutput>(
         self,
-        branches: Vec<(&str, F)>,
-    ) -> WorkflowBuilder<C, Input, Output, M>
+        branches: Vec<Branch<Output, BranchOutput>>,
+    ) -> WorkflowBuilder<C, Input, BranchOutput, M, Forked<BranchOutput>>
     where
-        F: Fn(Input) -> Fut + Send + Sync + 'static,
-        Input: Send + 'static,
+        Output: Send + 'static,
         BranchOutput: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<BranchOutput>> + Send + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<BranchOutput>,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<BranchOutput>,
     {
         let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
 
         // Create a continuation for each branch and wrap in Arc for parallel execution
         let branch_continuations: Vec<Arc<WorkflowContinuation>> = branches
             .into_iter()
-            .map(|(name, func)| {
-                let task = to_core_task(func, Arc::clone(&codec));
+            .map(|b| {
+                let name = b.name.clone();
+                let task = branch_to_core_task(b, Arc::clone(&codec));
                 Arc::new(WorkflowContinuation::Task {
-                    name: name.to_string(),
+                    name,
                     func: task,
                     next: None,
                 })
@@ -149,106 +168,26 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
             None => Some(fork_continuation),
         };
 
-        Self {
+        WorkflowBuilder {
             continuation,
             context: self.context,
             _phantom: PhantomData,
-        }
-    }
-
-    /// Join the results from a fork operation.
-    ///
-    /// The join function receives `Bytes` containing the serialized results from all branches
-    /// in a length-prefixed format. Use `workflow_runtime::runner::in_process::InProcessRunner::deserialize_branch_results()`
-    /// to deserialize them into `Vec<Bytes>`.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use workflow_runtime::runner::in_process::InProcessRunner;
-    ///
-    /// workflow
-    ///     .fork(vec![...])
-    ///     .join("combine", |serialized_results: Bytes| async move {
-    ///         let branch_results = InProcessRunner::deserialize_branch_results(serialized_results)?;
-    ///         // Process branch_results: Vec<Bytes>
-    ///         Ok(())
-    ///     })
-    /// ```
-    pub fn join<F, Fut>(self, name: &str, func: F) -> Self
-    where
-        F: Fn(Bytes) -> Fut + Send + Sync + 'static,
-        Output: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<Output>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<Output>,
-    {
-        let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
-        let task = crate::task::to_join_task(func, codec);
-
-        let join_task = WorkflowContinuation::Task {
-            name: name.to_string(),
-            func: task,
-            next: None,
-        };
-
-        // Find the fork continuation and set its join field
-        let continuation = match self.continuation {
-            Some(mut existing) => {
-                Self::set_join_on_fork(&mut existing, join_task);
-                Some(existing)
-            }
-            None => {
-                // No fork found, create a fork with this as join (edge case)
-                Some(WorkflowContinuation::Fork {
-                    branches: Box::new([]) as Box<[Arc<WorkflowContinuation>]>,
-                    join: Some(Box::new(join_task)),
-                })
-            }
-        };
-
-        Self {
-            continuation,
-            context: self.context,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Set the join continuation on a fork.
-    fn set_join_on_fork(continuation: &mut WorkflowContinuation, join_task: WorkflowContinuation) {
-        match continuation {
-            WorkflowContinuation::Fork { join, .. } => {
-                *join = Some(Box::new(join_task));
-            }
-            WorkflowContinuation::Task { next, .. } => {
-                if let Some(next_box) = next {
-                    Self::set_join_on_fork(next_box, join_task);
-                }
-            }
-            WorkflowContinuation::Done(_) => {
-                // Can't set join on Done, replace with fork
-                *continuation = WorkflowContinuation::Fork {
-                    branches: Box::new([]) as Box<[Arc<WorkflowContinuation>]>,
-                    join: Some(Box::new(join_task)),
-                };
-            }
         }
     }
 
     /// Append a new task to the end of the continuation chain.
     fn append_to_chain(continuation: &mut WorkflowContinuation, new_task: WorkflowContinuation) {
         match continuation {
-            WorkflowContinuation::Task { next, .. } => {
-                match next {
-                    Some(next_box) => {
-                        // Recursively find the end of the chain
-                        Self::append_to_chain(next_box, new_task);
-                    }
-                    None => {
-                        // This is the last task, append the new task here
-                        *next = Some(Box::new(new_task));
-                    }
+            WorkflowContinuation::Task { next, .. } => match next {
+                Some(next_box) => {
+                    // Recursively find the end of the chain
+                    Self::append_to_chain(next_box, new_task);
                 }
-            }
+                None => {
+                    // This is the last task, append the new task here
+                    *next = Some(Box::new(new_task));
+                }
+            },
             WorkflowContinuation::Done(_) => {
                 // Replace Done with the new task
                 *continuation = new_task;
@@ -292,6 +231,91 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
                 .context
                 .expect("Context must be set when using WorkflowBuilder::new"),
             _phantom: PhantomData,
+        }
+    }
+}
+
+/// Implementation for WorkflowBuilder in Forked state (after fork, before join).
+impl<C, Input, BranchOutput, M> WorkflowBuilder<C, Input, BranchOutput, M, Forked<BranchOutput>> {
+    /// Join the results from a fork operation with full type safety.
+    ///
+    /// The join function receives `Vec<BranchOutput>` - a typed vector containing
+    /// the deserialized results from all branches.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// workflow
+    ///     .fork(vec![
+    ///         ("double", |i: i32| async move { Ok(i * 2) }),
+    ///         ("triple", |i: i32| async move { Ok(i * 3) }),
+    ///     ])
+    ///     .join("sum", |results: Vec<i32>| async move {
+    ///         // results is Vec<i32>, fully typed!
+    ///         Ok(results.into_iter().sum::<i32>())
+    ///     })
+    /// ```
+    pub fn join<F, Fut, JoinOutput>(
+        self,
+        name: &str,
+        func: F,
+    ) -> WorkflowBuilder<C, Input, JoinOutput, M, Sequential>
+    where
+        F: Fn(Vec<BranchOutput>) -> Fut + Send + Sync + 'static,
+        BranchOutput: Send + 'static,
+        JoinOutput: Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<JoinOutput>> + Send + 'static,
+        C: Codec + sealed::DecodeValue<BranchOutput> + sealed::EncodeValue<JoinOutput>,
+    {
+        let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
+        let task = to_typed_join_task(func, codec);
+
+        let join_task = WorkflowContinuation::Task {
+            name: name.to_string(),
+            func: task,
+            next: None,
+        };
+
+        // Find the fork continuation and set its join field
+        let continuation = match self.continuation {
+            Some(mut existing) => {
+                Self::set_join_on_fork(&mut existing, join_task);
+                Some(existing)
+            }
+            None => {
+                // No fork found, create a fork with this as join (edge case)
+                Some(WorkflowContinuation::Fork {
+                    branches: Box::new([]) as Box<[Arc<WorkflowContinuation>]>,
+                    join: Some(Box::new(join_task)),
+                })
+            }
+        };
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the join continuation on a fork.
+    fn set_join_on_fork(continuation: &mut WorkflowContinuation, join_task: WorkflowContinuation) {
+        match continuation {
+            WorkflowContinuation::Fork { join, .. } => {
+                *join = Some(Box::new(join_task));
+            }
+            WorkflowContinuation::Task { next, .. } => {
+                if let Some(next_box) = next {
+                    Self::set_join_on_fork(next_box, join_task);
+                }
+            }
+            WorkflowContinuation::Done(_) => {
+                // Can't set join on Done, replace with fork
+                *continuation = WorkflowContinuation::Fork {
+                    branches: Box::new([]) as Box<[Arc<WorkflowContinuation>]>,
+                    join: Some(Box::new(join_task)),
+                };
+            }
         }
     }
 }
@@ -344,10 +368,11 @@ mod tests {
     #[test]
     fn test_workflow_build() {
         use crate::context::WorkflowContext;
+        use crate::workflow::Workflow;
         use std::sync::Arc;
 
         let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
-        let workflow = WorkflowBuilder::new(ctx)
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
             .then("test", |i: u32| async move { Ok(i + 1) })
             .build();
 
@@ -359,10 +384,11 @@ mod tests {
     #[test]
     fn test_workflow_with_metadata() {
         use crate::context::WorkflowContext;
+        use crate::workflow::Workflow;
         use std::sync::Arc;
 
         let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new("test_metadata"));
-        let workflow = WorkflowBuilder::new(ctx)
+        let workflow: Workflow<DummyCodec, u32, &str> = WorkflowBuilder::new(ctx)
             .then("test", |i: u32| async move { Ok(i + 1) })
             .build();
 
@@ -372,10 +398,11 @@ mod tests {
     #[test]
     fn test_task_order() {
         use crate::context::WorkflowContext;
+        use crate::workflow::Workflow;
         use std::sync::Arc;
 
         let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
-        let workflow = WorkflowBuilder::new(ctx)
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
             .then("first", |i: u32| async move { Ok(i + 1) })
             .then("second", |i: u32| async move { Ok(i + 2) })
             .then("third", |i: u32| async move { Ok(i + 3) })
@@ -401,5 +428,32 @@ mod tests {
 
         // Tasks should execute in the order they were added
         assert_eq!(task_names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn test_typed_fork_join_compiles() {
+        use crate::context::WorkflowContext;
+        use crate::task::branch;
+        use crate::workflow::Workflow;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        // This test verifies that the typed fork-join API compiles correctly.
+        // Different closures can now be used in the same fork thanks to the branch helper.
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .then("prepare", |i: u32| async move { Ok(i) })
+            .fork(vec![
+                branch("double", |i: u32| async move { Ok(i * 2) }),
+                branch("triple", |i: u32| async move { Ok(i * 3) }),
+                branch("square", |i: u32| async move { Ok(i * i) }),
+            ])
+            .join("sum", |results: Vec<u32>| async move {
+                // results is Vec<u32>, fully typed!
+                Ok(results.into_iter().sum::<u32>())
+            })
+            .then("final", |sum: u32| async move { Ok(sum + 1) })
+            .build();
+
+        let _workflow_ref = &workflow;
     }
 }
