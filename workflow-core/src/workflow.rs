@@ -15,7 +15,7 @@ pub enum WorkflowContinuation {
         next: Option<Box<WorkflowContinuation>>,
     },
     Fork {
-        branches: Box<[WorkflowContinuation]>,
+        branches: Box<[Arc<WorkflowContinuation>]>,
         join: Option<Box<WorkflowContinuation>>,
     },
 }
@@ -88,6 +88,149 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
             continuation,
             context: self.context,
             _phantom: PhantomData,
+        }
+    }
+
+    /// Fork the workflow into multiple parallel branches.
+    ///
+    /// Each branch receives the same input (the current workflow's output) and executes in parallel.
+    /// After all branches complete, their results are collected and can be joined using `join()`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// workflow
+    ///     .then("prepare", |input| async { Ok(input) })
+    ///     .fork(vec![
+    ///         ("branch1", |i: u32| async move { Ok(i * 2) }),
+    ///         ("branch2", |i: u32| async move { Ok(i * 3) }),
+    ///     ])
+    ///     .join("combine", |results: Vec<Bytes>| async move {
+    ///         // Process results from all branches
+    ///         Ok(())
+    ///     })
+    /// ```
+    pub fn fork<F, Fut, BranchOutput>(
+        self,
+        branches: Vec<(&str, F)>,
+    ) -> WorkflowBuilder<C, Input, Output, M>
+    where
+        F: Fn(Input) -> Fut + Send + Sync + 'static,
+        Input: Send + 'static,
+        BranchOutput: Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<BranchOutput>> + Send + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<BranchOutput>,
+    {
+        let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
+
+        // Create a continuation for each branch and wrap in Arc for parallel execution
+        let branch_continuations: Vec<Arc<WorkflowContinuation>> = branches
+            .into_iter()
+            .map(|(name, func)| {
+                let task = to_core_task(func, Arc::clone(&codec));
+                Arc::new(WorkflowContinuation::Task {
+                    name: name.to_string(),
+                    func: task,
+                    next: None,
+                })
+            })
+            .collect();
+
+        let fork_continuation = WorkflowContinuation::Fork {
+            branches: branch_continuations.into_boxed_slice(),
+            join: None,
+        };
+
+        let continuation = match self.continuation {
+            Some(mut existing) => {
+                Self::append_to_chain(&mut existing, fork_continuation);
+                Some(existing)
+            }
+            None => Some(fork_continuation),
+        };
+
+        Self {
+            continuation,
+            context: self.context,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Join the results from a fork operation.
+    ///
+    /// The join function receives `Bytes` containing the serialized results from all branches
+    /// in a length-prefixed format. Use `workflow_runtime::runner::in_process::InProcessRunner::deserialize_branch_results()`
+    /// to deserialize them into `Vec<Bytes>`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use workflow_runtime::runner::in_process::InProcessRunner;
+    ///
+    /// workflow
+    ///     .fork(vec![...])
+    ///     .join("combine", |serialized_results: Bytes| async move {
+    ///         let branch_results = InProcessRunner::deserialize_branch_results(serialized_results)?;
+    ///         // Process branch_results: Vec<Bytes>
+    ///         Ok(())
+    ///     })
+    /// ```
+    pub fn join<F, Fut>(self, name: &str, func: F) -> Self
+    where
+        F: Fn(Bytes) -> Fut + Send + Sync + 'static,
+        Output: Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<Output>> + Send + 'static,
+        C: Codec + sealed::EncodeValue<Output>,
+    {
+        let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
+        let task = crate::task::to_join_task(func, codec);
+
+        let join_task = WorkflowContinuation::Task {
+            name: name.to_string(),
+            func: task,
+            next: None,
+        };
+
+        // Find the fork continuation and set its join field
+        let continuation = match self.continuation {
+            Some(mut existing) => {
+                Self::set_join_on_fork(&mut existing, join_task);
+                Some(existing)
+            }
+            None => {
+                // No fork found, create a fork with this as join (edge case)
+                Some(WorkflowContinuation::Fork {
+                    branches: Box::new([]) as Box<[Arc<WorkflowContinuation>]>,
+                    join: Some(Box::new(join_task)),
+                })
+            }
+        };
+
+        Self {
+            continuation,
+            context: self.context,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the join continuation on a fork.
+    fn set_join_on_fork(continuation: &mut WorkflowContinuation, join_task: WorkflowContinuation) {
+        match continuation {
+            WorkflowContinuation::Fork { join, .. } => {
+                *join = Some(Box::new(join_task));
+            }
+            WorkflowContinuation::Task { next, .. } => {
+                if let Some(next_box) = next {
+                    Self::set_join_on_fork(next_box, join_task);
+                }
+            }
+            WorkflowContinuation::Done(_) => {
+                // Can't set join on Done, replace with fork
+                *continuation = WorkflowContinuation::Fork {
+                    branches: Box::new([]) as Box<[Arc<WorkflowContinuation>]>,
+                    join: Some(Box::new(join_task)),
+                };
+            }
         }
     }
 
