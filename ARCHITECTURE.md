@@ -75,7 +75,7 @@ The registry contains closures/functions and cannot be serialized. Both serializ
 // Shared function - called on both sides
 fn build_registry(codec: Arc<MyCodec>) -> TaskRegistry {
     let mut registry = TaskRegistry::new();
-    registry.register("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
+    registry.register_fn("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
     registry
 }
 
@@ -92,6 +92,26 @@ let continuation = serde_json::from_str::<SerializableContinuation>(&serialized)
 let runnable = continuation.to_runnable(&registry)?;
 ```
 
+**Registration API**
+
+Two approaches for registering tasks:
+
+1. **`register_fn`** - Convenience method for closures:
+   ```rust
+   registry.register_fn("double", codec, |i: u32| async move { Ok(i * 2) });
+   ```
+
+2. **`register`** - Unified API for `CoreTask` implementations (including `fn_task`-wrapped closures):
+   ```rust
+   use workflow_core::task::fn_task;
+
+   // Register a struct implementing CoreTask
+   registry.register("my_task", codec.clone(), MyTask::new());
+
+   // Register a closure via fn_task wrapper
+   registry.register("double", codec.clone(), fn_task(|i: u32| async move { Ok(i * 2) }));
+   ```
+
 **Layered Composition**
 
 Registries enable extension and composition of task libraries:
@@ -100,22 +120,22 @@ Registries enable extension and composition of task libraries:
 // Core library provides base activities
 pub fn core_registry(codec: Arc<C>) -> TaskRegistry {
     TaskRegistry::with_codec(codec)
-        .register("core::sleep", activities::sleep)
-        .register("core::delay", activities::delay)
-        .register("core::http_get", activities::http_get)
-        .register("core::send_email", activities::send_email)
+        .register_fn("core::sleep", activities::sleep)
+        .register_fn("core::delay", activities::delay)
+        .register_fn("core::http_get", activities::http_get)
+        .register_fn("core::send_email", activities::send_email)
         .build()
 }
 
 // Domain module extends with business logic
 pub fn payments_registry(codec: Arc<C>) -> TaskRegistry {
     TaskRegistry::with_codec(codec)
-        .register("core::sleep", activities::sleep)
-        .register("core::delay", activities::delay)
-        .register("core::http_get", activities::http_get)
-        .register("core::send_email", activities::send_email)
-        .register("payments::charge", charge_card)
-        .register("payments::refund", refund)
+        .register_fn("core::sleep", activities::sleep)
+        .register_fn("core::delay", activities::delay)
+        .register_fn("core::http_get", activities::http_get)
+        .register_fn("core::send_email", activities::send_email)
+        .register_fn("payments::charge", charge_card)
+        .register_fn("payments::refund", refund)
         .build()
 }
 

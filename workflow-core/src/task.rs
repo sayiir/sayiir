@@ -169,6 +169,55 @@ pub trait CoreTask: Send + Sync {
     fn run(&self, input: Self::Input) -> Self::Future;
 }
 
+/// Wrapper that enables closures to implement `CoreTask`.
+///
+/// Use the [`fn_task`] helper function to create instances with inferred types.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use workflow_core::task::fn_task;
+///
+/// // Both work with the same `register` method:
+/// registry.register("closure", codec.clone(), fn_task(|i: u32| async move { Ok(i * 2) }));
+/// registry.register("struct", codec.clone(), MyTask::new());
+/// ```
+pub struct FnTask<F, I, O, Fut>(F, PhantomData<fn(I) -> (O, Fut)>);
+
+impl<F, I, O, Fut> CoreTask for FnTask<F, I, O, Fut>
+where
+    F: Fn(I) -> Fut + Send + Sync,
+    I: Send,
+    O: Send,
+    Fut: Future<Output = Result<O>> + Send,
+{
+    type Input = I;
+    type Output = O;
+    type Future = Fut;
+
+    fn run(&self, input: I) -> Self::Future {
+        (self.0)(input)
+    }
+}
+
+/// Create a `FnTask` from a closure with inferred types.
+///
+/// This is the preferred way to wrap closures for use with the unified `register` API.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use workflow_core::task::fn_task;
+///
+/// registry.register("double", codec, fn_task(|i: u32| async move { Ok(i * 2) }));
+/// ```
+pub fn fn_task<F, I, O, Fut>(f: F) -> FnTask<F, I, O, Fut>
+where
+    F: Fn(I) -> Fut,
+{
+    FnTask(f, PhantomData)
+}
+
 /// A boxed core task that can be used to run a task without knowing the input and output types.
 pub type UntypedCoreTask = Box<
     dyn CoreTask<
