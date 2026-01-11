@@ -70,14 +70,58 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M> {
         let codec = Arc::clone(&self.context.as_ref().expect("Context must be set").codec);
         let task = to_core_task(func, codec);
 
+        let new_task = WorkflowContinuation::Task {
+            name: name.to_string(),
+            func: task,
+            next: None,
+        };
+
+        let continuation = match self.continuation {
+            Some(mut existing) => {
+                Self::append_to_chain(&mut existing, new_task);
+                Some(existing)
+            }
+            None => Some(new_task),
+        };
+
         Self {
-            continuation: Some(WorkflowContinuation::Task {
-                name: name.to_string(),
-                func: task,
-                next: self.continuation.map(Box::new),
-            }),
+            continuation,
             context: self.context,
             _phantom: PhantomData,
+        }
+    }
+
+    /// Append a new task to the end of the continuation chain.
+    fn append_to_chain(continuation: &mut WorkflowContinuation, new_task: WorkflowContinuation) {
+        match continuation {
+            WorkflowContinuation::Task { next, .. } => {
+                match next {
+                    Some(next_box) => {
+                        // Recursively find the end of the chain
+                        Self::append_to_chain(next_box, new_task);
+                    }
+                    None => {
+                        // This is the last task, append the new task here
+                        *next = Some(Box::new(new_task));
+                    }
+                }
+            }
+            WorkflowContinuation::Done(_) => {
+                // Replace Done with the new task
+                *continuation = new_task;
+            }
+            WorkflowContinuation::Fork { join, .. } => {
+                // If there's a join continuation, append to it
+                // Otherwise, replace the fork with the new task
+                match join {
+                    Some(join_box) => {
+                        Self::append_to_chain(join_box, new_task);
+                    }
+                    None => {
+                        *continuation = new_task;
+                    }
+                }
+            }
         }
     }
 
@@ -180,5 +224,39 @@ mod tests {
             .build();
 
         assert_eq!(**workflow.metadata(), "test_metadata");
+    }
+
+    #[test]
+    fn test_task_order() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new(Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .then("first", |i: u32| async move { Ok(i + 1) })
+            .then("second", |i: u32| async move { Ok(i + 2) })
+            .then("third", |i: u32| async move { Ok(i + 3) })
+            .build();
+
+        // Verify the continuation chain structure
+        // Tasks should be linked in order: first -> second -> third
+        let mut current = workflow.continuation();
+        let mut task_names = Vec::new();
+
+        loop {
+            match current {
+                crate::workflow::WorkflowContinuation::Task { name, next, .. } => {
+                    task_names.push(name.clone());
+                    match next {
+                        Some(next_box) => current = next_box.as_ref(),
+                        None => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Tasks should execute in the order they were added
+        assert_eq!(task_names, vec!["first", "second", "third"]);
     }
 }
