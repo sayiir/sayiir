@@ -16,10 +16,10 @@ use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 /// # use workflow_runtime::{InProcessRunner, WorkflowRunner};
 /// # use workflow_core::workflow::WorkflowBuilder;
 /// # use workflow_core::context::WorkflowContext;
-/// # use workflow_runtime::serialization::JsonCodec;
+/// # use workflow_runtime::serialization::RkyvCodec;
 /// # use std::sync::Arc;
 /// # async fn example() -> anyhow::Result<()> {
-/// let ctx = WorkflowContext::new(Arc::new(JsonCodec), Arc::new(()));
+/// let ctx = WorkflowContext::new(Arc::new(RkyvCodec), Arc::new(()));
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("test", |i: u32| async move { Ok(i + 1) })
 ///     .build();
