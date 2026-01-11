@@ -17,8 +17,8 @@ jobs:
       - name: Run cargo deny check
         run: cargo deny check
 
-  lint:
-    name: Lint
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -33,3 +33,5 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy -- -D warnings
 
+      - name: Run cargo test
+        run: cargo test --workspace --all-features
