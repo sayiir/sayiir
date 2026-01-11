@@ -2,6 +2,7 @@ use super::WorkflowRunner;
 use bytes::Bytes;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
+use workflow_core::context::with_context;
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 
 /// A workflow runner that executes workflows in-process.
@@ -14,9 +15,12 @@ use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 /// ```rust,no_run
 /// # use workflow_runtime::{InProcessRunner, WorkflowRunner};
 /// # use workflow_core::workflow::WorkflowBuilder;
+/// # use workflow_core::context::WorkflowContext;
 /// # use workflow_runtime::serialization::JsonCodec;
+/// # use std::sync::Arc;
 /// # async fn example() -> anyhow::Result<()> {
-/// let workflow = WorkflowBuilder::with_codec(JsonCodec)
+/// let ctx = WorkflowContext::new(Arc::new(JsonCodec), Arc::new(()));
+/// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("test", |i: u32| async move { Ok(i + 1) })
 ///     .build();
 /// let runner = InProcessRunner::default();
@@ -28,25 +32,30 @@ use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 pub struct InProcessRunner;
 
 impl WorkflowRunner for InProcessRunner {
-    fn run<'w, C, Input>(
+    fn run<'w, C, Input, M>(
         &self,
-        workflow: &'w Workflow<C, Input>,
+        workflow: &'w Workflow<C, Input, M>,
         input: Input,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>,
     >
     where
         Input: Send + 'static,
+        M: Send + Sync + 'static,
         C: Codec + sealed::EncodeValue<Input>,
     {
-        let codec = workflow.codec().clone();
+        let context = workflow.context().clone();
         let continuation = workflow.continuation();
+        let codec = context.codec.clone();
         Box::pin(async move {
-            let input_bytes = codec.encode(&input)?;
-            match Self::execute_continuation(continuation, input_bytes).await {
-                Ok(_) => Ok(WorkflowStatus::Completed),
-                Err(e) => Ok(WorkflowStatus::Failed(e)),
-            }
+            with_context(context, || async move {
+                let input_bytes = codec.encode(&input)?;
+                match Self::execute_continuation(continuation, input_bytes).await {
+                    Ok(_) => Ok(WorkflowStatus::Completed),
+                    Err(e) => Ok(WorkflowStatus::Failed(e)),
+                }
+            })
+            .await
         })
     }
 }

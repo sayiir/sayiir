@@ -12,15 +12,16 @@ pub trait WorkflowRunner: Send + Sync {
     ///
     /// The input type must match the input type of the first task added via `then`.
     /// Returns the workflow execution status.
-    fn run<'w, C, Input>(
+    fn run<'w, C, Input, M>(
         &self,
-        workflow: &'w Workflow<C, Input>,
+        workflow: &'w Workflow<C, Input, M>,
         input: Input,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>,
     >
     where
         Input: Send + 'static,
+        M: Send + Sync + 'static,
         C: Codec + sealed::EncodeValue<Input>;
 }
 
