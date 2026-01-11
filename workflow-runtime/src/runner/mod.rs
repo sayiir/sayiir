@@ -16,7 +16,9 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow: &'w Workflow<C, Input>,
         input: Input,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>>
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>,
+    >
     where
         Input: Send + 'static,
         C: Codec + sealed::EncodeValue<Input>;

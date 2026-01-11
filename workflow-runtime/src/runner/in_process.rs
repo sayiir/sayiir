@@ -1,8 +1,8 @@
+use super::WorkflowRunner;
 use bytes::Bytes;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use super::WorkflowRunner;
 
 /// A workflow runner that executes workflows in-process.
 ///
@@ -32,7 +32,9 @@ impl WorkflowRunner for InProcessRunner {
         &self,
         workflow: &'w Workflow<C, Input>,
         input: Input,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>>
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>,
+    >
     where
         Input: Send + 'static,
         C: Codec + sealed::EncodeValue<Input>,
