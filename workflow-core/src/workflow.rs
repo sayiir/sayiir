@@ -335,7 +335,8 @@ impl RegistryBehavior for TaskRegistry {
         Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
-        self.register_fn_arc(id, codec, Arc::clone(func));
+        use crate::task::TaskMetadata;
+        self.register_fn_arc(id, codec, Arc::clone(func), TaskMetadata::default());
     }
 
     fn maybe_register_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
@@ -345,7 +346,8 @@ impl RegistryBehavior for TaskRegistry {
         Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
-        self.register_arc_join(id, codec, Arc::clone(func));
+        use crate::task::TaskMetadata;
+        self.register_arc_join(id, codec, Arc::clone(func), TaskMetadata::default());
     }
 }
 
@@ -353,6 +355,7 @@ pub struct WorkflowBuilder<C, Input, Output, M = (), Cont = NoContinuation, R = 
     context: WorkflowContext<C, M>,
     continuation: Cont,
     registry: R,
+    last_task_id: Option<String>,
     _phantom: PhantomData<(Input, Output)>,
 }
 
@@ -378,6 +381,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
             context: ctx,
             continuation: NoContinuation,
             registry: NoRegistry,
+            last_task_id: None,
             _phantom: PhantomData,
         }
     }
@@ -387,10 +391,18 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// # Example
     ///
     /// ```rust,ignore
+    /// use workflow_core::task::TaskMetadata;
+    /// use std::time::Duration;
+    ///
     /// let ctx = WorkflowContext::new("my-workflow", codec, metadata);
     /// let workflow = WorkflowBuilder::new(ctx)
     ///     .with_registry()  // Enable serialization
     ///     .then("step1", |i: u32| async move { Ok(i + 1) })
+    ///     .with_metadata(TaskMetadata {
+    ///         display_name: Some("Increment".into()),
+    ///         timeout: Some(Duration::from_secs(30)),
+    ///         ..Default::default()
+    ///     })
     ///     .build()?;  // Returns SerializableWorkflow
     /// ```
     pub fn with_registry(
@@ -438,6 +450,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
             context: self.context,
             continuation: NoContinuation,
             registry,
+            last_task_id: None,
             _phantom: PhantomData,
         }
     }
@@ -483,6 +496,7 @@ where
             continuation,
             context: self.context,
             registry: self.registry,
+            last_task_id: Some(id.to_string()),
             _phantom: PhantomData,
         }
     }
@@ -506,12 +520,18 @@ where
     /// # Example
     ///
     /// ```rust,ignore
+    /// use workflow_core::task::TaskMetadata;
+    ///
     /// let mut registry = TaskRegistry::new();
     /// registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
     ///
     /// let workflow = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
     ///     .then_registered::<u32>("double")?
+    ///     .with_metadata(TaskMetadata {
+    ///         display_name: Some("Double".into()),
+    ///         ..Default::default()
+    ///     })
     ///     .build()?;
     /// ```
     pub fn then_registered<NewOutput>(
@@ -542,8 +562,38 @@ where
             continuation,
             context: self.context,
             registry: self.registry,
+            last_task_id: Some(id.to_string()),
             _phantom: PhantomData,
         })
+    }
+
+    /// Attach metadata to the most recently added task.
+    ///
+    /// This method allows chaining metadata after `then()`, `then_registered()`,
+    /// or `join()` calls.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use workflow_core::task::{TaskMetadata, RetryPolicy};
+    /// use std::time::Duration;
+    ///
+    /// let workflow = WorkflowBuilder::new(ctx)
+    ///     .with_registry()
+    ///     .then("double", |i: u32| async move { Ok(i * 2) })
+    ///     .with_metadata(TaskMetadata {
+    ///         display_name: Some("Double".into()),
+    ///         timeout: Some(Duration::from_secs(30)),
+    ///         ..Default::default()
+    ///     })
+    ///     .then("add_ten", |i: u32| async move { Ok(i + 10) })
+    ///     .build()?;
+    /// ```
+    pub fn with_metadata(mut self, metadata: crate::task::TaskMetadata) -> Self {
+        if let Some(ref id) = self.last_task_id {
+            self.registry.set_metadata(id, metadata);
+        }
+        self
     }
 }
 
@@ -558,8 +608,14 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
     /// # Example
     ///
     /// ```rust,ignore
+    /// use workflow_core::task::TaskMetadata;
+    ///
     /// workflow
     ///     .then("prepare", |input| async { Ok(input) })
+    ///     .with_metadata(TaskMetadata {
+    ///         display_name: Some("Prepare Input".into()),
+    ///         ..Default::default()
+    ///     })
     ///     .branches(|b| {
     ///         b.add("count", |i: u32| async move { Ok(i * 2) });
     ///         b.add("name", |i: u32| async move { Ok(format!("item_{}", i)) });
@@ -568,6 +624,10 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
     ///         let count: u32 = outputs.get("count")?;
     ///         let name: String = outputs.get("name")?;
     ///         Ok(format!("{}: {}", name, count))
+    ///     })
+    ///     .with_metadata(TaskMetadata {
+    ///         display_name: Some("Combine Results".into()),
+    ///         ..Default::default()
     ///     })
     /// ```
     pub fn branches<F>(self, f: F) -> ForkBuilder<C, Input, Output, M, Cont, R>
@@ -813,6 +873,7 @@ where
             continuation,
             context: self.context,
             registry: self.registry,
+            last_task_id: Some(id.to_string()),
             _phantom: PhantomData,
         }
     }
@@ -894,6 +955,7 @@ where
             continuation,
             context: self.context,
             registry: self.registry,
+            last_task_id: Some(id.to_string()),
             _phantom: PhantomData,
         })
     }

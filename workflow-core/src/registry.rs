@@ -34,7 +34,9 @@
 //! ```
 
 use crate::codec::{Codec, sealed};
-use crate::task::{BranchOutputs, CoreTask, UntypedCoreTask, to_heterogeneous_join_task_arc};
+use crate::task::{
+    BranchOutputs, CoreTask, TaskMetadata, UntypedCoreTask, to_heterogeneous_join_task_arc,
+};
 use anyhow::Result;
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -45,6 +47,12 @@ use std::sync::Arc;
 
 /// A factory function that creates an UntypedCoreTask.
 pub type TaskFactory = Box<dyn Fn() -> UntypedCoreTask + Send + Sync>;
+
+/// A registered task entry containing the factory and metadata.
+pub struct TaskEntry {
+    factory: TaskFactory,
+    metadata: TaskMetadata,
+}
 
 /// Registry for task implementations.
 ///
@@ -57,7 +65,7 @@ pub type TaskFactory = Box<dyn Fn() -> UntypedCoreTask + Send + Sync>;
 /// the same registry by calling the same registration functions. See module docs
 /// for the recommended pattern.
 pub struct TaskRegistry {
-    tasks: HashMap<String, TaskFactory>,
+    tasks: HashMap<String, TaskEntry>,
 }
 
 impl Default for TaskRegistry {
@@ -101,12 +109,37 @@ impl TaskRegistry {
         T::Future: Send + 'static,
         C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
     {
-        self.register_task_arc(id, codec, Arc::new(task));
+        self.register_with_metadata(id, codec, task, TaskMetadata::default());
+    }
+
+    /// Register a task implementing `CoreTask` with metadata.
+    ///
+    /// Same as [`register`](Self::register), but allows attaching metadata
+    /// for timeouts, retries, and display information.
+    pub fn register_with_metadata<T, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        task: T,
+        metadata: TaskMetadata,
+    ) where
+        T: CoreTask + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.register_task_arc(id, codec, Arc::new(task), metadata);
     }
 
     /// Register a task using an Arc-wrapped CoreTask.
-    pub(crate) fn register_task_arc<T, C>(&mut self, id: &str, codec: Arc<C>, task: Arc<T>)
-    where
+    pub(crate) fn register_task_arc<T, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        task: Arc<T>,
+        metadata: TaskMetadata,
+    ) where
         T: CoreTask + 'static,
         T::Input: Send + 'static,
         T::Output: Send + 'static,
@@ -118,7 +151,8 @@ impl TaskRegistry {
             let codec = Arc::clone(&codec);
             Box::new(TaskWrapper { task, codec })
         });
-        self.tasks.insert(id.to_string(), factory);
+        self.tasks
+            .insert(id.to_string(), TaskEntry { factory, metadata });
     }
 
     /// Register a closure as a task (convenience method).
@@ -139,12 +173,36 @@ impl TaskRegistry {
         Fut: Future<Output = Result<O>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
-        self.register_fn_arc(id, codec, Arc::new(func));
+        self.register_fn_with_metadata(id, codec, func, TaskMetadata::default());
+    }
+
+    /// Register a closure as a task with metadata.
+    ///
+    /// Same as [`register_fn`](Self::register_fn), but allows attaching metadata.
+    pub fn register_fn_with_metadata<I, O, F, Fut, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        func: F,
+        metadata: TaskMetadata,
+    ) where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        self.register_fn_arc(id, codec, Arc::new(func), metadata);
     }
 
     /// Register a closure using an Arc-wrapped value.
-    pub(crate) fn register_fn_arc<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
-    where
+    pub(crate) fn register_fn_arc<I, O, F, Fut, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        func: Arc<F>,
+        metadata: TaskMetadata,
+    ) where
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
@@ -160,7 +218,8 @@ impl TaskRegistry {
                 _phantom: PhantomData,
             })
         });
-        self.tasks.insert(id.to_string(), factory);
+        self.tasks
+            .insert(id.to_string(), TaskEntry { factory, metadata });
     }
 
     /// Register a join task using a closure.
@@ -171,12 +230,33 @@ impl TaskRegistry {
         Fut: Future<Output = Result<O>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
-        self.register_arc_join(id, codec, Arc::new(func));
+        self.register_join_with_metadata(id, codec, func, TaskMetadata::default());
+    }
+
+    /// Register a join task using a closure with metadata.
+    pub fn register_join_with_metadata<O, F, Fut, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        func: F,
+        metadata: TaskMetadata,
+    ) where
+        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
+    {
+        self.register_arc_join(id, codec, Arc::new(func), metadata);
     }
 
     /// Register a join task using an Arc-wrapped closure.
-    pub(crate) fn register_arc_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: Arc<F>)
-    where
+    pub(crate) fn register_arc_join<O, F, Fut, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        func: Arc<F>,
+        metadata: TaskMetadata,
+    ) where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O>> + Send + 'static,
@@ -185,14 +265,43 @@ impl TaskRegistry {
         let factory = Box::new(move || -> UntypedCoreTask {
             to_heterogeneous_join_task_arc(Arc::clone(&func), Arc::clone(&codec))
         });
-        self.tasks.insert(id.to_string(), factory);
+        self.tasks
+            .insert(id.to_string(), TaskEntry { factory, metadata });
     }
 
     /// Get a task by ID, creating a new instance.
     ///
     /// Returns `None` if the task ID is not registered.
     pub fn get(&self, id: &str) -> Option<UntypedCoreTask> {
-        self.tasks.get(id).map(|factory| factory())
+        self.tasks.get(id).map(|entry| (entry.factory)())
+    }
+
+    /// Get the metadata for a task by ID.
+    ///
+    /// Returns `None` if the task ID is not registered.
+    pub fn get_metadata(&self, id: &str) -> Option<&TaskMetadata> {
+        self.tasks.get(id).map(|entry| &entry.metadata)
+    }
+
+    /// Get both the task and its metadata by ID.
+    ///
+    /// Returns `None` if the task ID is not registered.
+    pub fn get_with_metadata(&self, id: &str) -> Option<(UntypedCoreTask, &TaskMetadata)> {
+        self.tasks
+            .get(id)
+            .map(|entry| ((entry.factory)(), &entry.metadata))
+    }
+
+    /// Set or update the metadata for a registered task.
+    ///
+    /// Returns `true` if the task was found and metadata updated, `false` otherwise.
+    pub fn set_metadata(&mut self, id: &str, metadata: TaskMetadata) -> bool {
+        if let Some(entry) = self.tasks.get_mut(id) {
+            entry.metadata = metadata;
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if a task ID is registered.
@@ -261,6 +370,20 @@ impl<C: Codec> RegistryBuilder<C> {
         self
     }
 
+    /// Register a task implementing `CoreTask` with metadata.
+    pub fn register_with_metadata<T>(mut self, id: &str, task: T, metadata: TaskMetadata) -> Self
+    where
+        T: CoreTask + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.registry
+            .register_with_metadata(id, Arc::clone(&self.codec), task, metadata);
+        self
+    }
+
     /// Register a closure as a task (convenience method).
     pub fn register_fn<I, O, F, Fut>(mut self, id: &str, func: F) -> Self
     where
@@ -274,6 +397,25 @@ impl<C: Codec> RegistryBuilder<C> {
         self
     }
 
+    /// Register a closure as a task with metadata.
+    pub fn register_fn_with_metadata<I, O, F, Fut>(
+        mut self,
+        id: &str,
+        func: F,
+        metadata: TaskMetadata,
+    ) -> Self
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        self.registry
+            .register_fn_with_metadata(id, Arc::clone(&self.codec), func, metadata);
+        self
+    }
+
     /// Register a join task using a closure.
     pub fn register_join<O, F, Fut>(mut self, id: &str, func: F) -> Self
     where
@@ -284,6 +426,24 @@ impl<C: Codec> RegistryBuilder<C> {
     {
         self.registry
             .register_join(id, Arc::clone(&self.codec), func);
+        self
+    }
+
+    /// Register a join task using a closure with metadata.
+    pub fn register_join_with_metadata<O, F, Fut>(
+        mut self,
+        id: &str,
+        func: F,
+        metadata: TaskMetadata,
+    ) -> Self
+    where
+        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<O>> + Send + 'static,
+        C: sealed::EncodeValue<O> + Send + Sync + 'static,
+    {
+        self.registry
+            .register_join_with_metadata(id, Arc::clone(&self.codec), func, metadata);
         self
     }
 

@@ -1,11 +1,42 @@
 use crate::codec::{Codec, sealed};
 use anyhow::Result;
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Metadata associated with a task definition.
+///
+/// This provides optional configuration for task execution behavior,
+/// including display information, timeouts, and retry policies.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TaskMetadata {
+    /// Human-readable name for the task (for UI/logging).
+    pub display_name: Option<String>,
+    /// Description of what the task does.
+    pub description: Option<String>,
+    /// Maximum time the task is allowed to run.
+    pub timeout: Option<Duration>,
+    /// Retry policy for failed task executions.
+    pub retries: Option<RetryPolicy>,
+    /// Tags for categorization and filtering.
+    pub tags: Vec<String>,
+}
+
+/// Configuration for retrying failed task executions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    /// Maximum number of retry attempts (excluding the initial attempt).
+    pub max_attempts: u32,
+    /// Initial delay before the first retry.
+    pub initial_delay: Duration,
+    /// Multiplier applied to delay after each retry (for exponential backoff).
+    pub backoff_multiplier: f32,
+}
 
 /// Deserialize named branch results from length-prefixed format.
 ///
