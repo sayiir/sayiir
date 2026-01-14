@@ -296,7 +296,7 @@ pub trait RegistryBehavior {
         Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
 
-    /// Register a join task (no-op for NoRegistry, actual registration for TaskRegistry).
+    /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
     fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
@@ -796,13 +796,19 @@ pub struct ForkBuilder<C, Input, Output, M, Cont = NoContinuation, R = NoRegistr
     _phantom: PhantomData<(Input, Output)>,
 }
 
-/// ForkBuilder methods - unified implementation using RegistryBehavior and ContinuationState.
+/// For `ForkBuilder` methods - unified implementation using `RegistryBehavior` and `ContinuationState`.
 impl<C, Input, Output, M, Cont, R> ForkBuilder<C, Input, Output, M, Cont, R>
 where
     R: RegistryBehavior,
     Cont: ContinuationState,
 {
     /// Add a branch to the fork.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `ForkBuilder` with the branch added.
+    ///
+    #[must_use]
     pub fn branch<F, Fut, BranchOutput>(mut self, id: &str, func: F) -> Self
     where
         F: Fn(Output) -> Fut + Send + Sync + 'static,
@@ -881,7 +887,7 @@ where
     }
 }
 
-/// ForkBuilder methods for referencing pre-registered tasks (only available with TaskRegistry).
+/// For `ForkBuilder` methods for referencing pre-registered tasks (only available with `TaskRegistry`).
 impl<C, Input, Output, M, Cont> ForkBuilder<C, Input, Output, M, Cont, TaskRegistry>
 where
     Cont: ContinuationState,

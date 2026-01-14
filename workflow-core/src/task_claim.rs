@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// until the claim expires or is released.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskClaim {
-    /// The workflow instance ID (not not confuse with the workflow ID)
+    /// The workflow instance ID (not to be confused with the workflow ID)
     pub instance_id: String,
     /// The task ID being claimed.
     pub task_id: String,
