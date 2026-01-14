@@ -250,6 +250,8 @@ pub struct SerializedWorkflowState {
 /// The status of a workflow execution.
 #[derive(Debug)]
 pub enum WorkflowStatus {
+    /// The workflow is still in progress (task completed, workflow continues).
+    InProgress,
     /// The workflow completed successfully.
     Completed,
     /// The workflow failed with an error.
