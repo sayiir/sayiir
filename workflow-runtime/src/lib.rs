@@ -1,6 +1,6 @@
-pub mod serialization;
-
 mod runner;
+pub mod serialization;
+pub mod worker;
 
 // Re-exports
 pub use runner::WorkflowRunner;
