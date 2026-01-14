@@ -1,0 +1,16 @@
+[package]
+name = "workflow-persistence"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+name = "workflow_persistence"
+path = "src/lib.rs"
+
+[dependencies]
+workflow-core = { path = "../workflow-core" }
+async-trait = "0.1"
+thiserror = "2"
+chrono = { workspace = true }
+tokio = { workspace = true }
