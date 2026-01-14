@@ -16,11 +16,15 @@ tracing = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
 anyhow = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 futures = "0.3"
 serde_json = { workspace = true, optional = true }
 rkyv = { workspace = true, optional = true }
 bytecheck = { workspace = true, optional = true }
+async-trait = "0.1"
+thiserror = "2"
+serde_bytes = "0.11"
+chrono = { workspace = true }
 
 [lib]
 name = "workflow_runtime"
