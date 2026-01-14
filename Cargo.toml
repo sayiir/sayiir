@@ -1,5 +1,5 @@
 [workspace]
-members = ["workflow-core", "workflow-runtime", "workflow-macros"]
+members = ["workflow-core", "workflow-persistence", "workflow-runtime", "workflow-macros"]
 resolver = "2"
 
 [workspace.package]

@@ -874,23 +874,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "workflow-persistence"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "thiserror",
+ "tokio",
+ "workflow-core",
+]
+
+[[package]]
 name = "workflow-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytecheck",
  "bytes",
- "chrono",
  "futures",
  "rkyv",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tracing",
  "workflow-core",
  "workflow-macros",
+ "workflow-persistence",
 ]
 
 [[package]]
