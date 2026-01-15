@@ -13,6 +13,7 @@
 
 use bytes::Bytes;
 use chrono;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -62,6 +63,7 @@ pub struct PooledWorker<B> {
     registry: Arc<TaskRegistry>,
     claim_ttl: Option<Duration>,
     heartbeat_interval: Option<Duration>,
+    batch_size: NonZeroUsize,
 }
 
 impl<B> PooledWorker<B>
@@ -89,6 +91,7 @@ where
             registry: Arc::new(registry),
             claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
             heartbeat_interval: Some(Duration::from_secs(2 * 60)), // Default 2 minutes (before TTL)
+            batch_size: NonZeroUsize::new(1).unwrap(),    // Default: fetch one task at a time
         }
     }
 
@@ -110,6 +113,19 @@ where
     #[must_use]
     pub fn with_heartbeat_interval(mut self, interval: Option<Duration>) -> Self {
         self.heartbeat_interval = interval;
+        self
+    }
+
+    /// Set the number of tasks to fetch per poll (default: 1).
+    ///
+    /// With batch_size=1, the worker fetches one task, executes it, then polls again.
+    /// Other workers can pick up remaining tasks immediately.
+    ///
+    /// Higher values reduce polling overhead but may cause workers to hold task IDs
+    /// they won't process immediately (though other workers can still claim them).
+    #[must_use]
+    pub fn with_batch_size(mut self, size: NonZeroUsize) -> Self {
+        self.batch_size = size;
         self
     }
 
@@ -383,7 +399,7 @@ where
             // Find available tasks
             let available_tasks = self
                 .backend
-                .find_available_tasks(&self.worker_id, 10)
+                .find_available_tasks(&self.worker_id, self.batch_size.get())
                 .await?;
 
             for task in available_tasks {
