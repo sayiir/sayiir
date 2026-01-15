@@ -1,8 +1,15 @@
-//! Worker node for distributed workflow execution.
+//! Pooled worker for distributed, multi-worker workflow execution.
 //!
-//! A worker node polls the backend for available tasks, claims them,
-//! executes them, and updates the snapshot. Multiple workers can
-//! collaborate to execute the same workflow instance.
+//! A pooled worker is part of a worker pool that collaboratively executes workflows.
+//! Each worker polls the backend for available tasks, claims them (to prevent duplicates),
+//! executes them, and updates the snapshot. Multiple workers can process tasks from
+//! the same workflow instance in parallel.
+//!
+//! **Use this when**: You need horizontal scaling with multiple workers processing
+//! tasks concurrently across machines or processes.
+//!
+//! **Use [`CheckpointingRunner`](crate::runner::distributed::CheckpointingRunner) instead when**:
+//! You want a single process to run an entire workflow with crash recovery.
 
 use bytes::Bytes;
 use chrono;
@@ -18,26 +25,37 @@ use workflow_core::task_claim::AvailableTask;
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
 
-/// A worker node that executes tasks from workflows.
+/// A pooled worker that claims and executes tasks from a shared backend.
 ///
-/// Workers poll the backend for available tasks, claim them, execute them,
-/// and update the workflow snapshot. Multiple workers can collaborate
-/// to execute the same workflow instance.
+/// `PooledWorker` is designed for horizontal scaling: multiple workers can run
+/// across different machines/processes, all polling the same backend for tasks.
+/// Task claiming with TTL prevents duplicate execution while allowing automatic
+/// recovery when workers crash.
+///
+/// # When to Use
+///
+/// - **Horizontal scaling**: Multiple workers process tasks concurrently
+/// - **Fault tolerance**: Failed workers' tasks are automatically reclaimed
+/// - **Load balancing**: Tasks distributed across available workers
+///
+/// For single-process execution with checkpointing, use
+/// [`CheckpointingRunner`](crate::runner::distributed::CheckpointingRunner).
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use workflow_runtime::persistence::{WorkerNode, InMemoryBackend};
+/// use workflow_runtime::worker::PooledWorker;
+/// use workflow_persistence::InMemoryBackend;
 /// use workflow_core::registry::TaskRegistry;
 ///
 /// let backend = InMemoryBackend::new();
 /// let registry = TaskRegistry::new(); // Must contain all task implementations
-/// let worker = WorkerNode::new("worker-1", backend, registry);
+/// let worker = PooledWorker::new("worker-1", backend, registry);
 ///
 /// // Start polling for work
 /// worker.start_polling(Duration::from_secs(1)).await?;
 /// ```
-pub struct WorkerNode<B> {
+pub struct PooledWorker<B> {
     worker_id: String,
     backend: Arc<B>,
     registry: Arc<TaskRegistry>,
@@ -45,7 +63,7 @@ pub struct WorkerNode<B> {
     heartbeat_interval: Option<Duration>,
 }
 
-impl<B> WorkerNode<B>
+impl<B> PooledWorker<B>
 where
     B: PersistentBackend + 'static,
 {

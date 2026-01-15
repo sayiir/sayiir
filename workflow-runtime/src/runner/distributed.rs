@@ -1,8 +1,14 @@
-//! Distributed workflow runner with checkpoint/restore functionality.
+//! Checkpointing workflow runner for single-process execution with persistence.
 //!
-//! This runner saves snapshots after each task completion, enabling
-//! recovery and resumption of workflows across process restarts or
-//! distributed execution.
+//! This runner executes an entire workflow within a single process while saving
+//! snapshots after each task completion. This enables crash recovery and resumption
+//! without requiring multiple workers.
+//!
+//! **Use this when**: You want to run a workflow reliably on a single node with
+//! the ability to resume after crashes.
+//!
+//! **Use [`PooledWorker`](crate::worker::PooledWorker) instead when**: You need
+//! horizontal scaling with multiple workers collaborating on tasks.
 
 use bytes::Bytes;
 use futures::future;
@@ -14,21 +20,30 @@ use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnaps
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
 
-/// A workflow runner that saves checkpoints after each task completion.
+/// A single-process workflow runner with checkpointing for crash recovery.
 ///
-/// This runner extends the in-process execution model with persistence,
-/// enabling workflows to be resumed from any checkpoint. Snapshots are
-/// saved automatically after each task completes.
+/// `CheckpointingRunner` executes an entire workflow within one process,
+/// saving snapshots after each task. Fork branches run concurrently as tokio tasks.
+/// If the process crashes, the workflow can be resumed from the last checkpoint.
+///
+/// # When to Use
+///
+/// - **Single-node execution**: One process runs the entire workflow
+/// - **Crash recovery**: Resume from the last completed task after restart
+/// - **Simple deployment**: No coordination between workers needed
+///
+/// For horizontal scaling with multiple workers, use [`PooledWorker`](crate::worker::PooledWorker).
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use workflow_runtime::persistence::{DistributedRunner, InMemoryBackend};
+/// use workflow_runtime::CheckpointingRunner;
+/// use workflow_persistence::InMemoryBackend;
 /// use workflow_core::workflow::WorkflowBuilder;
 /// use workflow_core::context::WorkflowContext;
 ///
 /// let backend = InMemoryBackend::new();
-/// let runner = DistributedRunner::new(backend);
+/// let runner = CheckpointingRunner::new(backend);
 ///
 /// let ctx = WorkflowContext::new("my-workflow", codec, metadata);
 /// let workflow = WorkflowBuilder::new(ctx)
@@ -38,18 +53,18 @@ use workflow_persistence::PersistentBackend;
 /// // Run workflow - snapshots are saved automatically
 /// let status = runner.run(&workflow, "instance-123", 1).await?;
 ///
-/// // Resume from checkpoint if needed
+/// // Resume from checkpoint if needed (e.g., after crash)
 /// let status = runner.resume(&workflow, "instance-123").await?;
 /// ```
-pub struct DistributedRunner<B> {
+pub struct CheckpointingRunner<B> {
     backend: Arc<B>,
 }
 
-impl<B> DistributedRunner<B>
+impl<B> CheckpointingRunner<B>
 where
     B: PersistentBackend,
 {
-    /// Create a new distributed runner with the given backend.
+    /// Create a new checkpointing runner with the given backend.
     pub fn new(backend: B) -> Self {
         Self {
             backend: Arc::new(backend),
@@ -57,7 +72,7 @@ where
     }
 }
 
-impl<B> DistributedRunner<B>
+impl<B> CheckpointingRunner<B>
 where
     B: PersistentBackend,
 {
