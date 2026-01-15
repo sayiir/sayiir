@@ -457,7 +457,9 @@ where
                     let output = func.run(input).await?;
 
                     // Checkpoint: save task result directly to backend
-                    backend.save_task_result(&instance_id, id, output.clone()).await?;
+                    backend
+                        .save_task_result(&instance_id, id, output.clone())
+                        .await?;
 
                     match next {
                         Some(next_continuation) => {
