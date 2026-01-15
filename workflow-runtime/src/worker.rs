@@ -13,7 +13,9 @@
 
 use bytes::Bytes;
 use chrono;
+use futures::FutureExt;
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -305,17 +307,17 @@ where
         let task_id = available_task.task_id.clone();
         let input = available_task.input.clone();
 
-        // We need to execute the task directly from the continuation
-        // Since we can't clone the continuation, we'll traverse it to find and execute the task
-        let result = with_context(context, || async move {
+        // Execute task with panic safety - wrap in catch_unwind to ensure claim release
+        let execution_future = with_context(context, || async move {
             Self::execute_task_by_id(continuation, &task_id, input).await
-        })
-        .await;
+        });
+
+        // Catch panics to ensure we always release the claim
+        let panic_result = AssertUnwindSafe(execution_future).catch_unwind().await;
 
         // Cancel heartbeat and wait for it to stop before releasing claim
         heartbeat_cancel.cancel();
         if let Some(handle) = heartbeat_handle {
-            // Await the handle to ensure heartbeat has fully stopped
             let _ = handle.await;
             tracing::debug!(
                 instance_id = %available_task.instance_id,
@@ -323,6 +325,42 @@ where
                 "Stopped heartbeat for task"
             );
         }
+
+        let release_claim = || async {
+            let _ = self
+                .backend
+                .release_task_claim(
+                    &available_task.instance_id,
+                    &available_task.task_id,
+                    &self.worker_id,
+                )
+                .await;
+        };
+
+        // Handle panic case first
+        let result = match panic_result {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                // Task panicked - release claim and return error
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Task panicked with unknown payload".to_string()
+                };
+
+                tracing::error!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    panic = %panic_msg,
+                    "Task panicked - releasing claim"
+                );
+
+                release_claim().await;
+                return Err(anyhow::anyhow!("Task panicked: {}", panic_msg));
+            }
+        };
 
         match result {
             Ok(output) => {
@@ -374,14 +412,7 @@ where
                     error = %e,
                     "Task execution failed"
                 );
-                let _ = self
-                    .backend
-                    .release_task_claim(
-                        &available_task.instance_id,
-                        &available_task.task_id,
-                        &self.worker_id,
-                    )
-                    .await;
+                release_claim().await;
                 Err(e)
             }
         }

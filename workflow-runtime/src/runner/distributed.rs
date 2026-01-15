@@ -15,7 +15,7 @@ use futures::future;
 use std::sync::Arc;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
-use workflow_core::context::with_context;
+use workflow_core::context::{WorkflowContext, with_context};
 use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
@@ -120,12 +120,13 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        with_context(context, || async move {
+        with_context(context.clone(), || async move {
             match Self::execute_with_checkpointing(
                 continuation,
                 input_bytes,
                 &mut snapshot,
                 Arc::clone(&backend),
+                context,
             )
             .await
             {
@@ -193,7 +194,7 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        with_context(context, || async move {
+        with_context(context.clone(), || async move {
             // Get the last completed task's output or initial input
             let input_bytes = Self::get_resume_input(&snapshot, continuation)?;
 
@@ -202,6 +203,7 @@ where
                 input_bytes,
                 &mut snapshot,
                 Arc::clone(&backend),
+                context,
             )
             .await
             {
@@ -221,14 +223,17 @@ where
     }
 
     /// Execute continuation with checkpointing after each task.
-    fn execute_with_checkpointing<'a>(
+    fn execute_with_checkpointing<'a, C, M>(
         continuation: &'a WorkflowContinuation,
         input: Bytes,
         snapshot: &'a mut WorkflowSnapshot,
         backend: Arc<B>,
+        context: WorkflowContext<C, M>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a>>
     where
         B: 'static,
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
     {
         Box::pin(async move {
             match continuation {
@@ -258,6 +263,7 @@ where
                                 output,
                                 snapshot,
                                 Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -287,6 +293,7 @@ where
                                 output,
                                 snapshot,
                                 Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -322,6 +329,7 @@ where
                                 join_input,
                                 snapshot,
                                 Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -364,16 +372,21 @@ where
                                 let branch_input = input.clone();
                                 let branch_backend = Arc::clone(&backend);
                                 let branch_instance_id = instance_id.clone();
+                                let branch_context = context.clone();
                                 tokio::task::spawn(async move {
-                                    // Use per-task checkpointing for branch execution
-                                    let result = Self::execute_branch_with_checkpoint(
-                                        &branch,
-                                        branch_input,
-                                        branch_backend,
-                                        branch_instance_id,
-                                    )
-                                    .await?;
-                                    Ok((branch_id, result))
+                                    // Re-establish context in spawned task and execute branch
+                                    with_context(branch_context.clone(), || async {
+                                        let result = Self::execute_branch_with_checkpoint(
+                                            &branch,
+                                            branch_input,
+                                            branch_backend,
+                                            branch_instance_id,
+                                            branch_context,
+                                        )
+                                        .await?;
+                                        Ok::<_, anyhow::Error>((branch_id, result))
+                                    })
+                                    .await
                                 })
                             })
                             .collect();
@@ -424,6 +437,7 @@ where
                                 join_input,
                                 snapshot,
                                 Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -442,14 +456,17 @@ where
     ///
     /// Unlike `execute_with_checkpointing`, this doesn't update position tracking
     /// (branches run independently). It saves each task result directly to the backend.
-    fn execute_branch_with_checkpoint<'a>(
+    fn execute_branch_with_checkpoint<'a, C, M>(
         continuation: &'a WorkflowContinuation,
         input: Bytes,
         backend: Arc<B>,
         instance_id: String,
+        context: WorkflowContext<C, M>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a>>
     where
         B: 'static,
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
     {
         Box::pin(async move {
             match continuation {
@@ -468,6 +485,7 @@ where
                                 output,
                                 backend,
                                 instance_id,
+                                context,
                             )
                             .await
                         }
@@ -487,15 +505,21 @@ where
                             let branch_input = input.clone();
                             let backend = Arc::clone(&backend);
                             let instance_id = instance_id.clone();
+                            let branch_context = context.clone();
                             tokio::task::spawn(async move {
-                                let result = Self::execute_branch_with_checkpoint(
-                                    &branch,
-                                    branch_input,
-                                    backend,
-                                    instance_id,
-                                )
-                                .await?;
-                                Ok::<_, anyhow::Error>((id, result))
+                                // Re-establish context in nested spawned task
+                                with_context(branch_context.clone(), || async {
+                                    let result = Self::execute_branch_with_checkpoint(
+                                        &branch,
+                                        branch_input,
+                                        backend,
+                                        instance_id,
+                                        branch_context,
+                                    )
+                                    .await?;
+                                    Ok::<_, anyhow::Error>((id, result))
+                                })
+                                .await
                             })
                         })
                         .collect();
@@ -513,6 +537,7 @@ where
                                 join_input,
                                 backend,
                                 instance_id,
+                                context,
                             )
                             .await
                         }
