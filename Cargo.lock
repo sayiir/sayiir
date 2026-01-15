@@ -891,6 +891,7 @@ name = "workflow-persistence"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "thiserror",
  "tokio",
