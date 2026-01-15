@@ -133,8 +133,43 @@ sequenceDiagram
 |---------|---------|-------------|
 | `claim_ttl` | 5 minutes | How long a claim is valid |
 | `heartbeat_interval` | 2 minutes | How often to extend the claim |
+| `batch_size` | 1 | Tasks to fetch per poll |
 
 If a worker crashes, its heartbeat stops and the claim expires, allowing another worker to pick up the task.
+
+---
+
+## Polling vs Claiming
+
+**Important distinction:** Fetching tasks and claiming tasks are separate operations.
+
+```mermaid
+sequenceDiagram
+    participant W1 as Worker 1
+    participant W2 as Worker 2
+    participant B as Backend
+
+    W1->>B: find_available_tasks (batch=3)
+    B-->>W1: [task1, task2, task3]
+
+    Note over W1: Starts executing task1
+    W1->>B: claim_task(task1)
+    B-->>W1: claimed ✓
+
+    W2->>B: find_available_tasks (batch=3)
+    B-->>W2: [task2, task3, task4]
+    Note over W2: task2, task3 still available!
+
+    W2->>B: claim_task(task2)
+    B-->>W2: claimed ✓
+```
+
+- **Fetching** returns task IDs that are currently unclaimed
+- **Claiming** happens when execution starts (one task at a time)
+- Other workers can "steal" fetched-but-not-yet-claimed tasks
+- `batch_size` controls fetch count, not claim count
+
+With `batch_size=1` (default), each worker fetches one task, executes it, then polls again. This minimizes stale task IDs while keeping polling overhead low.
 
 ---
 
