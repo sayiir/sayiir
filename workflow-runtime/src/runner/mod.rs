@@ -1,3 +1,10 @@
+//! Module for workflow runners.
+//!
+//! A workflow runner is responsible for executing workflows.
+//! Different implementations can provide different execution strategies,
+//! such as in-process execution, distributed execution, or execution with
+//! persistence and recovery.
+
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::workflow::{Workflow, WorkflowStatus};
@@ -25,4 +32,5 @@ pub trait WorkflowRunner: Send + Sync {
         C: Codec + sealed::EncodeValue<Input>;
 }
 
+pub mod distributed;
 pub mod in_process;

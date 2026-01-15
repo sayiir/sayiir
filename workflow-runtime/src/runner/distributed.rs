@@ -4,15 +4,15 @@
 //! recovery and resumption of workflows across process restarts or
 //! distributed execution.
 
-use crate::persistence::backend::PersistentBackend;
-use crate::persistence::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use bytes::Bytes;
 use futures::future;
 use std::sync::Arc;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::with_context;
+use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
+use workflow_persistence::PersistentBackend;
 
 /// A workflow runner that saves checkpoints after each task completion.
 ///
@@ -369,15 +369,15 @@ where
                         if let Some(join_cont) = join {
                             let completed_branches: std::collections::HashMap<
                                 String,
-                                crate::persistence::snapshot::TaskResult,
+                                workflow_core::snapshot::TaskResult,
                             > = branch_results
                                 .iter()
                                 .map(|(id, output)| {
                                     (
                                         id.clone(),
-                                        crate::persistence::snapshot::TaskResult {
+                                        workflow_core::snapshot::TaskResult {
                                             task_id: id.clone(),
-                                            output: output.to_vec(),
+                                            output: output.clone(),
                                         },
                                     )
                                 })
