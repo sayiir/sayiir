@@ -17,6 +17,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::with_context;
@@ -230,47 +231,59 @@ where
         }
 
         // Start heartbeat task to periodically extend the claim
+        let heartbeat_cancel = CancellationToken::new();
         let heartbeat_handle = if let Some(interval) = self.heartbeat_interval {
             let backend = self.backend.clone();
             let instance_id = available_task.instance_id.clone();
             let task_id = available_task.task_id.clone();
             let worker_id = self.worker_id.clone();
             let claim_ttl = self.claim_ttl;
+            let cancel_token = heartbeat_cancel.clone();
 
             let handle = tokio::spawn(async move {
                 let mut interval_timer = time::interval(interval);
                 interval_timer.tick().await; // Skip first immediate tick
 
                 loop {
-                    interval_timer.tick().await;
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::trace!(
+                                instance_id = %instance_id,
+                                task_id = %task_id,
+                                "Heartbeat cancelled"
+                            );
+                            break;
+                        }
+                        _ = interval_timer.tick() => {
+                            tracing::trace!(
+                                instance_id = %instance_id,
+                                task_id = %task_id,
+                                "Extending task claim via heartbeat"
+                            );
 
-                    tracing::trace!(
-                        instance_id = %instance_id,
-                        task_id = %task_id,
-                        "Extending task claim via heartbeat"
-                    );
+                            if let Some(ttl) = claim_ttl {
+                                let chrono_ttl = chrono::Duration::from_std(ttl).ok();
+                                if let Some(ttl) = chrono_ttl {
+                                    let result = backend
+                                        .extend_task_claim(&instance_id, &task_id, &worker_id, ttl)
+                                        .await;
 
-                    if let Some(ttl) = claim_ttl {
-                        let chrono_ttl = chrono::Duration::from_std(ttl).ok();
-                        if let Some(ttl) = chrono_ttl {
-                            let result = backend
-                                .extend_task_claim(&instance_id, &task_id, &worker_id, ttl)
-                                .await;
-
-                            if let Err(e) = result {
-                                tracing::warn!(
-                                    instance_id = %instance_id,
-                                    task_id = %task_id,
-                                    error = %e,
-                                    "Failed to extend task claim during heartbeat"
-                                );
-                                // Continue anyway - the task execution should handle expiration
-                            } else {
-                                tracing::trace!(
-                                    instance_id = %instance_id,
-                                    task_id = %task_id,
-                                    "Extended task claim via heartbeat"
-                                );
+                                    if let Err(e) = result {
+                                        tracing::warn!(
+                                            instance_id = %instance_id,
+                                            task_id = %task_id,
+                                            error = %e,
+                                            "Failed to extend task claim during heartbeat"
+                                        );
+                                        // Continue anyway - the task execution should handle expiration
+                                    } else {
+                                        tracing::trace!(
+                                            instance_id = %instance_id,
+                                            task_id = %task_id,
+                                            "Extended task claim via heartbeat"
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -299,8 +312,11 @@ where
         })
         .await;
 
+        // Cancel heartbeat and wait for it to stop before releasing claim
+        heartbeat_cancel.cancel();
         if let Some(handle) = heartbeat_handle {
-            handle.abort();
+            // Await the handle to ensure heartbeat has fully stopped
+            let _ = handle.await;
             tracing::debug!(
                 instance_id = %available_task.instance_id,
                 task_id = %available_task.task_id,
@@ -549,11 +565,9 @@ where
                 }
             }
             WorkflowContinuation::Fork { branches, join } => {
-                // All branches must be completed
+                // All branches must be completed (recursively check entire branch chain)
                 for branch in branches.iter() {
-                    if let WorkflowContinuation::Task { id, .. } = branch.as_ref()
-                        && snapshot.get_task_result(id).is_none()
-                    {
+                    if !Self::is_workflow_complete(branch, snapshot) {
                         return false;
                     }
                 }
