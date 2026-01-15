@@ -19,6 +19,7 @@ bytes = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 futures = "0.3"
+chrono = { workspace = true }
 serde_json = { workspace = true, optional = true }
 rkyv = { workspace = true, optional = true }
 bytecheck = { workspace = true, optional = true }
