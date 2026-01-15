@@ -15,7 +15,7 @@ use futures::future;
 use std::sync::Arc;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
-use workflow_core::context::with_context;
+use workflow_core::context::{WorkflowContext, with_context};
 use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
@@ -74,7 +74,7 @@ where
 
 impl<B> CheckpointingRunner<B>
 where
-    B: PersistentBackend,
+    B: PersistentBackend + 'static,
 {
     /// Run a workflow from the beginning, saving checkpoints after each task.
     ///
@@ -120,12 +120,13 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        with_context(context, || async move {
+        with_context(context.clone(), || async move {
             match Self::execute_with_checkpointing(
                 continuation,
                 input_bytes,
                 &mut snapshot,
-                &*backend,
+                Arc::clone(&backend),
+                context,
             )
             .await
             {
@@ -193,7 +194,7 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        with_context(context, || async move {
+        with_context(context.clone(), || async move {
             // Get the last completed task's output or initial input
             let input_bytes = Self::get_resume_input(&snapshot, continuation)?;
 
@@ -201,7 +202,8 @@ where
                 continuation,
                 input_bytes,
                 &mut snapshot,
-                &*backend,
+                Arc::clone(&backend),
+                context,
             )
             .await
             {
@@ -221,12 +223,17 @@ where
     }
 
     /// Execute continuation with checkpointing after each task.
-    fn execute_with_checkpointing<'a>(
+    fn execute_with_checkpointing<'a, C, M>(
         continuation: &'a WorkflowContinuation,
         input: Bytes,
         snapshot: &'a mut WorkflowSnapshot,
-        backend: &'a dyn PersistentBackend,
+        backend: Arc<B>,
+        context: WorkflowContext<C, M>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a>>
+    where
+        B: 'static,
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
     {
         Box::pin(async move {
             match continuation {
@@ -255,7 +262,8 @@ where
                                 next_continuation,
                                 output,
                                 snapshot,
-                                backend,
+                                Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -284,7 +292,8 @@ where
                                 next_continuation,
                                 output,
                                 snapshot,
-                                backend,
+                                Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -319,7 +328,8 @@ where
                                 join_continuation,
                                 join_input,
                                 snapshot,
-                                backend,
+                                Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -342,7 +352,9 @@ where
                             })
                             .collect();
 
-                        // Execute branches in parallel
+                        let instance_id = snapshot.instance_id.clone();
+
+                        // Execute branches in parallel with per-task checkpointing
                         let branch_handles: Vec<_> = branch_info
                             .into_iter()
                             .map(|(branch_id, branch)| {
@@ -358,10 +370,23 @@ where
                                 }
 
                                 let branch_input = input.clone();
+                                let branch_backend = Arc::clone(&backend);
+                                let branch_instance_id = instance_id.clone();
+                                let branch_context = context.clone();
                                 tokio::task::spawn(async move {
-                                    let result =
-                                        Self::execute_continuation(&branch, branch_input).await?;
-                                    Ok((branch_id, result))
+                                    // Re-establish context in spawned task and execute branch
+                                    with_context(branch_context.clone(), || async {
+                                        let result = Self::execute_branch_with_checkpoint(
+                                            &branch,
+                                            branch_input,
+                                            branch_backend,
+                                            branch_instance_id,
+                                            branch_context,
+                                        )
+                                        .await?;
+                                        Ok::<_, anyhow::Error>((branch_id, result))
+                                    })
+                                    .await
                                 })
                             })
                             .collect();
@@ -373,12 +398,12 @@ where
                                 .into_iter()
                                 .collect::<anyhow::Result<Vec<_>>>()?;
 
-                        // Save branch results
+                        // Sync local snapshot with results (already saved to backend per-task)
                         for (branch_id, output) in &branch_results {
                             snapshot.mark_task_completed(branch_id.clone(), output.clone());
                         }
 
-                        // Update position
+                        // Update position for join
                         if let Some(join_cont) = join {
                             let completed_branches: std::collections::HashMap<
                                 String,
@@ -401,7 +426,7 @@ where
                             });
                         }
 
-                        // Save checkpoint
+                        // Save position update (task results already saved per-task)
                         backend.save_snapshot(snapshot.clone()).await?;
 
                         // Proceed to join
@@ -411,7 +436,8 @@ where
                                 join_continuation,
                                 join_input,
                                 snapshot,
-                                backend,
+                                Arc::clone(&backend),
+                                context,
                             )
                             .await
                         } else {
@@ -426,24 +452,48 @@ where
         })
     }
 
-    /// Execute continuation without checkpointing (helper for branch execution).
-    fn execute_continuation(
-        continuation: &WorkflowContinuation,
+    /// Execute branch continuation with per-task checkpointing.
+    ///
+    /// Unlike `execute_with_checkpointing`, this doesn't update position tracking
+    /// (branches run independently). It saves each task result directly to the backend.
+    fn execute_branch_with_checkpoint<'a, C, M>(
+        continuation: &'a WorkflowContinuation,
         input: Bytes,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + '_>>
+        backend: Arc<B>,
+        instance_id: String,
+        context: WorkflowContext<C, M>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a>>
+    where
+        B: 'static,
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
     {
         Box::pin(async move {
             match continuation {
-                WorkflowContinuation::Task { func, next, .. } => {
+                WorkflowContinuation::Task { id, func, next } => {
                     let output = func.run(input).await?;
+
+                    // Checkpoint: save task result directly to backend
+                    backend
+                        .save_task_result(&instance_id, id, output.clone())
+                        .await?;
+
                     match next {
                         Some(next_continuation) => {
-                            Self::execute_continuation(next_continuation, output).await
+                            Self::execute_branch_with_checkpoint(
+                                next_continuation,
+                                output,
+                                backend,
+                                instance_id,
+                                context,
+                            )
+                            .await
                         }
                         None => Ok(output),
                     }
                 }
                 WorkflowContinuation::Fork { branches, join } => {
+                    // Nested fork within a branch
                     let branch_handles: Vec<_> = branches
                         .iter()
                         .map(|branch| {
@@ -453,10 +503,23 @@ where
                             };
                             let branch = Arc::clone(branch);
                             let branch_input = input.clone();
+                            let backend = Arc::clone(&backend);
+                            let instance_id = instance_id.clone();
+                            let branch_context = context.clone();
                             tokio::task::spawn(async move {
-                                let result =
-                                    Self::execute_continuation(&branch, branch_input).await?;
-                                Ok::<_, anyhow::Error>((id, result))
+                                // Re-establish context in nested spawned task
+                                with_context(branch_context.clone(), || async {
+                                    let result = Self::execute_branch_with_checkpoint(
+                                        &branch,
+                                        branch_input,
+                                        backend,
+                                        instance_id,
+                                        branch_context,
+                                    )
+                                    .await?;
+                                    Ok::<_, anyhow::Error>((id, result))
+                                })
+                                .await
                             })
                         })
                         .collect();
@@ -469,7 +532,14 @@ where
                     match join {
                         Some(join_continuation) => {
                             let join_input = Self::serialize_named_branch_results(&branch_results)?;
-                            Self::execute_continuation(join_continuation, join_input).await
+                            Self::execute_branch_with_checkpoint(
+                                join_continuation,
+                                join_input,
+                                backend,
+                                instance_id,
+                                context,
+                            )
+                            .await
                         }
                         None => Ok(branch_results
                             .last()

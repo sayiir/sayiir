@@ -51,6 +51,29 @@ pub trait PersistentBackend: Send + Sync {
     /// Returns `BackendError` if the snapshot cannot be saved.
     async fn save_snapshot(&self, snapshot: WorkflowSnapshot) -> Result<(), BackendError>;
 
+    /// Save a single task result atomically.
+    ///
+    /// This is more granular than `save_snapshot` and allows concurrent task
+    /// completions (e.g., in fork branches) without overwriting each other.
+    /// The implementation should atomically add/update the task result within
+    /// the snapshot's completed_tasks map.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID
+    /// - `task_id`: The task that completed
+    /// - `output`: The serialized task output
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError::NotFound` if no snapshot exists for the instance.
+    async fn save_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+        output: bytes::Bytes,
+    ) -> Result<(), BackendError>;
+
     /// Load a workflow snapshot by instance ID.
     ///
     /// # Errors

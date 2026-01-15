@@ -57,6 +57,25 @@ impl PersistentBackend for InMemoryBackend {
         Ok(())
     }
 
+    async fn save_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+        output: bytes::Bytes,
+    ) -> Result<(), BackendError> {
+        let mut snapshots = self
+            .snapshots
+            .write()
+            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+
+        let snapshot = snapshots
+            .get_mut(instance_id)
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+        snapshot.mark_task_completed(task_id.to_string(), output);
+        Ok(())
+    }
+
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
         let snapshots = self
             .snapshots

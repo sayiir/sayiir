@@ -12,5 +12,6 @@ path = "src/lib.rs"
 workflow-core = { path = "../workflow-core" }
 async-trait = "0.1"
 thiserror = "2"
+bytes = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
