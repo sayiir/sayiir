@@ -16,6 +16,7 @@ use chrono;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::time;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
@@ -56,6 +57,7 @@ use workflow_persistence::PersistentBackend;
 /// // Start polling for work
 /// worker.start_polling(Duration::from_secs(1)).await?;
 /// ```
+#[derive(Clone)]
 pub struct PooledWorker<B> {
     worker_id: String,
     backend: Arc<B>,
@@ -64,6 +66,7 @@ pub struct PooledWorker<B> {
     claim_ttl: Option<Duration>,
     heartbeat_interval: Option<Duration>,
     batch_size: NonZeroUsize,
+    max_concurrency: NonZeroUsize,
 }
 
 impl<B> PooledWorker<B>
@@ -91,7 +94,8 @@ where
             registry: Arc::new(registry),
             claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
             heartbeat_interval: Some(Duration::from_secs(2 * 60)), // Default 2 minutes (before TTL)
-            batch_size: NonZeroUsize::new(1).unwrap(),    // Default: fetch one task at a time
+            batch_size: NonZeroUsize::new(1).unwrap(), // Default: fetch one task at a time
+            max_concurrency: NonZeroUsize::new(1).unwrap(), // Default: sequential execution
         }
     }
 
@@ -126,6 +130,19 @@ where
     #[must_use]
     pub fn with_batch_size(mut self, size: NonZeroUsize) -> Self {
         self.batch_size = size;
+        self
+    }
+
+    /// Set the maximum number of concurrent task executions (default: 1).
+    ///
+    /// With max_concurrency=1 (default), tasks execute sequentially.
+    /// Higher values allow parallel task execution within this worker,
+    /// useful for I/O-bound tasks.
+    ///
+    /// Note: Each concurrent task maintains its own heartbeat.
+    #[must_use]
+    pub fn with_max_concurrency(mut self, max: NonZeroUsize) -> Self {
+        self.max_concurrency = max;
         self
     }
 
@@ -374,6 +391,7 @@ where
     /// Poll for available tasks and execute them.
     ///
     /// This continuously polls the backend for available tasks and executes them.
+    /// Task execution is gated by a semaphore based on `max_concurrency`.
     /// Returns when an error occurs or the future is cancelled.
     ///
     /// # Parameters
@@ -382,45 +400,66 @@ where
     /// - `workflows`: Map of workflow definition hash to workflow (for task execution)
     #[allow(clippy::type_complexity)]
     pub async fn start_polling<C, Input, M>(
-        &self,
+        self,
         poll_interval: Duration,
         workflows: Vec<(String, Arc<Workflow<C, Input, M>>)>,
     ) -> anyhow::Result<()>
     where
-        Input: Send + 'static,
+        Input: Send + Sync + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + Send + Sync + 'static,
     {
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrency.get()));
+        let worker = Arc::new(self);
+        let workflows = Arc::new(workflows);
         let mut interval = time::interval(poll_interval);
 
         loop {
-            interval.tick().await;
+            // Wait for available capacity
+            let permit = semaphore.clone().acquire_owned().await?;
 
-            // Find available tasks
-            let available_tasks = self
+            // Fetch tasks (up to batch_size, but we process one at a time)
+            let available_tasks = worker
                 .backend
-                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .find_available_tasks(&worker.worker_id, worker.batch_size.get())
                 .await?;
 
-            for task in available_tasks {
-                // Find matching workflow
-                if let Some((_, workflow)) = workflows
+            // Find first task with a matching workflow
+            let task_with_workflow = available_tasks.into_iter().find_map(|task| {
+                workflows
                     .iter()
                     .find(|(hash, _)| *hash == task.workflow_definition_hash)
-                {
-                    // Execute task
-                    match self.execute_task(workflow.as_ref(), task).await {
-                        Ok(_) => {
-                            tracing::info!("Worker {} completed a task", self.worker_id);
+                    .map(|(_, workflow)| (task, Arc::clone(workflow)))
+            });
+
+            match task_with_workflow {
+                Some((task, workflow)) => {
+                    // Spawn task with the permit
+                    let worker = Arc::clone(&worker);
+
+                    tokio::spawn(async move {
+                        let _permit = permit; // Hold permit until task completes
+
+                        match worker.execute_task(workflow.as_ref(), task).await {
+                            Ok(_) => {
+                                tracing::info!("Worker {} completed a task", worker.worker_id);
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Worker {} task execution failed: {}",
+                                    worker.worker_id,
+                                    e
+                                );
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                "Worker {} task execution failed: {}",
-                                self.worker_id,
-                                e
-                            );
-                        }
-                    }
+                    });
+
+                    // Immediately loop back to fill more capacity (no wait)
+                }
+                None => {
+                    // No tasks available, release permit and wait for poll interval
+                    drop(permit);
+                    interval.tick().await;
                 }
             }
         }

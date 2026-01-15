@@ -134,6 +134,7 @@ sequenceDiagram
 | `claim_ttl` | 5 minutes | How long a claim is valid |
 | `heartbeat_interval` | 2 minutes | How often to extend the claim |
 | `batch_size` | 1 | Tasks to fetch per poll |
+| `max_concurrency` | 1 | Max concurrent task executions per worker |
 
 If a worker crashes, its heartbeat stops and the claim expires, allowing another worker to pick up the task.
 
