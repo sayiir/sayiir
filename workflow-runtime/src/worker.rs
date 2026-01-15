@@ -533,10 +533,10 @@ where
             WorkflowContinuation::Fork { branches, join } => {
                 // All branches must be completed
                 for branch in branches.iter() {
-                    if let WorkflowContinuation::Task { id, .. } = branch.as_ref() {
-                        if snapshot.get_task_result(id).is_none() {
-                            return false;
-                        }
+                    if let WorkflowContinuation::Task { id, .. } = branch.as_ref()
+                        && snapshot.get_task_result(id).is_none()
+                    {
+                        return false;
                     }
                 }
                 // Join must be completed if it exists
