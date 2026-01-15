@@ -58,6 +58,7 @@ use workflow_persistence::PersistentBackend;
 pub struct PooledWorker<B> {
     worker_id: String,
     backend: Arc<B>,
+    #[allow(unused)]
     registry: Arc<TaskRegistry>,
     claim_ttl: Option<Duration>,
     heartbeat_interval: Option<Duration>,
@@ -363,6 +364,7 @@ where
     ///
     /// - `poll_interval`: How often to poll for new tasks
     /// - `workflows`: Map of workflow definition hash to workflow (for task execution)
+    #[allow(clippy::type_complexity)]
     pub async fn start_polling<C, Input, M>(
         &self,
         poll_interval: Duration,

@@ -155,6 +155,7 @@ where
     /// - The snapshot is not found
     /// - The workflow definition hash doesn't match (workflow definition changed)
     /// - The workflow cannot be resumed
+    #[allow(clippy::needless_lifetimes)]
     pub async fn resume<'w, C, Input, M>(
         &self,
         workflow: &'w Workflow<C, Input, M>,
@@ -181,10 +182,10 @@ where
         if snapshot.is_completed() {
             return Ok(WorkflowStatus::Completed);
         }
-        if snapshot.is_failed() {
-            if let WorkflowSnapshotState::Failed { error } = &snapshot.state {
-                return Ok(WorkflowStatus::Failed(anyhow::anyhow!("{}", error)));
-            }
+        if snapshot.is_failed()
+            && let WorkflowSnapshotState::Failed { error } = &snapshot.state
+        {
+            return Ok(WorkflowStatus::Failed(anyhow::anyhow!("{error}")));
         }
 
         // Resume execution
@@ -192,7 +193,7 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        let result = with_context(context, || async move {
+        with_context(context, || async move {
             // Get the last completed task's output or initial input
             let input_bytes = Self::get_resume_input(&snapshot, continuation)?;
 
@@ -216,9 +217,7 @@ where
                 }
             }
         })
-        .await;
-
-        result
+        .await
     }
 
     /// Execute continuation with checkpointing after each task.
@@ -235,7 +234,7 @@ where
                     // Check if this task was already completed
                     if let Some(task_result) = snapshot.get_task_result(id) {
                         // Task already completed, use cached result
-                        let output = Bytes::from(task_result.output.clone());
+                        let output = task_result.output.clone();
 
                         // Update position to next task
                         if let Some(next_cont) = next {
@@ -305,8 +304,7 @@ where
                         };
 
                         if let Some(result) = snapshot.get_task_result(&branch_id) {
-                            branch_results
-                                .push((branch_id.clone(), Bytes::from(result.output.clone())));
+                            branch_results.push((branch_id.clone(), result.output.clone()));
                         } else {
                             all_branches_completed = false;
                             break;
@@ -351,7 +349,7 @@ where
                                 // Check if already completed (clone the result to avoid borrow)
                                 let cached_result = snapshot
                                     .get_task_result(&branch_id)
-                                    .map(|r| Bytes::from(r.output.clone()));
+                                    .map(|r| r.output.clone());
 
                                 if let Some(result) = cached_result {
                                     return tokio::task::spawn(async move {

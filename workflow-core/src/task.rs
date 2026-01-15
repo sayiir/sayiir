@@ -4,7 +4,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::Read;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,7 +37,7 @@ pub struct RetryPolicy {
     pub backoff_multiplier: f32,
 }
 
-/// Deserialize named branch results from length-prefixed format.
+/// Deserialize named branch results from length-prefixed format (zero-copy).
 ///
 /// Format:
 /// - 4 bytes: number of branches (u32, little-endian)
@@ -47,36 +46,50 @@ pub struct RetryPolicy {
 ///   - N bytes: name (UTF-8)
 ///   - 4 bytes: data length (u32, little-endian)
 ///   - M bytes: data
+///
+/// Data portions are zero-copy slices into the original buffer.
 pub fn deserialize_named_branch_results(bytes: Bytes) -> Result<HashMap<String, Bytes>> {
-    let mut reader = bytes.as_ref();
+    let mut offset = 0;
     let mut results = HashMap::new();
 
     // Read number of branches
-    let mut branch_count_bytes = [0u8; 4];
-    reader.read_exact(&mut branch_count_bytes)?;
-    let branch_count = u32::from_le_bytes(branch_count_bytes) as usize;
+    if bytes.len() < 4 {
+        return Err(anyhow::anyhow!("Buffer too small for branch count"));
+    }
+    let branch_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+    offset += 4;
 
     // Read each branch result
     for _ in 0..branch_count {
         // Read name length
-        let mut name_len_bytes = [0u8; 4];
-        reader.read_exact(&mut name_len_bytes)?;
-        let name_len = u32::from_le_bytes(name_len_bytes) as usize;
+        if bytes.len() < offset + 4 {
+            return Err(anyhow::anyhow!("Buffer too small for name length"));
+        }
+        let name_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+        offset += 4;
 
-        // Read name
-        let mut name_bytes = vec![0u8; name_len];
-        reader.read_exact(&mut name_bytes)?;
-        let name = String::from_utf8(name_bytes)?;
+        // Read name (must copy for String conversion)
+        if bytes.len() < offset + name_len {
+            return Err(anyhow::anyhow!("Buffer too small for name"));
+        }
+        let name = String::from_utf8(bytes[offset..offset + name_len].to_vec())?;
+        offset += name_len;
 
         // Read data length
-        let mut data_len_bytes = [0u8; 4];
-        reader.read_exact(&mut data_len_bytes)?;
-        let data_len = u32::from_le_bytes(data_len_bytes) as usize;
+        if bytes.len() < offset + 4 {
+            return Err(anyhow::anyhow!("Buffer too small for data length"));
+        }
+        let data_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+        offset += 4;
 
-        // Read data
-        let mut data = vec![0u8; data_len];
-        reader.read_exact(&mut data)?;
-        results.insert(name, Bytes::from(data));
+        // Zero-copy slice for data
+        if bytes.len() < offset + data_len {
+            return Err(anyhow::anyhow!("Buffer too small for data"));
+        }
+        let data = bytes.slice(offset..offset + data_len);
+        offset += data_len;
+
+        results.insert(name, data);
     }
 
     Ok(results)
