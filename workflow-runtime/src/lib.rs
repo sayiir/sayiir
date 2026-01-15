@@ -19,8 +19,8 @@ pub mod worker;
 
 // Re-exports
 pub use runner::WorkflowRunner;
-pub use runner::in_process::InProcessRunner;
 pub use runner::distributed::CheckpointingRunner;
+pub use runner::in_process::InProcessRunner;
 pub use worker::PooledWorker;
 
 pub use workflow_core::sayiir_ctx;
