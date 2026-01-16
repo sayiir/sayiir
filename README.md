@@ -111,10 +111,10 @@ Microservice orchestration with JSON DSL:
 
 #### Windmill
 
-A process scheduler marketed as a workflow engine:
+A platform that combines process scheduling with workflow features:
 
 - **Feature freakshow** — Scripts, flows, apps, schedules, webhooks, approval steps, error handlers, REST API builder, variables, resources, groups, folders, workers, worker groups... The feature list keeps growing, but the core workflow primitives get lost in the noise. It's unclear what problem Windmill is trying to solve exceptionally well.
-- **Process manager at heart** — Windmill spawns subprocesses and captures their output. Despite surface-level comparisons, it's in a different category than Temporal or Sayiir—closer to a job scheduler than a durable workflow engine.
+- **Subprocess-based execution model** — Windmill spawns subprocesses and captures their output. This contrasts with library-first durable workflow engines like Temporal or Sayiir, where workflows are expressed directly in application code rather than via external scripts managed by a platform.
 - **AGPLv3 licensing** — It adds further constraints for commercial use.
 - **Platform, not a library** — You don't import Windmill; you deploy it. Your workflows live in their UI, their database, their execution model. **Self-hosted doesn't mean portable**. How you structure scripts, how you pass data, how you handle errors, how you deploy workers—Windmill has strong opinions, and your code must conform.
 
