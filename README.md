@@ -77,7 +77,7 @@ The incumbent for data pipelines, showing its age:
 Modern Python-native alternative, but with trade-offs:
 
 - **Cloud-first business model** — The open-source server is intentionally limited; the real value is in Prefect Cloud. This shapes what features get attention.
-- **Momentum concerns** — Weekly commits have steadily declined since mid-2021, reflecting slowdown in core development.
+- **Momentum considerations** — Evaluate the current release cadence, roadmap, and community activity to ensure they align with your long-term needs.
 - **No native data lineage** — Logs and statuses are centralized, but cross-workflow visibility requires custom instrumentation.
 - **Python-only** — Great for Python shops, but no path to other languages.
 
