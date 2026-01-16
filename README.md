@@ -270,19 +270,19 @@ let workflow = WorkflowBuilder::new(ctx)
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│                        Your Application                           │
+│                        Your Application                          │
 ├──────────────────────────────────────────────────────────────────┤
-│                         Sayiir Runtime                            │
+│                         Sayiir Runtime                           │
 │  ┌─────────────────────┐  ┌──────────────────────────────────┐   │
 │  │ CheckpointingRunner │  │          PooledWorker            │   │
 │  │  (single process)   │  │  (distributed, multi-machine)    │   │
 │  └─────────────────────┘  └──────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────────┤
-│                      Persistence Layer                            │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐    │
-│  │ InMemory │  │ Postgres │  │  Custom  │  │  Enterprise   │    │
-│  │ Backend  │  │ Backend  │  │ Backend  │  │  gRPC Server  │    │
-│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘    │
+│                      Persistence Layer                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐     │
+│  │ InMemory │  │ Postgres │  │  Custom  │  │  Enterprise   │     │
+│  │ Backend  │  │ Backend  │  │ Backend  │  │  gRPC Server  │     │
+│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -374,18 +374,6 @@ Designed to scale to **hundreds of thousands of concurrent activities**:
 - **Minimal coordination** — workers claim tasks independently
 - **Per-task checkpointing** — fine-grained durability
 - **No global locks** — optimistic concurrency
-
----
-
-## Project Structure
-
-```text
-sayiir/
-├── workflow-core/        # Core types, traits, workflow builder
-├── workflow-runtime/     # Execution engines
-├── workflow-persistence/ # Storage backends
-└── workflow-macros/      # Procedural macros
-```
 
 ---
 
