@@ -176,13 +176,13 @@ where
     /// Attempts to load the snapshot and extract cancellation details.
     /// Returns `WorkflowStatus::Cancelled` with either the extracted details or defaults.
     async fn load_cancelled_status(&self, instance_id: &str) -> WorkflowStatus {
-        if let Ok(snapshot) = self.backend.load_snapshot(instance_id).await {
-            if let Some((reason, cancelled_by)) = snapshot.state.cancellation_details() {
-                return WorkflowStatus::Cancelled {
-                    reason,
-                    cancelled_by,
-                };
-            }
+        if let Ok(snapshot) = self.backend.load_snapshot(instance_id).await
+            && let Some((reason, cancelled_by)) = snapshot.state.cancellation_details()
+        {
+            return WorkflowStatus::Cancelled {
+                reason,
+                cancelled_by,
+            };
         }
         WorkflowStatus::Cancelled {
             reason: None,

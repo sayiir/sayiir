@@ -277,15 +277,13 @@ where
                     // Reload snapshot to get cancellation details (set by check_and_cancel)
                     if let Ok(cancelled_snapshot) =
                         backend.load_snapshot(&snapshot.instance_id).await
-                    {
-                        if let Some((reason, cancelled_by)) =
+                        && let Some((reason, cancelled_by)) =
                             cancelled_snapshot.state.cancellation_details()
-                        {
-                            return Ok(WorkflowStatus::Cancelled {
-                                reason,
-                                cancelled_by,
-                            });
-                        }
+                    {
+                        return Ok(WorkflowStatus::Cancelled {
+                            reason,
+                            cancelled_by,
+                        });
                     }
                     // Fallback if we couldn't get details
                     return Ok(WorkflowStatus::Cancelled {
