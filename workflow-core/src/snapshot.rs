@@ -5,7 +5,7 @@
 //! workflows from any checkpoint.
 
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -41,6 +41,20 @@ pub struct TaskResult {
     pub output: Bytes,
 }
 
+/// A request to cancel a workflow.
+///
+/// This is stored separately from the workflow state and checked by workers
+/// at task boundaries. The actual `Cancelled` state is set after processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancellationRequest {
+    /// Optional reason for the cancellation.
+    pub reason: Option<String>,
+    /// Optional identifier of who requested the cancellation.
+    pub requested_by: Option<String>,
+    /// Timestamp when the cancellation was requested.
+    pub requested_at: DateTime<Utc>,
+}
+
 /// State of a workflow snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSnapshotState {
@@ -51,7 +65,7 @@ pub enum WorkflowSnapshotState {
         /// Results from completed tasks (by task ID).
         completed_tasks: HashMap<String, TaskResult>,
         /// ID of the last completed task (for deterministic resume).
-        /// This is needed because HashMap iteration order is not guaranteed.
+        /// This is needed because `HashMap` iteration order is not guaranteed.
         last_completed_task_id: Option<String>,
     },
     /// Workflow completed successfully.
@@ -64,6 +78,51 @@ pub enum WorkflowSnapshotState {
         /// Error message.
         error: String,
     },
+    /// Workflow was cancelled.
+    Cancelled {
+        /// Optional reason for the cancellation.
+        reason: Option<String>,
+        /// Optional identifier of who cancelled the workflow.
+        cancelled_by: Option<String>,
+        /// Timestamp when the workflow was cancelled.
+        cancelled_at: DateTime<Utc>,
+        /// Results from tasks that completed before cancellation.
+        completed_tasks: HashMap<String, TaskResult>,
+        /// The task ID that was interrupted (if any).
+        interrupted_at_task: Option<String>,
+    },
+}
+
+impl WorkflowSnapshotState {
+    /// Check if the workflow is completed.
+    pub fn is_completed(&self) -> bool {
+        matches!(self, WorkflowSnapshotState::Completed { .. })
+    }
+
+    /// Check if the workflow has failed.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, WorkflowSnapshotState::Failed { .. })
+    }
+
+    /// Check if the workflow is still in progress.
+    pub fn is_in_progress(&self) -> bool {
+        matches!(self, WorkflowSnapshotState::InProgress { .. })
+    }
+
+    /// Check if the workflow was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, WorkflowSnapshotState::Cancelled { .. })
+    }
+
+    /// Check if the workflow is in a terminal state (completed, failed, or cancelled).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            WorkflowSnapshotState::Completed { .. }
+                | WorkflowSnapshotState::Failed { .. }
+                | WorkflowSnapshotState::Cancelled { .. }
+        )
+    }
 }
 
 /// A complete snapshot of workflow execution state.
@@ -93,11 +152,13 @@ pub struct WorkflowSnapshot {
 
 impl WorkflowSnapshot {
     /// Get the current Unix timestamp.
+    #[allow(clippy::cast_sign_loss)] // Timestamps are always positive
     fn current_timestamp() -> u64 {
         Utc::now().timestamp() as u64
     }
 
     /// Create a new snapshot for a workflow instance.
+    #[must_use]
     pub fn new(instance_id: String, definition_hash: String) -> Self {
         let now = Self::current_timestamp();
         Self {
@@ -140,25 +201,13 @@ impl WorkflowSnapshot {
         self.initial_input.clone()
     }
 
-    /// Check if the workflow is completed.
-    pub fn is_completed(&self) -> bool {
-        matches!(self.state, WorkflowSnapshotState::Completed { .. })
-    }
-
-    /// Check if the workflow has failed.
-    pub fn is_failed(&self) -> bool {
-        matches!(self.state, WorkflowSnapshotState::Failed { .. })
-    }
-
-    /// Check if the workflow is still in progress.
-    pub fn is_in_progress(&self) -> bool {
-        matches!(self.state, WorkflowSnapshotState::InProgress { .. })
-    }
-
     /// Get the result of a completed task, if available.
     pub fn get_task_result(&self, task_id: &str) -> Option<&TaskResult> {
         match &self.state {
             WorkflowSnapshotState::InProgress {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Cancelled {
                 completed_tasks, ..
             } => completed_tasks.get(task_id),
             _ => None,
@@ -230,6 +279,32 @@ impl WorkflowSnapshot {
     /// Mark the workflow as failed with an error.
     pub fn mark_failed(&mut self, error: String) {
         self.state = WorkflowSnapshotState::Failed { error };
+        self.updated_at = Self::current_timestamp();
+    }
+
+    /// Mark the workflow as cancelled.
+    ///
+    /// This preserves the completed tasks from the current state.
+    pub fn mark_cancelled(
+        &mut self,
+        reason: Option<String>,
+        cancelled_by: Option<String>,
+        interrupted_at_task: Option<String>,
+    ) {
+        let completed_tasks = match &self.state {
+            WorkflowSnapshotState::InProgress {
+                completed_tasks, ..
+            } => completed_tasks.clone(),
+            _ => HashMap::new(),
+        };
+
+        self.state = WorkflowSnapshotState::Cancelled {
+            reason,
+            cancelled_by,
+            cancelled_at: Utc::now(),
+            completed_tasks,
+            interrupted_at_task,
+        };
         self.updated_at = Self::current_timestamp();
     }
 }

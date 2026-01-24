@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::Duration;
-use workflow_core::snapshot::WorkflowSnapshot;
+use workflow_core::snapshot::{CancellationRequest, WorkflowSnapshot};
 use workflow_core::task_claim::AvailableTask;
 use workflow_core::task_claim::TaskClaim;
 
@@ -21,6 +21,9 @@ pub enum BackendError {
     /// Backend-specific error.
     #[error("Backend error: {0}")]
     Backend(String),
+    /// Cannot cancel workflow in current state.
+    #[error("Cannot cancel workflow in state: {0}")]
+    CannotCancel(String),
 }
 
 /// Trait for persistent storage of workflow snapshots.
@@ -165,4 +168,74 @@ pub trait PersistentBackend: Send + Sync {
         worker_id: &str,
         limit: usize,
     ) -> Result<Vec<AvailableTask>, BackendError>;
+
+    /// Request cancellation of a workflow.
+    ///
+    /// This stores a cancellation request that workers will check at task boundaries.
+    /// The workflow transitions to `Cancelled` state when a worker processes the request.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID
+    /// - `request`: The cancellation request details
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError::NotFound` if no snapshot exists for the instance.
+    /// Returns `BackendError::CannotCancel` if the workflow is in a terminal state.
+    async fn request_cancellation(
+        &self,
+        instance_id: &str,
+        request: CancellationRequest,
+    ) -> Result<(), BackendError>;
+
+    /// Get the pending cancellation request for a workflow, if any.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError` if the operation fails.
+    async fn get_cancellation_request(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<CancellationRequest>, BackendError>;
+
+    /// Clear the cancellation request for a workflow.
+    ///
+    /// Called after the workflow has been successfully cancelled.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError` if the operation fails.
+    async fn clear_cancellation_request(&self, instance_id: &str) -> Result<(), BackendError>;
+
+    /// Atomically check for cancellation and transition to cancelled state.
+    ///
+    /// This is a convenience method that combines checking for a cancellation request
+    /// and updating the snapshot state in one atomic operation.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID
+    /// - `interrupted_at_task`: Optional task ID that was being executed when cancelled
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the workflow was cancelled, `false` if no cancellation was pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError` if the operation fails.
+    async fn check_and_cancel(
+        &self,
+        instance_id: &str,
+        interrupted_at_task: Option<&str>,
+    ) -> Result<bool, BackendError>;
 }

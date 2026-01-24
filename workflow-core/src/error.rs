@@ -1,7 +1,7 @@
 //! Error types for workflow-core.
 
 /// Unified error type for workflow operations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WorkflowError {
     /// A duplicate task ID was found during workflow building.
     DuplicateTaskId(String),
@@ -15,21 +15,34 @@ pub enum WorkflowError {
         /// The hash found in the serialized state.
         found: String,
     },
+    /// The workflow was cancelled.
+    Cancelled {
+        /// Optional reason for the cancellation.
+        reason: Option<String>,
+        /// Optional identifier of who cancelled the workflow.
+        cancelled_by: Option<String>,
+    },
 }
 
 impl std::fmt::Display for WorkflowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WorkflowError::DuplicateTaskId(id) => write!(f, "Duplicate task id: '{}'", id),
+            WorkflowError::DuplicateTaskId(id) => write!(f, "Duplicate task id: '{id}'"),
             WorkflowError::TaskNotFound(id) => {
-                write!(f, "Task '{}' not found in registry", id)
+                write!(f, "Task '{id}' not found in registry")
             }
             WorkflowError::DefinitionMismatch { expected, found } => {
                 write!(
                     f,
-                    "Workflow definition mismatch: expected hash '{}', found '{}'",
-                    expected, found
+                    "Workflow definition mismatch: expected hash '{expected}', found '{found}'"
                 )
+            }
+            WorkflowError::Cancelled { reason, .. } => {
+                if let Some(reason) = reason {
+                    write!(f, "Workflow cancelled: {reason}")
+                } else {
+                    write!(f, "Workflow cancelled")
+                }
             }
         }
     }
