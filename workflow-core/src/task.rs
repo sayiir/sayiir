@@ -48,7 +48,11 @@ pub struct RetryPolicy {
 ///   - M bytes: data
 ///
 /// Data portions are zero-copy slices into the original buffer.
-pub fn deserialize_named_branch_results(bytes: Bytes) -> Result<HashMap<String, Bytes>> {
+///
+/// # Errors
+///
+/// Returns an error if the buffer is malformed or too small.
+pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String, Bytes>> {
     let mut offset = 0;
     let mut results = HashMap::new();
 
@@ -116,27 +120,30 @@ pub struct BranchOutputs<C> {
 }
 
 impl<C> BranchOutputs<C> {
-    /// Create a new BranchOutputs from raw data.
+    /// Create a new `BranchOutputs` from raw data.
     pub fn new(outputs: HashMap<String, Bytes>, codec: Arc<C>) -> Self {
         Self { outputs, codec }
     }
 
     /// Get the names of all branches.
     pub fn branch_names(&self) -> impl Iterator<Item = &str> {
-        self.outputs.keys().map(|s| s.as_str())
+        self.outputs.keys().map(std::string::String::as_str)
     }
 
     /// Check if a branch exists.
+    #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.outputs.contains_key(name)
     }
 
     /// Get the number of branches.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.outputs.len()
     }
 
     /// Check if there are no branches.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.outputs.is_empty()
     }
@@ -144,6 +151,8 @@ impl<C> BranchOutputs<C> {
 
 impl<C: Codec> BranchOutputs<C> {
     /// Get a branch output by name, deserializing to the requested type.
+    ///
+    /// # Errors
     ///
     /// Returns an error if the branch doesn't exist or deserialization fails.
     pub fn get<T>(&self, name: &str) -> Result<T>
@@ -153,7 +162,7 @@ impl<C: Codec> BranchOutputs<C> {
         let bytes = self
             .outputs
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Branch '{}' not found", name))?;
+            .ok_or_else(|| anyhow::anyhow!("Branch '{name}' not found"))?;
 
         self.codec.decode(bytes.clone())
     }
@@ -351,7 +360,7 @@ pub(crate) struct Branch<I, O> {
     func: BoxedBranchFn<I, O>,
 }
 
-/// Create a branch (internal helper used by ForkBuilder).
+/// Create a branch (internal helper used by `ForkBuilder`).
 pub(crate) fn branch<F, Fut, I, O>(id: &str, f: F) -> Branch<I, O>
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
@@ -388,7 +397,8 @@ impl<I, O> Branch<I, O> {
     }
 }
 
-/// Convert a Branch to an UntypedCoreTask (internal).
+/// Convert a Branch to an `UntypedCoreTask` (internal).
+#[allow(clippy::items_after_statements)]
 pub(crate) fn branch_to_core_task<I, O, C>(branch: Branch<I, O>, codec: Arc<C>) -> UntypedCoreTask
 where
     I: Send + 'static,
@@ -458,7 +468,7 @@ where
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
         Box::pin(async move {
-            let named_results = deserialize_named_branch_results(input)?;
+            let named_results = deserialize_named_branch_results(&input)?;
             let branch_outputs = BranchOutputs::new(named_results, codec.clone());
 
             let output = func(branch_outputs).await?;

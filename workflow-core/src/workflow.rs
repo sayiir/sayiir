@@ -25,6 +25,24 @@ pub enum WorkflowContinuation {
 }
 
 impl WorkflowContinuation {
+    /// Get the first task ID from this continuation.
+    ///
+    /// For a `Task`, returns its ID. For a `Fork`, returns the first task ID
+    /// from the first branch.
+    #[must_use]
+    pub fn first_task_id(&self) -> String {
+        match self {
+            WorkflowContinuation::Task { id, .. } => id.clone(),
+            WorkflowContinuation::Fork { branches, .. } => {
+                if let Some(first_branch) = branches.first() {
+                    first_branch.first_task_id()
+                } else {
+                    String::from("unknown")
+                }
+            }
+        }
+    }
+
     /// Find the first duplicate ID in this continuation tree, if any.
     fn find_duplicate_id(&self) -> Option<String> {
         fn collect(cont: &WorkflowContinuation, seen: &mut HashSet<String>) -> Option<String> {
@@ -45,6 +63,7 @@ impl WorkflowContinuation {
     }
 
     /// Convert to a serializable representation (strips out task implementations).
+    #[must_use]
     pub fn to_serializable(&self) -> SerializableContinuation {
         match self {
             WorkflowContinuation::Task { id, next, .. } => SerializableContinuation::Task {
@@ -88,7 +107,7 @@ pub enum SerializableContinuation {
 }
 
 impl SerializableContinuation {
-    /// Convert this serializable continuation into a runnable WorkflowContinuation.
+    /// Convert this serializable continuation into a runnable `WorkflowContinuation`.
     ///
     /// Looks up each task ID in the registry to get the actual implementation.
     ///
@@ -144,6 +163,7 @@ impl SerializableContinuation {
     }
 
     /// Get all task IDs referenced in this continuation.
+    #[must_use]
     pub fn task_ids(&self) -> Vec<&str> {
         fn collect<'a>(cont: &'a SerializableContinuation, ids: &mut Vec<&'a str>) {
             match cont {
@@ -197,6 +217,7 @@ impl SerializableContinuation {
     ///
     /// The hash is computed from the canonical structure of task IDs and their
     /// arrangement.
+    #[must_use]
     pub fn compute_definition_hash(&self) -> String {
         fn hash_continuation(cont: &SerializableContinuation, hasher: &mut Sha256) {
             match cont {
@@ -210,7 +231,7 @@ impl SerializableContinuation {
                 }
                 SerializableContinuation::Fork { branches, join } => {
                     hasher.update(b"F:["); // Tag for Fork
-                    for branch in branches.iter() {
+                    for branch in branches {
                         hash_continuation(branch, hasher);
                         hasher.update(b",");
                     }
@@ -226,7 +247,7 @@ impl SerializableContinuation {
         let mut hasher = Sha256::new();
         hash_continuation(self, &mut hasher);
         let result = hasher.finalize();
-        format!("{:x}", result)
+        format!("{result:x}")
     }
 }
 
@@ -256,6 +277,13 @@ pub enum WorkflowStatus {
     Completed,
     /// The workflow failed with an error.
     Failed(anyhow::Error),
+    /// The workflow was cancelled.
+    Cancelled {
+        /// Optional reason for the cancellation.
+        reason: Option<String>,
+        /// Optional identifier of who cancelled the workflow.
+        cancelled_by: Option<String>,
+    },
 }
 
 /// Marker type for empty continuation (no tasks yet).
@@ -266,7 +294,7 @@ pub struct NoRegistry;
 
 /// Trait for continuation state - allows unified handling of empty vs existing continuation.
 pub trait ContinuationState {
-    /// Append a new task to this continuation state, returning a WorkflowContinuation.
+    /// Append a new task to this continuation state, returning a `WorkflowContinuation`.
     fn append(self, new_task: WorkflowContinuation) -> WorkflowContinuation;
 }
 
@@ -287,7 +315,7 @@ use crate::registry::TaskRegistry;
 
 /// Trait for registry behavior - allows unified implementation of builder methods.
 pub trait RegistryBehavior {
-    /// Register a task (no-op for NoRegistry, actual registration for TaskRegistry).
+    /// Register a task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
     fn maybe_register<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
     where
         F: Fn(I) -> Fut + Send + Sync + 'static,
@@ -369,11 +397,13 @@ pub struct Workflow<C, Input, M = ()> {
     _phantom: PhantomData<Input>,
 }
 
+#[allow(clippy::mismatching_type_param_order)] // Input used for both Input and Output initially
 impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry> {
     /// Create a new workflow builder with a context object.
     ///
     /// The context contains the workflow ID, codec and metadata that will be available
     /// at any execution point via the `sayiir_ctx!` macro.
+    #[must_use]
     pub fn new(ctx: WorkflowContext<C, M>) -> Self
     where
         C: Codec,
@@ -407,6 +437,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     ///     })
     ///     .build()?;  // Returns SerializableWorkflow
     /// ```
+    #[must_use]
     pub fn with_registry(
         self,
     ) -> WorkflowBuilder<C, Input, Input, M, NoContinuation, TaskRegistry> {
@@ -444,6 +475,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// let registry = build_registry(codec.clone());
     /// let runnable = serialized_continuation.to_runnable(&registry)?;
     /// ```
+    #[must_use]
     pub fn with_existing_registry(
         self,
         registry: TaskRegistry,
@@ -458,7 +490,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     }
 }
 
-/// Methods for adding tasks - unified implementation using RegistryBehavior and ContinuationState.
+/// Methods for adding tasks - unified implementation using `RegistryBehavior` and `ContinuationState`.
 impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
 where
     R: RegistryBehavior,
@@ -504,7 +536,7 @@ where
     }
 }
 
-/// Methods for referencing pre-registered tasks (only available with TaskRegistry).
+/// Methods for referencing pre-registered tasks (only available with `TaskRegistry`).
 impl<C, Input, Output, M, Cont> WorkflowBuilder<C, Input, Output, M, Cont, TaskRegistry>
 where
     Cont: ContinuationState,
@@ -591,6 +623,7 @@ where
     ///     .then("add_ten", |i: u32| async move { Ok(i + 10) })
     ///     .build()?;
     /// ```
+    #[must_use]
     pub fn with_metadata(mut self, metadata: crate::task::TaskMetadata) -> Self {
         if let Some(ref id) = self.last_task_id {
             self.registry.set_metadata(id, metadata);
@@ -666,7 +699,7 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
     }
 }
 
-/// Build method for WorkflowBuilder without registry - returns Workflow.
+/// Build method for `WorkflowBuilder` without registry - returns Workflow.
 impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, NoRegistry> {
     /// Build the workflow into an executable workflow.
     ///
@@ -702,7 +735,7 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     }
 }
 
-/// Build method for WorkflowBuilder with registry - returns SerializableWorkflow.
+/// Build method for `WorkflowBuilder` with registry - returns `SerializableWorkflow`.
 impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, TaskRegistry> {
     /// Build the workflow into a serializable workflow.
     ///
@@ -971,6 +1004,7 @@ where
 
 impl<C, Input, M> Workflow<C, Input, M> {
     /// Get the workflow ID.
+    #[must_use]
     pub fn workflow_id(&self) -> &str {
         &self.context.workflow_id
     }
@@ -980,26 +1014,31 @@ impl<C, Input, M> Workflow<C, Input, M> {
     /// This hash is computed from the workflow's continuation structure and serves
     /// as a version identifier. It can be used to detect when a serialized workflow
     /// state was created with a different workflow definition.
+    #[must_use]
     pub fn definition_hash(&self) -> &str {
         &self.definition_hash
     }
 
     /// Get a reference to the context of this workflow.
+    #[must_use]
     pub fn context(&self) -> &WorkflowContext<C, M> {
         &self.context
     }
 
     /// Get a reference to the codec used by this workflow.
+    #[must_use]
     pub fn codec(&self) -> &Arc<C> {
         &self.context.codec
     }
 
     /// Get a reference to the continuation of this workflow.
+    #[must_use]
     pub fn continuation(&self) -> &WorkflowContinuation {
         &self.continuation
     }
 
     /// Get a reference to the metadata attached to this workflow.
+    #[must_use]
     pub fn metadata(&self) -> &Arc<M> {
         &self.context.metadata
     }
@@ -1040,41 +1079,49 @@ pub struct SerializableWorkflow<C, Input, M = ()> {
 
 impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     /// Get the workflow ID.
+    #[must_use]
     pub fn workflow_id(&self) -> &str {
         self.inner.workflow_id()
     }
 
     /// Get the definition hash.
+    #[must_use]
     pub fn definition_hash(&self) -> &str {
         self.inner.definition_hash()
     }
 
     /// Get a reference to the inner workflow.
+    #[must_use]
     pub fn workflow(&self) -> &Workflow<C, Input, M> {
         &self.inner
     }
 
     /// Get a reference to the context.
+    #[must_use]
     pub fn context(&self) -> &WorkflowContext<C, M> {
         self.inner.context()
     }
 
     /// Get a reference to the codec.
+    #[must_use]
     pub fn codec(&self) -> &Arc<C> {
         self.inner.codec()
     }
 
     /// Get a reference to the continuation.
+    #[must_use]
     pub fn continuation(&self) -> &WorkflowContinuation {
         self.inner.continuation()
     }
 
     /// Get a reference to the metadata.
+    #[must_use]
     pub fn metadata(&self) -> &Arc<M> {
         self.inner.metadata()
     }
 
     /// Get a reference to the internal task registry.
+    #[must_use]
     pub fn registry(&self) -> &TaskRegistry {
         &self.registry
     }
@@ -1084,6 +1131,7 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     /// Returns a `SerializedWorkflowState` that includes the workflow ID,
     /// definition hash, and continuation structure. This can be serialized
     /// and later deserialized to resume the workflow.
+    #[must_use]
     pub fn to_serializable(&self) -> SerializedWorkflowState {
         SerializedWorkflowState {
             workflow_id: self.inner.workflow_id().to_string(),

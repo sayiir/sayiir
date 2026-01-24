@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 pub mod codec;
 pub mod context;
 pub mod error;

@@ -11,12 +11,16 @@
 //! horizontal scaling with multiple workers collaborating on tasks.
 
 use bytes::Bytes;
+use chrono::Utc;
 use futures::future;
 use std::sync::Arc;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::{WorkflowContext, with_context};
-use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
+use workflow_core::error::WorkflowError;
+use workflow_core::snapshot::{
+    CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
+};
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
 
@@ -70,6 +74,44 @@ where
             backend: Arc::new(backend),
         }
     }
+
+    /// Request cancellation of a workflow.
+    ///
+    /// This requests cancellation of the specified workflow instance.
+    /// The workflow will be cancelled at the next task boundary.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID to cancel
+    /// - `reason`: Optional reason for the cancellation
+    /// - `cancelled_by`: Optional identifier of who requested the cancellation
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workflow cannot be cancelled (not found or in terminal state).
+    pub async fn cancel(
+        &self,
+        instance_id: &str,
+        reason: Option<String>,
+        cancelled_by: Option<String>,
+    ) -> anyhow::Result<()> {
+        let request = CancellationRequest {
+            reason,
+            requested_by: cancelled_by,
+            requested_at: Utc::now(),
+        };
+
+        self.backend
+            .request_cancellation(instance_id, request)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get a reference to the backend.
+    pub fn backend(&self) -> &Arc<B> {
+        &self.backend
+    }
 }
 
 impl<B> CheckpointingRunner<B>
@@ -109,7 +151,7 @@ where
             input_bytes.clone(),
         );
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: Self::get_first_task_id(workflow.continuation()),
+            task_id: workflow.continuation().first_task_id(),
         });
 
         // Save initial snapshot
@@ -121,26 +163,16 @@ where
         let backend = Arc::clone(&self.backend);
 
         with_context(context.clone(), || async move {
-            match Self::execute_with_checkpointing(
+            let result = Self::execute_with_checkpointing(
                 continuation,
                 input_bytes,
                 &mut snapshot,
                 Arc::clone(&backend),
                 context,
             )
-            .await
-            {
-                Ok(output) => {
-                    snapshot.mark_completed(output.clone());
-                    backend.save_snapshot(snapshot).await?;
-                    Ok(WorkflowStatus::Completed)
-                }
-                Err(e) => {
-                    snapshot.mark_failed(e.to_string());
-                    let _ = backend.save_snapshot(snapshot).await;
-                    Ok(WorkflowStatus::Failed(e))
-                }
-            }
+            .await;
+
+            Self::handle_execution_result(result, &mut snapshot, &backend).await
         })
         .await
     }
@@ -179,14 +211,25 @@ where
             ));
         }
 
-        // Check if already completed or failed
-        if snapshot.is_completed() {
+        // Check if already completed, failed, or cancelled
+        if snapshot.state.is_completed() {
             return Ok(WorkflowStatus::Completed);
         }
-        if snapshot.is_failed()
+        if snapshot.state.is_failed()
             && let WorkflowSnapshotState::Failed { error } = &snapshot.state
         {
             return Ok(WorkflowStatus::Failed(anyhow::anyhow!("{error}")));
+        }
+        if let WorkflowSnapshotState::Cancelled {
+            reason,
+            cancelled_by,
+            ..
+        } = &snapshot.state
+        {
+            return Ok(WorkflowStatus::Cancelled {
+                reason: reason.clone(),
+                cancelled_by: cancelled_by.clone(),
+            });
         }
 
         // Resume execution
@@ -198,28 +241,61 @@ where
             // Get the last completed task's output or initial input
             let input_bytes = Self::get_resume_input(&snapshot, continuation)?;
 
-            match Self::execute_with_checkpointing(
+            let result = Self::execute_with_checkpointing(
                 continuation,
                 input_bytes,
                 &mut snapshot,
                 Arc::clone(&backend),
                 context,
             )
-            .await
-            {
-                Ok(output) => {
-                    snapshot.mark_completed(output.clone());
-                    backend.save_snapshot(snapshot).await?;
-                    Ok(WorkflowStatus::Completed)
-                }
-                Err(e) => {
-                    snapshot.mark_failed(e.to_string());
-                    let _ = backend.save_snapshot(snapshot).await;
-                    Ok(WorkflowStatus::Failed(e))
-                }
-            }
+            .await;
+
+            Self::handle_execution_result(result, &mut snapshot, &backend).await
         })
         .await
+    }
+
+    /// Handle execution result, converting to WorkflowStatus.
+    ///
+    /// On success, marks the workflow as completed.
+    /// On cancellation error, returns Cancelled status with details from snapshot.
+    /// On other errors, marks the workflow as failed.
+    async fn handle_execution_result(
+        result: anyhow::Result<Bytes>,
+        snapshot: &mut WorkflowSnapshot,
+        backend: &Arc<B>,
+    ) -> anyhow::Result<WorkflowStatus> {
+        match result {
+            Ok(output) => {
+                snapshot.mark_completed(output);
+                backend.save_snapshot(snapshot.clone()).await?;
+                Ok(WorkflowStatus::Completed)
+            }
+            Err(e) => {
+                // Check if this was a cancellation using downcasting
+                if let Some(WorkflowError::Cancelled { .. }) = e.downcast_ref::<WorkflowError>() {
+                    // Reload snapshot to get cancellation details (set by check_and_cancel)
+                    if let Ok(cancelled_snapshot) =
+                        backend.load_snapshot(&snapshot.instance_id).await
+                        && let Some((reason, cancelled_by)) =
+                            cancelled_snapshot.state.cancellation_details()
+                    {
+                        return Ok(WorkflowStatus::Cancelled {
+                            reason,
+                            cancelled_by,
+                        });
+                    }
+                    // Fallback if we couldn't get details
+                    return Ok(WorkflowStatus::Cancelled {
+                        reason: None,
+                        cancelled_by: None,
+                    });
+                }
+                snapshot.mark_failed(e.to_string());
+                let _ = backend.save_snapshot(snapshot.clone()).await;
+                Ok(WorkflowStatus::Failed(e))
+            }
+        }
     }
 
     /// Execute continuation with checkpointing after each task.
@@ -238,6 +314,14 @@ where
         Box::pin(async move {
             match continuation {
                 WorkflowContinuation::Task { id, func, next } => {
+                    // Check for cancellation before executing task
+                    if backend
+                        .check_and_cancel(&snapshot.instance_id, Some(id))
+                        .await?
+                    {
+                        return Err(WorkflowError::cancelled().into());
+                    }
+
                     // Check if this task was already completed
                     if let Some(task_result) = snapshot.get_task_result(id) {
                         // Task already completed, use cached result
@@ -246,7 +330,7 @@ where
                         // Update position to next task
                         if let Some(next_cont) = next {
                             snapshot.update_position(ExecutionPosition::AtTask {
-                                task_id: Self::get_first_task_id(next_cont),
+                                task_id: next_cont.first_task_id(),
                             });
                         } else {
                             // No next task, workflow complete
@@ -279,12 +363,20 @@ where
                         // Update position
                         if let Some(next_cont) = next {
                             snapshot.update_position(ExecutionPosition::AtTask {
-                                task_id: Self::get_first_task_id(next_cont),
+                                task_id: next_cont.first_task_id(),
                             });
                         }
 
                         // Save checkpoint
                         backend.save_snapshot(snapshot.clone()).await?;
+
+                        // Check for cancellation after task completes
+                        if backend
+                            .check_and_cancel(&snapshot.instance_id, None)
+                            .await?
+                        {
+                            return Err(WorkflowError::cancelled().into());
+                        }
 
                         // Continue with next task
                         if let Some(next_continuation) = next {
@@ -302,6 +394,14 @@ where
                     }
                 }
                 WorkflowContinuation::Fork { branches, join } => {
+                    // Check for cancellation before starting fork
+                    if backend
+                        .check_and_cancel(&snapshot.instance_id, None)
+                        .await?
+                    {
+                        return Err(WorkflowError::cancelled().into());
+                    }
+
                     // Check if fork was already completed
                     let mut all_branches_completed = true;
                     let mut branch_results = Vec::new();
@@ -398,6 +498,14 @@ where
                                 .into_iter()
                                 .collect::<anyhow::Result<Vec<_>>>()?;
 
+                        // Check for cancellation after fork branches complete
+                        if backend
+                            .check_and_cancel(&snapshot.instance_id, None)
+                            .await?
+                        {
+                            return Err(WorkflowError::cancelled().into());
+                        }
+
                         // Sync local snapshot with results (already saved to backend per-task)
                         for (branch_id, output) in &branch_results {
                             snapshot.mark_task_completed(branch_id.clone(), output.clone());
@@ -421,7 +529,7 @@ where
                                 })
                                 .collect();
                             snapshot.update_position(ExecutionPosition::AtJoin {
-                                join_id: Self::get_first_task_id(join_cont),
+                                join_id: join_cont.first_task_id(),
                                 completed_branches,
                             });
                         }
@@ -549,20 +657,6 @@ where
                 }
             }
         })
-    }
-
-    /// Get the first task ID from a continuation (for position tracking).
-    fn get_first_task_id(continuation: &WorkflowContinuation) -> String {
-        match continuation {
-            WorkflowContinuation::Task { id, .. } => id.clone(),
-            WorkflowContinuation::Fork { branches, .. } => {
-                if let Some(first_branch) = branches.first() {
-                    Self::get_first_task_id(first_branch)
-                } else {
-                    String::from("unknown")
-                }
-            }
-        }
     }
 
     /// Get the input for resuming execution.

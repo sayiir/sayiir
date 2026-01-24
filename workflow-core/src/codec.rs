@@ -10,21 +10,36 @@ use bytes::Bytes;
 /// 1. Implement the `Encoder` or `Decoder` trait (empty impl is fine)
 /// 2. Implement `sealed::EncodeValue<T>` or `sealed::DecodeValue<T>` with your desired bounds
 pub mod sealed {
-    use super::*;
+    use super::{Bytes, Result};
 
     /// Helper trait for encoding with custom bounds.
     pub trait EncodeValue<T>: Send + Sync + 'static {
+        /// Encode the value into bytes.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if serialization fails.
         fn encode_value(&self, value: &T) -> Result<Bytes>;
     }
 
     /// Helper trait for decoding with custom bounds.
     pub trait DecodeValue<T>: Send + Sync + 'static {
+        /// Decode a value from bytes.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if deserialization fails.
         fn decode_value(&self, bytes: Bytes) -> Result<T>;
     }
 }
 
 /// An encoder that can serialize a value into a byte stream.
 pub trait Encoder: Send + Sync + 'static {
+    /// Encode a value into bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails.
     fn encode<T>(&self, value: &T) -> Result<Bytes>
     where
         Self: sealed::EncodeValue<T>,
@@ -35,6 +50,11 @@ pub trait Encoder: Send + Sync + 'static {
 
 /// A decoder that can deserialize a value from a byte stream.
 pub trait Decoder: Send + Sync + 'static {
+    /// Decode a value from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deserialization fails.
     fn decode<T>(&self, bytes: Bytes) -> Result<T>
     where
         Self: sealed::DecodeValue<T>,

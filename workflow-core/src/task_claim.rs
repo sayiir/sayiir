@@ -25,8 +25,10 @@ pub struct TaskClaim {
     pub expires_at: Option<u64>,
 }
 
+#[allow(clippy::cast_sign_loss)] // Timestamps are always positive
 impl TaskClaim {
     /// Create a new task claim.
+    #[must_use]
     pub fn new(
         instance_id: String,
         task_id: String,
@@ -50,6 +52,7 @@ impl TaskClaim {
     }
 
     /// Check if this claim has expired.
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         if let Some(expires_at) = self.expires_at {
             let now = Utc::now().timestamp() as u64;
@@ -60,6 +63,7 @@ impl TaskClaim {
     }
 
     /// Check if this claim belongs to the given worker.
+    #[must_use]
     pub fn is_owned_by(&self, worker_id: &str) -> bool {
         self.worker_id == worker_id
     }

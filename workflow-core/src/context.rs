@@ -36,14 +36,17 @@ impl<C, M> WorkflowContext<C, M> {
         }
     }
 
+    #[must_use]
     pub fn workflow_id(&self) -> &str {
         &self.workflow_id
     }
 
+    #[must_use]
     pub fn codec(&self) -> Arc<C> {
         self.codec.clone()
     }
 
+    #[must_use]
     pub fn metadata(&self) -> Arc<M> {
         self.metadata.clone()
     }
@@ -105,6 +108,7 @@ where
 /// Get the workflow context from task-local storage.
 ///
 /// This is used internally by the `sayiir_ctx!` macro.
+#[must_use]
 pub fn get_context<C, M>() -> Option<WorkflowContext<C, M>>
 where
     C: Codec + 'static,

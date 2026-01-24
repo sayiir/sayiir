@@ -13,6 +13,7 @@
 
 use bytes::Bytes;
 use chrono;
+use chrono::Utc;
 use futures::FutureExt;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -24,7 +25,7 @@ use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::with_context;
 use workflow_core::registry::TaskRegistry;
-use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot};
+use workflow_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
 use workflow_core::task_claim::AvailableTask;
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
@@ -132,6 +133,63 @@ where
         self
     }
 
+    /// Request cancellation of a workflow.
+    ///
+    /// This requests cancellation of the specified workflow instance.
+    /// Running tasks will complete, but no new tasks will be started.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID to cancel
+    /// - `reason`: Optional reason for the cancellation
+    /// - `cancelled_by`: Optional identifier of who requested the cancellation
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workflow cannot be cancelled (not found or in terminal state).
+    pub async fn cancel_workflow(
+        &self,
+        instance_id: &str,
+        reason: Option<String>,
+        cancelled_by: Option<String>,
+    ) -> anyhow::Result<()> {
+        let request = CancellationRequest {
+            reason,
+            requested_by: cancelled_by,
+            requested_at: Utc::now(),
+        };
+
+        self.backend
+            .request_cancellation(instance_id, request)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get a reference to the backend.
+    pub fn backend(&self) -> &Arc<B> {
+        &self.backend
+    }
+
+    /// Load cancellation status from a snapshot.
+    ///
+    /// Attempts to load the snapshot and extract cancellation details.
+    /// Returns `WorkflowStatus::Cancelled` with either the extracted details or defaults.
+    async fn load_cancelled_status(&self, instance_id: &str) -> WorkflowStatus {
+        if let Ok(snapshot) = self.backend.load_snapshot(instance_id).await
+            && let Some((reason, cancelled_by)) = snapshot.state.cancellation_details()
+        {
+            return WorkflowStatus::Cancelled {
+                reason,
+                cancelled_by,
+            };
+        }
+        WorkflowStatus::Cancelled {
+            reason: None,
+            cancelled_by: None,
+        }
+    }
+
     /// Execute a single task from an available task.
     ///
     /// This claims the task, executes it, updates the snapshot, and releases the claim.
@@ -194,6 +252,30 @@ where
             .backend
             .load_snapshot(&available_task.instance_id)
             .await?;
+
+        // Check for cancellation before executing
+        if self
+            .backend
+            .check_and_cancel(&available_task.instance_id, Some(&available_task.task_id))
+            .await?
+        {
+            tracing::info!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Workflow was cancelled, releasing claim"
+            );
+            let _ = self
+                .backend
+                .release_task_claim(
+                    &available_task.instance_id,
+                    &available_task.task_id,
+                    &self.worker_id,
+                )
+                .await;
+            return Ok(self
+                .load_cancelled_status(&available_task.instance_id)
+                .await);
+        }
 
         if snapshot.get_task_result(&available_task.task_id).is_some() {
             tracing::debug!(
@@ -387,6 +469,22 @@ where
                     )
                     .await?;
 
+                // Check for cancellation after task completion
+                if self
+                    .backend
+                    .check_and_cancel(&available_task.instance_id, None)
+                    .await?
+                {
+                    tracing::info!(
+                        instance_id = %available_task.instance_id,
+                        task_id = %available_task.task_id,
+                        "Workflow was cancelled after task completion"
+                    );
+                    return Ok(self
+                        .load_cancelled_status(&available_task.instance_id)
+                        .await);
+                }
+
                 if Self::is_workflow_complete(workflow.continuation(), &snapshot) {
                     tracing::info!(
                         instance_id = %available_task.instance_id,
@@ -544,7 +642,7 @@ where
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: Self::get_first_task_id(next_cont),
+                            task_id: next_cont.first_task_id(),
                         });
                     }
                 } else if let Some(next_cont) = next {
@@ -559,20 +657,6 @@ where
                 // Check join
                 if let Some(join_cont) = join {
                     Self::update_position_after_task(join_cont, completed_task_id, snapshot);
-                }
-            }
-        }
-    }
-
-    /// Get the first task ID from a continuation.
-    fn get_first_task_id(continuation: &WorkflowContinuation) -> String {
-        match continuation {
-            WorkflowContinuation::Task { id, .. } => id.clone(),
-            WorkflowContinuation::Fork { branches, .. } => {
-                if let Some(first_branch) = branches.first() {
-                    Self::get_first_task_id(first_branch)
-                } else {
-                    String::from("unknown")
                 }
             }
         }

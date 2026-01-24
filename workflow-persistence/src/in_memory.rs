@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use chrono::Duration;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use workflow_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
+use workflow_core::snapshot::{
+    CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
+};
 use workflow_core::task_claim::AvailableTask;
 use workflow_core::task_claim::TaskClaim;
 
@@ -32,6 +34,7 @@ use workflow_core::task_claim::TaskClaim;
 pub struct InMemoryBackend {
     snapshots: Arc<RwLock<HashMap<String, WorkflowSnapshot>>>,
     claims: Arc<RwLock<HashMap<String, TaskClaim>>>, // Key: "{instance_id}:{task_id}"
+    cancellation_requests: Arc<RwLock<HashMap<String, CancellationRequest>>>, // Key: instance_id
 }
 
 impl InMemoryBackend {
@@ -43,16 +46,18 @@ impl InMemoryBackend {
     fn claim_key(instance_id: &str, task_id: &str) -> String {
         format!("{}:{}", instance_id, task_id)
     }
+
+    /// Convert a lock error into a BackendError.
+    fn lock_error<E: std::fmt::Display>(e: E) -> BackendError {
+        BackendError::Backend(format!("Lock error: {e}"))
+    }
 }
 
 #[async_trait]
 impl PersistentBackend for InMemoryBackend {
     async fn save_snapshot(&self, snapshot: WorkflowSnapshot) -> Result<(), BackendError> {
         let instance_id = snapshot.instance_id.clone();
-        let mut snapshots = self
-            .snapshots
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots.insert(instance_id, snapshot);
         Ok(())
     }
@@ -63,10 +68,7 @@ impl PersistentBackend for InMemoryBackend {
         task_id: &str,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
-        let mut snapshots = self
-            .snapshots
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
 
         let snapshot = snapshots
             .get_mut(instance_id)
@@ -77,10 +79,7 @@ impl PersistentBackend for InMemoryBackend {
     }
 
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
-        let snapshots = self
-            .snapshots
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         snapshots
             .get(instance_id)
             .cloned()
@@ -88,10 +87,7 @@ impl PersistentBackend for InMemoryBackend {
     }
 
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
-        let mut snapshots = self
-            .snapshots
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots
             .remove(instance_id)
             .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))
@@ -99,10 +95,7 @@ impl PersistentBackend for InMemoryBackend {
     }
 
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
-        let snapshots = self
-            .snapshots
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         Ok(snapshots.keys().cloned().collect())
     }
 
@@ -114,10 +107,7 @@ impl PersistentBackend for InMemoryBackend {
         ttl: Option<Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
         let key = Self::claim_key(instance_id, task_id);
-        let mut claims = self
-            .claims
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         // Check if already claimed and not expired
         if let Some(existing_claim) = claims.get(&key) {
@@ -146,10 +136,7 @@ impl PersistentBackend for InMemoryBackend {
         worker_id: &str,
     ) -> Result<(), BackendError> {
         let key = Self::claim_key(instance_id, task_id);
-        let mut claims = self
-            .claims
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         if let Some(claim) = claims.get(&key) {
             if claim.worker_id != worker_id {
@@ -176,10 +163,7 @@ impl PersistentBackend for InMemoryBackend {
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
         let key = Self::claim_key(instance_id, task_id);
-        let mut claims = self
-            .claims
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         if let Some(claim) = claims.get_mut(&key) {
             if claim.worker_id != worker_id {
@@ -212,26 +196,26 @@ impl PersistentBackend for InMemoryBackend {
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Clean up expired claims first
         {
-            let mut claims = self
-                .claims
-                .write()
-                .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            let mut claims = self.claims.write().map_err(Self::lock_error)?;
             claims.retain(|_, claim| !claim.is_expired());
         }
 
-        let snapshots = self
-            .snapshots
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+        let claims = self.claims.read().map_err(Self::lock_error)?;
+        let cancellation_requests = self
+            .cancellation_requests
             .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
-        let claims = self
-            .claims
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            .map_err(Self::lock_error)?;
 
         let mut available = Vec::new();
 
         for (instance_id, snapshot) in snapshots.iter() {
-            if !snapshot.is_in_progress() {
+            if !snapshot.state.is_in_progress() {
+                continue;
+            }
+
+            // Skip workflows with pending cancellation requests
+            if cancellation_requests.contains_key(instance_id) {
                 continue;
             }
 
@@ -273,6 +257,115 @@ impl PersistentBackend for InMemoryBackend {
         }
 
         Ok(available)
+    }
+
+    async fn request_cancellation(
+        &self,
+        instance_id: &str,
+        request: CancellationRequest,
+    ) -> Result<(), BackendError> {
+        // Check if workflow exists and is in a cancellable state
+        {
+            let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+
+            let snapshot = snapshots
+                .get(instance_id)
+                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+            // Cannot cancel workflows in terminal states
+            if snapshot.state.is_completed() {
+                return Err(BackendError::CannotCancel("Completed".to_string()));
+            }
+            if snapshot.state.is_failed() {
+                return Err(BackendError::CannotCancel("Failed".to_string()));
+            }
+            if snapshot.state.is_cancelled() {
+                // Already cancelled - idempotent success
+                return Ok(());
+            }
+        }
+
+        // Store the cancellation request
+        let mut cancellation_requests = self
+            .cancellation_requests
+            .write()
+            .map_err(Self::lock_error)?;
+
+        cancellation_requests.insert(instance_id.to_string(), request);
+        Ok(())
+    }
+
+    async fn get_cancellation_request(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<CancellationRequest>, BackendError> {
+        let cancellation_requests = self
+            .cancellation_requests
+            .read()
+            .map_err(Self::lock_error)?;
+
+        Ok(cancellation_requests.get(instance_id).cloned())
+    }
+
+    async fn clear_cancellation_request(&self, instance_id: &str) -> Result<(), BackendError> {
+        let mut cancellation_requests = self
+            .cancellation_requests
+            .write()
+            .map_err(Self::lock_error)?;
+
+        cancellation_requests.remove(instance_id);
+        Ok(())
+    }
+
+    async fn check_and_cancel(
+        &self,
+        instance_id: &str,
+        interrupted_at_task: Option<&str>,
+    ) -> Result<bool, BackendError> {
+        // Get cancellation request
+        let request = {
+            let cancellation_requests = self
+                .cancellation_requests
+                .read()
+                .map_err(Self::lock_error)?;
+
+            match cancellation_requests.get(instance_id) {
+                Some(req) => req.clone(),
+                None => return Ok(false),
+            }
+        };
+
+        // Update snapshot to cancelled state
+        {
+            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+
+            let snapshot = snapshots
+                .get_mut(instance_id)
+                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+            // Only cancel if still in progress
+            if !snapshot.state.is_in_progress() {
+                return Ok(false);
+            }
+
+            snapshot.mark_cancelled(
+                request.reason,
+                request.requested_by,
+                interrupted_at_task.map(String::from),
+            );
+        }
+
+        // Clear the cancellation request
+        {
+            let mut cancellation_requests = self
+                .cancellation_requests
+                .write()
+                .map_err(Self::lock_error)?;
+
+            cancellation_requests.remove(instance_id);
+        }
+
+        Ok(true)
     }
 }
 
@@ -405,10 +498,7 @@ mod tests {
             .unwrap();
         assert!(claim1.is_some());
 
-        // Wait a moment to ensure expiration
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Second claim should succeed because first is expired
+        // Second claim should succeed because first is expired (0-second TTL)
         let claim2 = backend
             .claim_task(
                 "workflow-1",
@@ -586,5 +676,295 @@ mod tests {
         let key = InMemoryBackend::claim_key("workflow-1", "task-1");
         let claim = claims.get(&key).unwrap();
         assert!(claim.expires_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_request_cancellation_success() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: Some("User requested".to_string()),
+            requested_by: Some("admin".to_string()),
+            requested_at: chrono::Utc::now(),
+        };
+
+        let result = backend.request_cancellation("test-123", request).await;
+        assert!(result.is_ok(), "request_cancellation should succeed");
+
+        let stored = backend.get_cancellation_request("test-123").await.unwrap();
+        assert!(stored.is_some(), "cancellation request should be stored");
+        let stored = stored.unwrap();
+        assert_eq!(stored.reason, Some("User requested".to_string()));
+        assert_eq!(stored.requested_by, Some("admin".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_request_cancellation_not_found() {
+        let backend = InMemoryBackend::new();
+
+        let request = CancellationRequest {
+            reason: None,
+            requested_by: None,
+            requested_at: chrono::Utc::now(),
+        };
+
+        let result = backend.request_cancellation("nonexistent", request).await;
+        assert!(
+            matches!(result, Err(BackendError::NotFound(_))),
+            "should return NotFound for non-existent workflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_cancellation_completed_workflow() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_completed(bytes::Bytes::from("result"));
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: None,
+            requested_by: None,
+            requested_at: chrono::Utc::now(),
+        };
+
+        let result = backend.request_cancellation("test-123", request).await;
+        assert!(
+            matches!(result, Err(BackendError::CannotCancel(_))),
+            "should return CannotCancel for completed workflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_cancellation_failed_workflow() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_failed("Some error".to_string());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: None,
+            requested_by: None,
+            requested_at: chrono::Utc::now(),
+        };
+
+        let result = backend.request_cancellation("test-123", request).await;
+        assert!(
+            matches!(result, Err(BackendError::CannotCancel(_))),
+            "should return CannotCancel for failed workflow"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_cancellation_already_cancelled_idempotent() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_cancelled(Some("First cancel".to_string()), None, None);
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: Some("Second cancel".to_string()),
+            requested_by: None,
+            requested_at: chrono::Utc::now(),
+        };
+
+        let result = backend.request_cancellation("test-123", request).await;
+        assert!(
+            result.is_ok(),
+            "cancelling already-cancelled workflow should be idempotent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_cancellation_request_none() {
+        let backend = InMemoryBackend::new();
+
+        let result = backend.get_cancellation_request("test-123").await.unwrap();
+        assert!(
+            result.is_none(),
+            "should return None when no cancellation request exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_cancellation_request() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: Some("Test".to_string()),
+            requested_by: None,
+            requested_at: chrono::Utc::now(),
+        };
+        backend
+            .request_cancellation("test-123", request)
+            .await
+            .unwrap();
+
+        assert!(
+            backend
+                .get_cancellation_request("test-123")
+                .await
+                .unwrap()
+                .is_some(),
+            "cancellation request should exist before clearing"
+        );
+
+        backend
+            .clear_cancellation_request("test-123")
+            .await
+            .unwrap();
+
+        assert!(
+            backend
+                .get_cancellation_request("test-123")
+                .await
+                .unwrap()
+                .is_none(),
+            "cancellation request should be gone after clearing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_cancel_success() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: Some("Timeout".to_string()),
+            requested_by: Some("system".to_string()),
+            requested_at: chrono::Utc::now(),
+        };
+        backend
+            .request_cancellation("test-123", request)
+            .await
+            .unwrap();
+
+        let result = backend
+            .check_and_cancel("test-123", Some("task-1"))
+            .await
+            .unwrap();
+        assert!(
+            result,
+            "check_and_cancel should return true when cancellation pending"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_cancelled(),
+            "workflow should be in cancelled state"
+        );
+
+        let WorkflowSnapshotState::Cancelled {
+            reason,
+            cancelled_by,
+            interrupted_at_task,
+            ..
+        } = &snapshot.state
+        else {
+            panic!("Expected Cancelled state");
+        };
+        assert_eq!(reason, &Some("Timeout".to_string()));
+        assert_eq!(cancelled_by, &Some("system".to_string()));
+        assert_eq!(interrupted_at_task, &Some("task-1".to_string()));
+
+        assert!(
+            backend
+                .get_cancellation_request("test-123")
+                .await
+                .unwrap()
+                .is_none(),
+            "cancellation request should be cleared after check_and_cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_cancel_no_request() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let result = backend.check_and_cancel("test-123", None).await.unwrap();
+        assert!(
+            !result,
+            "check_and_cancel should return false when no cancellation pending"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_in_progress(),
+            "workflow should still be in progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_cancel_not_in_progress() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_completed(bytes::Bytes::from("done"));
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        // Add a cancellation request directly (bypassing state check)
+        {
+            let mut requests = backend.cancellation_requests.write().unwrap();
+            requests.insert(
+                "test-123".to_string(),
+                CancellationRequest {
+                    reason: None,
+                    requested_by: None,
+                    requested_at: chrono::Utc::now(),
+                },
+            );
+        }
+
+        let result = backend.check_and_cancel("test-123", None).await.unwrap();
+        assert!(
+            !result,
+            "check_and_cancel should return false for non-in-progress workflow"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_completed(),
+            "workflow should still be completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_skips_cancelled_workflows() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot1 = WorkflowSnapshot::new("workflow-1".to_string(), "hash-abc".to_string());
+        snapshot1.update_position(ExecutionPosition::AtTask {
+            task_id: "task-1".to_string(),
+        });
+        backend.save_snapshot(snapshot1).await.unwrap();
+
+        let mut snapshot2 = WorkflowSnapshot::new("workflow-2".to_string(), "hash-abc".to_string());
+        snapshot2.update_position(ExecutionPosition::AtTask {
+            task_id: "task-2".to_string(),
+        });
+        backend.save_snapshot(snapshot2).await.unwrap();
+
+        let request = CancellationRequest {
+            reason: None,
+            requested_by: None,
+            requested_at: chrono::Utc::now(),
+        };
+        backend
+            .request_cancellation("workflow-1", request)
+            .await
+            .unwrap();
+
+        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+
+        assert!(
+            !tasks.iter().any(|t| t.instance_id == "workflow-1"),
+            "workflow with pending cancellation should be skipped"
+        );
     }
 }

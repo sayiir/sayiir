@@ -45,7 +45,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// A factory function that creates an UntypedCoreTask.
+/// A factory function that creates an `UntypedCoreTask`.
 pub type TaskFactory = Box<dyn Fn() -> UntypedCoreTask + Send + Sync>;
 
 /// A registered task entry containing the factory and metadata.
@@ -76,6 +76,7 @@ impl Default for TaskRegistry {
 
 impl TaskRegistry {
     /// Create a new empty registry.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tasks: HashMap::new(),
@@ -132,7 +133,7 @@ impl TaskRegistry {
         self.register_task_arc(id, codec, Arc::new(task), metadata);
     }
 
-    /// Register a task using an Arc-wrapped CoreTask.
+    /// Register a task using an Arc-wrapped `CoreTask`.
     pub(crate) fn register_task_arc<T, C>(
         &mut self,
         id: &str,
@@ -272,6 +273,7 @@ impl TaskRegistry {
     /// Get a task by ID, creating a new instance.
     ///
     /// Returns `None` if the task ID is not registered.
+    #[must_use]
     pub fn get(&self, id: &str) -> Option<UntypedCoreTask> {
         self.tasks.get(id).map(|entry| (entry.factory)())
     }
@@ -279,6 +281,7 @@ impl TaskRegistry {
     /// Get the metadata for a task by ID.
     ///
     /// Returns `None` if the task ID is not registered.
+    #[must_use]
     pub fn get_metadata(&self, id: &str) -> Option<&TaskMetadata> {
         self.tasks.get(id).map(|entry| &entry.metadata)
     }
@@ -286,6 +289,7 @@ impl TaskRegistry {
     /// Get both the task and its metadata by ID.
     ///
     /// Returns `None` if the task ID is not registered.
+    #[must_use]
     pub fn get_with_metadata(&self, id: &str) -> Option<(UntypedCoreTask, &TaskMetadata)> {
         self.tasks
             .get(id)
@@ -305,23 +309,26 @@ impl TaskRegistry {
     }
 
     /// Check if a task ID is registered.
+    #[must_use]
     pub fn contains(&self, id: &str) -> bool {
         self.tasks.contains_key(id)
     }
 
     /// Get the number of registered tasks.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.tasks.len()
     }
 
     /// Check if the registry is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
 
     /// Get an iterator over registered task IDs.
     pub fn task_ids(&self) -> impl Iterator<Item = &str> {
-        self.tasks.keys().map(|s| s.as_str())
+        self.tasks.keys().map(std::string::String::as_str)
     }
 
     /// Create a builder with a codec for ergonomic task registration.
@@ -358,6 +365,7 @@ impl<C: Codec> RegistryBuilder<C> {
     /// Register a task implementing `CoreTask`.
     ///
     /// For closures, use [`register_fn`](Self::register_fn) or wrap with [`fn_task`](crate::task::fn_task).
+    #[must_use]
     pub fn register<T>(mut self, id: &str, task: T) -> Self
     where
         T: CoreTask + 'static,
@@ -371,6 +379,7 @@ impl<C: Codec> RegistryBuilder<C> {
     }
 
     /// Register a task implementing `CoreTask` with metadata.
+    #[must_use]
     pub fn register_with_metadata<T>(mut self, id: &str, task: T, metadata: TaskMetadata) -> Self
     where
         T: CoreTask + 'static,
@@ -385,6 +394,7 @@ impl<C: Codec> RegistryBuilder<C> {
     }
 
     /// Register a closure as a task (convenience method).
+    #[must_use]
     pub fn register_fn<I, O, F, Fut>(mut self, id: &str, func: F) -> Self
     where
         F: Fn(I) -> Fut + Send + Sync + 'static,
@@ -398,6 +408,7 @@ impl<C: Codec> RegistryBuilder<C> {
     }
 
     /// Register a closure as a task with metadata.
+    #[must_use]
     pub fn register_fn_with_metadata<I, O, F, Fut>(
         mut self,
         id: &str,
@@ -417,6 +428,7 @@ impl<C: Codec> RegistryBuilder<C> {
     }
 
     /// Register a join task using a closure.
+    #[must_use]
     pub fn register_join<O, F, Fut>(mut self, id: &str, func: F) -> Self
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
@@ -430,6 +442,7 @@ impl<C: Codec> RegistryBuilder<C> {
     }
 
     /// Register a join task using a closure with metadata.
+    #[must_use]
     pub fn register_join_with_metadata<O, F, Fut>(
         mut self,
         id: &str,
@@ -448,6 +461,7 @@ impl<C: Codec> RegistryBuilder<C> {
     }
 
     /// Finish building and return the registry.
+    #[must_use]
     pub fn build(self) -> TaskRegistry {
         self.registry
     }
