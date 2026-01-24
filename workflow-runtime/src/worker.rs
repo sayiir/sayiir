@@ -25,9 +25,7 @@ use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::with_context;
 use workflow_core::registry::TaskRegistry;
-use workflow_core::snapshot::{
-    CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
-};
+use workflow_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
 use workflow_core::task_claim::AvailableTask;
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
@@ -173,6 +171,25 @@ where
         &self.backend
     }
 
+    /// Load cancellation status from a snapshot.
+    ///
+    /// Attempts to load the snapshot and extract cancellation details.
+    /// Returns `WorkflowStatus::Cancelled` with either the extracted details or defaults.
+    async fn load_cancelled_status(&self, instance_id: &str) -> WorkflowStatus {
+        if let Ok(snapshot) = self.backend.load_snapshot(instance_id).await {
+            if let Some((reason, cancelled_by)) = snapshot.state.cancellation_details() {
+                return WorkflowStatus::Cancelled {
+                    reason,
+                    cancelled_by,
+                };
+            }
+        }
+        WorkflowStatus::Cancelled {
+            reason: None,
+            cancelled_by: None,
+        }
+    }
+
     /// Execute a single task from an available task.
     ///
     /// This claims the task, executes it, updates the snapshot, and releases the claim.
@@ -255,26 +272,9 @@ where
                     &self.worker_id,
                 )
                 .await;
-            // Reload snapshot to get cancellation details
-            if let Ok(cancelled_snapshot) = self
-                .backend
-                .load_snapshot(&available_task.instance_id)
-                .await
-                && let WorkflowSnapshotState::Cancelled {
-                    reason,
-                    cancelled_by,
-                    ..
-                } = &cancelled_snapshot.state
-            {
-                return Ok(WorkflowStatus::Cancelled {
-                    reason: reason.clone(),
-                    cancelled_by: cancelled_by.clone(),
-                });
-            }
-            return Ok(WorkflowStatus::Cancelled {
-                reason: None,
-                cancelled_by: None,
-            });
+            return Ok(self
+                .load_cancelled_status(&available_task.instance_id)
+                .await);
         }
 
         if snapshot.get_task_result(&available_task.task_id).is_some() {
@@ -480,26 +480,9 @@ where
                         task_id = %available_task.task_id,
                         "Workflow was cancelled after task completion"
                     );
-                    // Reload snapshot to get cancellation details
-                    if let Ok(cancelled_snapshot) = self
-                        .backend
-                        .load_snapshot(&available_task.instance_id)
-                        .await
-                        && let WorkflowSnapshotState::Cancelled {
-                            reason,
-                            cancelled_by,
-                            ..
-                        } = &cancelled_snapshot.state
-                    {
-                        return Ok(WorkflowStatus::Cancelled {
-                            reason: reason.clone(),
-                            cancelled_by: cancelled_by.clone(),
-                        });
-                    }
-                    return Ok(WorkflowStatus::Cancelled {
-                        reason: None,
-                        cancelled_by: None,
-                    });
+                    return Ok(self
+                        .load_cancelled_status(&available_task.instance_id)
+                        .await);
                 }
 
                 if Self::is_workflow_complete(workflow.continuation(), &snapshot) {
@@ -659,7 +642,7 @@ where
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: Self::get_first_task_id(next_cont),
+                            task_id: next_cont.first_task_id(),
                         });
                     }
                 } else if let Some(next_cont) = next {
@@ -674,20 +657,6 @@ where
                 // Check join
                 if let Some(join_cont) = join {
                     Self::update_position_after_task(join_cont, completed_task_id, snapshot);
-                }
-            }
-        }
-    }
-
-    /// Get the first task ID from a continuation.
-    fn get_first_task_id(continuation: &WorkflowContinuation) -> String {
-        match continuation {
-            WorkflowContinuation::Task { id, .. } => id.clone(),
-            WorkflowContinuation::Fork { branches, .. } => {
-                if let Some(first_branch) = branches.first() {
-                    Self::get_first_task_id(first_branch)
-                } else {
-                    String::from("unknown")
                 }
             }
         }

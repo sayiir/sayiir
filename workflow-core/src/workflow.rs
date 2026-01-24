@@ -25,6 +25,24 @@ pub enum WorkflowContinuation {
 }
 
 impl WorkflowContinuation {
+    /// Get the first task ID from this continuation.
+    ///
+    /// For a `Task`, returns its ID. For a `Fork`, returns the first task ID
+    /// from the first branch.
+    #[must_use]
+    pub fn first_task_id(&self) -> String {
+        match self {
+            WorkflowContinuation::Task { id, .. } => id.clone(),
+            WorkflowContinuation::Fork { branches, .. } => {
+                if let Some(first_branch) = branches.first() {
+                    first_branch.first_task_id()
+                } else {
+                    String::from("unknown")
+                }
+            }
+        }
+    }
+
     /// Find the first duplicate ID in this continuation tree, if any.
     fn find_duplicate_id(&self) -> Option<String> {
         fn collect(cont: &WorkflowContinuation, seen: &mut HashSet<String>) -> Option<String> {

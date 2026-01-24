@@ -123,6 +123,23 @@ impl WorkflowSnapshotState {
                 | WorkflowSnapshotState::Cancelled { .. }
         )
     }
+
+    /// Extract cancellation details if in `Cancelled` state.
+    ///
+    /// Returns `Some((reason, cancelled_by))` if cancelled, `None` otherwise.
+    #[must_use]
+    pub fn cancellation_details(&self) -> Option<(Option<String>, Option<String>)> {
+        if let WorkflowSnapshotState::Cancelled {
+            reason,
+            cancelled_by,
+            ..
+        } = self
+        {
+            Some((reason.clone(), cancelled_by.clone()))
+        } else {
+            None
+        }
+    }
 }
 
 /// A complete snapshot of workflow execution state.

@@ -24,6 +24,17 @@ pub enum WorkflowError {
     },
 }
 
+impl WorkflowError {
+    /// Create a new `Cancelled` error with no reason or source.
+    #[must_use]
+    pub fn cancelled() -> Self {
+        Self::Cancelled {
+            reason: None,
+            cancelled_by: None,
+        }
+    }
+}
+
 impl std::fmt::Display for WorkflowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

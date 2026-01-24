@@ -46,16 +46,18 @@ impl InMemoryBackend {
     fn claim_key(instance_id: &str, task_id: &str) -> String {
         format!("{}:{}", instance_id, task_id)
     }
+
+    /// Convert a lock error into a BackendError.
+    fn lock_error<E: std::fmt::Display>(e: E) -> BackendError {
+        BackendError::Backend(format!("Lock error: {e}"))
+    }
 }
 
 #[async_trait]
 impl PersistentBackend for InMemoryBackend {
     async fn save_snapshot(&self, snapshot: WorkflowSnapshot) -> Result<(), BackendError> {
         let instance_id = snapshot.instance_id.clone();
-        let mut snapshots = self
-            .snapshots
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots.insert(instance_id, snapshot);
         Ok(())
     }
@@ -66,10 +68,7 @@ impl PersistentBackend for InMemoryBackend {
         task_id: &str,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
-        let mut snapshots = self
-            .snapshots
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
 
         let snapshot = snapshots
             .get_mut(instance_id)
@@ -80,10 +79,7 @@ impl PersistentBackend for InMemoryBackend {
     }
 
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
-        let snapshots = self
-            .snapshots
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         snapshots
             .get(instance_id)
             .cloned()
@@ -91,10 +87,7 @@ impl PersistentBackend for InMemoryBackend {
     }
 
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
-        let mut snapshots = self
-            .snapshots
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots
             .remove(instance_id)
             .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))
@@ -102,10 +95,7 @@ impl PersistentBackend for InMemoryBackend {
     }
 
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
-        let snapshots = self
-            .snapshots
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         Ok(snapshots.keys().cloned().collect())
     }
 
@@ -117,10 +107,7 @@ impl PersistentBackend for InMemoryBackend {
         ttl: Option<Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
         let key = Self::claim_key(instance_id, task_id);
-        let mut claims = self
-            .claims
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         // Check if already claimed and not expired
         if let Some(existing_claim) = claims.get(&key) {
@@ -149,10 +136,7 @@ impl PersistentBackend for InMemoryBackend {
         worker_id: &str,
     ) -> Result<(), BackendError> {
         let key = Self::claim_key(instance_id, task_id);
-        let mut claims = self
-            .claims
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         if let Some(claim) = claims.get(&key) {
             if claim.worker_id != worker_id {
@@ -179,10 +163,7 @@ impl PersistentBackend for InMemoryBackend {
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
         let key = Self::claim_key(instance_id, task_id);
-        let mut claims = self
-            .claims
-            .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let mut claims = self.claims.write().map_err(Self::lock_error)?;
 
         if let Some(claim) = claims.get_mut(&key) {
             if claim.worker_id != worker_id {
@@ -215,25 +196,16 @@ impl PersistentBackend for InMemoryBackend {
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Clean up expired claims first
         {
-            let mut claims = self
-                .claims
-                .write()
-                .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            let mut claims = self.claims.write().map_err(Self::lock_error)?;
             claims.retain(|_, claim| !claim.is_expired());
         }
 
-        let snapshots = self
-            .snapshots
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
-        let claims = self
-            .claims
-            .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+        let claims = self.claims.read().map_err(Self::lock_error)?;
         let cancellation_requests = self
             .cancellation_requests
             .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            .map_err(Self::lock_error)?;
 
         let mut available = Vec::new();
 
@@ -294,10 +266,7 @@ impl PersistentBackend for InMemoryBackend {
     ) -> Result<(), BackendError> {
         // Check if workflow exists and is in a cancellable state
         {
-            let snapshots = self
-                .snapshots
-                .read()
-                .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
 
             let snapshot = snapshots
                 .get(instance_id)
@@ -320,7 +289,7 @@ impl PersistentBackend for InMemoryBackend {
         let mut cancellation_requests = self
             .cancellation_requests
             .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            .map_err(Self::lock_error)?;
 
         cancellation_requests.insert(instance_id.to_string(), request);
         Ok(())
@@ -333,7 +302,7 @@ impl PersistentBackend for InMemoryBackend {
         let cancellation_requests = self
             .cancellation_requests
             .read()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            .map_err(Self::lock_error)?;
 
         Ok(cancellation_requests.get(instance_id).cloned())
     }
@@ -342,7 +311,7 @@ impl PersistentBackend for InMemoryBackend {
         let mut cancellation_requests = self
             .cancellation_requests
             .write()
-            .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            .map_err(Self::lock_error)?;
 
         cancellation_requests.remove(instance_id);
         Ok(())
@@ -358,7 +327,7 @@ impl PersistentBackend for InMemoryBackend {
             let cancellation_requests = self
                 .cancellation_requests
                 .read()
-                .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+                .map_err(Self::lock_error)?;
 
             match cancellation_requests.get(instance_id) {
                 Some(req) => req.clone(),
@@ -368,10 +337,7 @@ impl PersistentBackend for InMemoryBackend {
 
         // Update snapshot to cancelled state
         {
-            let mut snapshots = self
-                .snapshots
-                .write()
-                .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
 
             let snapshot = snapshots
                 .get_mut(instance_id)
@@ -394,7 +360,7 @@ impl PersistentBackend for InMemoryBackend {
             let mut cancellation_requests = self
                 .cancellation_requests
                 .write()
-                .map_err(|e| BackendError::Backend(format!("Lock error: {}", e)))?;
+                .map_err(Self::lock_error)?;
 
             cancellation_requests.remove(instance_id);
         }

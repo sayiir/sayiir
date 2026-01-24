@@ -151,7 +151,7 @@ where
             input_bytes.clone(),
         );
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: Self::get_first_task_id(workflow.continuation()),
+            task_id: workflow.continuation().first_task_id(),
         });
 
         // Save initial snapshot
@@ -277,16 +277,15 @@ where
                     // Reload snapshot to get cancellation details (set by check_and_cancel)
                     if let Ok(cancelled_snapshot) =
                         backend.load_snapshot(&snapshot.instance_id).await
-                        && let WorkflowSnapshotState::Cancelled {
-                            reason,
-                            cancelled_by,
-                            ..
-                        } = &cancelled_snapshot.state
                     {
-                        return Ok(WorkflowStatus::Cancelled {
-                            reason: reason.clone(),
-                            cancelled_by: cancelled_by.clone(),
-                        });
+                        if let Some((reason, cancelled_by)) =
+                            cancelled_snapshot.state.cancellation_details()
+                        {
+                            return Ok(WorkflowStatus::Cancelled {
+                                reason,
+                                cancelled_by,
+                            });
+                        }
                     }
                     // Fallback if we couldn't get details
                     return Ok(WorkflowStatus::Cancelled {
@@ -322,11 +321,7 @@ where
                         .check_and_cancel(&snapshot.instance_id, Some(id))
                         .await?
                     {
-                        return Err(WorkflowError::Cancelled {
-                            reason: None,
-                            cancelled_by: None,
-                        }
-                        .into());
+                        return Err(WorkflowError::cancelled().into());
                     }
 
                     // Check if this task was already completed
@@ -337,7 +332,7 @@ where
                         // Update position to next task
                         if let Some(next_cont) = next {
                             snapshot.update_position(ExecutionPosition::AtTask {
-                                task_id: Self::get_first_task_id(next_cont),
+                                task_id: next_cont.first_task_id(),
                             });
                         } else {
                             // No next task, workflow complete
@@ -370,7 +365,7 @@ where
                         // Update position
                         if let Some(next_cont) = next {
                             snapshot.update_position(ExecutionPosition::AtTask {
-                                task_id: Self::get_first_task_id(next_cont),
+                                task_id: next_cont.first_task_id(),
                             });
                         }
 
@@ -382,11 +377,7 @@ where
                             .check_and_cancel(&snapshot.instance_id, None)
                             .await?
                         {
-                            return Err(WorkflowError::Cancelled {
-                                reason: None,
-                                cancelled_by: None,
-                            }
-                            .into());
+                            return Err(WorkflowError::cancelled().into());
                         }
 
                         // Continue with next task
@@ -410,11 +401,7 @@ where
                         .check_and_cancel(&snapshot.instance_id, None)
                         .await?
                     {
-                        return Err(WorkflowError::Cancelled {
-                            reason: None,
-                            cancelled_by: None,
-                        }
-                        .into());
+                        return Err(WorkflowError::cancelled().into());
                     }
 
                     // Check if fork was already completed
@@ -518,11 +505,7 @@ where
                             .check_and_cancel(&snapshot.instance_id, None)
                             .await?
                         {
-                            return Err(WorkflowError::Cancelled {
-                                reason: None,
-                                cancelled_by: None,
-                            }
-                            .into());
+                            return Err(WorkflowError::cancelled().into());
                         }
 
                         // Sync local snapshot with results (already saved to backend per-task)
@@ -548,7 +531,7 @@ where
                                 })
                                 .collect();
                             snapshot.update_position(ExecutionPosition::AtJoin {
-                                join_id: Self::get_first_task_id(join_cont),
+                                join_id: join_cont.first_task_id(),
                                 completed_branches,
                             });
                         }
@@ -676,20 +659,6 @@ where
                 }
             }
         })
-    }
-
-    /// Get the first task ID from a continuation (for position tracking).
-    fn get_first_task_id(continuation: &WorkflowContinuation) -> String {
-        match continuation {
-            WorkflowContinuation::Task { id, .. } => id.clone(),
-            WorkflowContinuation::Fork { branches, .. } => {
-                if let Some(first_branch) = branches.first() {
-                    Self::get_first_task_id(first_branch)
-                } else {
-                    String::from("unknown")
-                }
-            }
-        }
     }
 
     /// Get the input for resuming execution.
