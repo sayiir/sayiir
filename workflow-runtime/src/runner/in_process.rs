@@ -38,9 +38,7 @@ impl WorkflowRunner for InProcessRunner {
         &self,
         workflow: &'w Workflow<C, Input, M>,
         input: Input,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w>,
-    >
+    ) -> impl std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
@@ -49,7 +47,7 @@ impl WorkflowRunner for InProcessRunner {
         let context = workflow.context().clone();
         let continuation = workflow.continuation();
         let codec = context.codec.clone();
-        Box::pin(async move {
+        async move {
             with_context(context, || async move {
                 let input_bytes = codec.encode(&input)?;
                 match Self::execute_continuation(continuation, input_bytes).await {
@@ -58,71 +56,85 @@ impl WorkflowRunner for InProcessRunner {
                 }
             })
             .await
-        })
+        }
     }
 }
 
 impl InProcessRunner {
+    /// Execute a continuation chain iteratively (no recursion, no boxing).
+    ///
+    /// Uses a loop instead of recursion to avoid boxing the future.
+    /// Fork branches are spawned as separate tasks (they have their own stacks).
     fn execute_continuation(
         continuation: &WorkflowContinuation,
         input: Bytes,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + '_>>
-    {
-        Box::pin(async move {
-            match continuation {
-                WorkflowContinuation::Task { func, next, .. } => {
-                    let output = func.run(input).await?;
-                    match next {
-                        Some(next_continuation) => {
-                            Self::execute_continuation(next_continuation, output).await
+    ) -> impl std::future::Future<Output = anyhow::Result<Bytes>> + Send + '_ {
+        async move {
+            let mut current = continuation;
+            let mut current_input = input;
+
+            loop {
+                match current {
+                    WorkflowContinuation::Task { func, next, .. } => {
+                        let output = func.run(current_input).await?;
+                        match next {
+                            Some(next_continuation) => {
+                                current = next_continuation;
+                                current_input = output;
+                            }
+                            None => return Ok(output),
                         }
-                        None => Ok(output),
                     }
-                }
-                WorkflowContinuation::Fork { branches, join } => {
-                    // Extract branch names and execute all branches in parallel
-                    let branch_handles: Vec<_> = branches
-                        .iter()
-                        .map(|branch| {
-                            // Extract the branch id from the Task continuation
-                            let id = match branch.as_ref() {
-                                WorkflowContinuation::Task { id, .. } => id.clone(),
-                                _ => String::from("unnamed"),
-                            };
-                            let branch = Arc::clone(branch);
-                            let branch_input = input.clone();
-                            tokio::task::spawn(async move {
-                                let result =
-                                    Self::execute_continuation(&branch, branch_input).await?;
-                                Ok::<_, anyhow::Error>((id, result))
+                    WorkflowContinuation::Fork { branches, join } => {
+                        let branch_handles: Vec<_> = branches
+                            .iter()
+                            .map(|branch| {
+                                let id = match branch.as_ref() {
+                                    WorkflowContinuation::Task { id, .. } => id.clone(),
+                                    _ => String::from("unnamed"),
+                                };
+                                let branch = Arc::clone(branch);
+                                let branch_input = current_input.clone();
+                                tokio::task::spawn(Self::execute_branch(branch, branch_input, id))
                             })
-                        })
-                        .collect();
+                            .collect();
 
-                    // Wait for all branches to complete in parallel
-                    let branch_results: Vec<(String, Bytes)> = future::try_join_all(branch_handles)
-                        .await?
-                        .into_iter()
-                        .collect::<anyhow::Result<Vec<_>>>()?;
+                        let branch_results: Vec<(String, Bytes)> =
+                            future::try_join_all(branch_handles)
+                                .await?
+                                .into_iter()
+                                .collect::<anyhow::Result<Vec<_>>>()?;
 
-                    // If there's a join continuation, pass the collected results to it
-                    match join {
-                        Some(join_continuation) => {
-                            // Serialize branch results with names
-                            let join_input = Self::serialize_named_branch_results(&branch_results)?;
-                            Self::execute_continuation(join_continuation, join_input).await
-                        }
-                        None => {
-                            // No join task, return the last branch result (or empty if no branches)
-                            Ok(branch_results
-                                .last()
-                                .map(|(_, b)| b.clone())
-                                .unwrap_or_default())
+                        match join {
+                            Some(join_continuation) => {
+                                let join_input =
+                                    Self::serialize_named_branch_results(&branch_results)?;
+                                current = join_continuation;
+                                current_input = join_input;
+                            }
+                            None => {
+                                return Ok(branch_results
+                                    .last()
+                                    .map(|(_, b)| b.clone())
+                                    .unwrap_or_default());
+                            }
                         }
                     }
                 }
             }
-        })
+        }
+    }
+
+    /// Execute a branch (for spawned tasks) - takes ownership of Arc.
+    fn execute_branch(
+        continuation: Arc<WorkflowContinuation>,
+        input: Bytes,
+        id: String,
+    ) -> impl std::future::Future<Output = anyhow::Result<(String, Bytes)>> + Send {
+        async move {
+            let result = Self::execute_continuation(&continuation, input).await?;
+            Ok((id, result))
+        }
     }
 
     /// Serialize named branch results into a format that can be passed to the join task.

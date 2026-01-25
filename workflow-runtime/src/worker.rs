@@ -595,40 +595,49 @@ where
         }
     }
 
-    /// Execute a task by ID from the workflow continuation.
+    /// Execute a task by ID from the workflow continuation (iterative, no boxing).
     fn execute_task_by_id<'a>(
         continuation: &'a WorkflowContinuation,
         task_id: &'a str,
         input: Bytes,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            match continuation {
-                WorkflowContinuation::Task { id, func, next } => {
-                    if id == task_id {
-                        func.run(input).await
-                    } else if let Some(next_cont) = next {
-                        Self::execute_task_by_id(next_cont, task_id, input).await
-                    } else {
-                        Err(anyhow::anyhow!("Task {task_id} not found"))
-                    }
-                }
-                WorkflowContinuation::Fork { branches, join } => {
-                    // Check branches
-                    for branch in branches {
-                        if Self::find_task_id_in_continuation(branch, task_id) {
-                            return Self::execute_task_by_id(branch, task_id, input).await;
+    ) -> impl std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a {
+        async move {
+            let mut current = continuation;
+
+            loop {
+                match current {
+                    WorkflowContinuation::Task { id, func, next } => {
+                        if id == task_id {
+                            return func.run(input).await;
+                        } else if let Some(next_cont) = next {
+                            current = next_cont;
+                        } else {
+                            return Err(anyhow::anyhow!("Task {task_id} not found"));
                         }
                     }
-                    // Check join
-                    if let Some(join_cont) = join {
-                        Self::execute_task_by_id(join_cont, task_id, input).await
-                    } else {
-                        Err(anyhow::anyhow!("Task {task_id} not found"))
+                    WorkflowContinuation::Fork { branches, join } => {
+                        // Check branches
+                        let mut found_in_branch = false;
+                        for branch in branches.iter() {
+                            if Self::find_task_id_in_continuation(branch, task_id) {
+                                current = branch;
+                                found_in_branch = true;
+                                break;
+                            }
+                        }
+                        if found_in_branch {
+                            continue;
+                        }
+                        // Check join
+                        if let Some(join_cont) = join {
+                            current = join_cont;
+                        } else {
+                            return Err(anyhow::anyhow!("Task {task_id} not found"));
+                        }
                     }
                 }
             }
-        })
+        }
     }
 
     /// Update execution position after a task completes.
