@@ -35,14 +35,14 @@
 
 use crate::codec::{Codec, sealed};
 use crate::task::{
-    BranchOutputs, CoreTask, TaskMetadata, UntypedCoreTask, to_heterogeneous_join_task_arc,
+    BranchOutputs, BytesFuture, CoreTask, TaskMetadata, UntypedCoreTask,
+    to_heterogeneous_join_task_arc,
 };
 use anyhow::Result;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::Arc;
 
 /// A factory function that creates an `UntypedCoreTask`.
@@ -484,12 +484,12 @@ where
 {
     type Input = Bytes;
     type Output = Bytes;
-    type Future = Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+    type Future = BytesFuture;
 
     fn run(&self, input: Bytes) -> Self::Future {
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
-        Box::pin(async move {
+        BytesFuture::new(async move {
             let decoded_input = codec.decode::<I>(input)?;
             let output = func(decoded_input).await?;
             codec.encode(&output)
@@ -513,12 +513,12 @@ where
 {
     type Input = Bytes;
     type Output = Bytes;
-    type Future = Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+    type Future = BytesFuture;
 
     fn run(&self, input: Bytes) -> Self::Future {
         let task = Arc::clone(&self.task);
         let codec = Arc::clone(&self.codec);
-        Box::pin(async move {
+        BytesFuture::new(async move {
             let decoded_input = codec.decode::<T::Input>(input)?;
             let output = task.run(decoded_input).await?;
             codec.encode(&output)
