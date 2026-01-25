@@ -1,4 +1,16 @@
-#![warn(clippy::pedantic)]
+#![deny(clippy::pedantic)]
+#![forbid(unsafe_code)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
 
 pub mod codec;
 pub mod context;

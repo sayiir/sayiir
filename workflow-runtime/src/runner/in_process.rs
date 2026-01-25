@@ -65,6 +65,7 @@ impl InProcessRunner {
     ///
     /// Uses a loop instead of recursion to avoid boxing the future.
     /// Fork branches are spawned as separate tasks (they have their own stacks).
+    #[allow(clippy::manual_async_fn)]
     fn execute_continuation(
         continuation: &WorkflowContinuation,
         input: Bytes,
@@ -91,7 +92,7 @@ impl InProcessRunner {
                             .map(|branch| {
                                 let id = match branch.as_ref() {
                                     WorkflowContinuation::Task { id, .. } => id.clone(),
-                                    _ => String::from("unnamed"),
+                                    WorkflowContinuation::Fork { .. } => String::from("unnamed"),
                                 };
                                 let branch = Arc::clone(branch);
                                 let branch_input = current_input.clone();
@@ -126,6 +127,7 @@ impl InProcessRunner {
     }
 
     /// Execute a branch (for spawned tasks) - takes ownership of Arc.
+    #[allow(clippy::manual_async_fn)]
     fn execute_branch(
         continuation: Arc<WorkflowContinuation>,
         input: Bytes,
@@ -146,12 +148,13 @@ impl InProcessRunner {
     ///   - N bytes: name (UTF-8)
     ///   - 4 bytes: data length (u32, little-endian)
     ///   - M bytes: data
+    #[allow(clippy::cast_possible_truncation)]
     fn serialize_named_branch_results(branch_results: &[(String, Bytes)]) -> anyhow::Result<Bytes> {
         use std::io::Write;
 
         let mut buffer = Vec::new();
 
-        // Write number of branches
+        // Safe: we never have more than u32::MAX branches in practice
         buffer.write_all(&(branch_results.len() as u32).to_le_bytes())?;
 
         // Write each branch result with name and length prefix

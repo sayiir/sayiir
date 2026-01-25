@@ -3,9 +3,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use workflow_core::codec::{Decoder, Encoder, sealed};
 
-/// A codec that can serialize and deserialize values using serde_json.
+/// A codec that can serialize and deserialize values using `serde_json`.
 ///
-/// This codec uses serde_json to serialize and deserialize values.
+/// This codec uses ``serde_json`` to serialize and deserialize values.
 ///
 /// # Example
 ///

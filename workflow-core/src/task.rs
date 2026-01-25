@@ -54,6 +54,7 @@ pub struct RetryPolicy {
 /// # Errors
 ///
 /// Returns an error if the buffer is malformed or too small.
+#[allow(clippy::indexing_slicing)]
 pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String, Bytes>> {
     let mut offset = 0;
     let mut results = HashMap::new();

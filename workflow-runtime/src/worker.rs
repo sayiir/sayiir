@@ -88,6 +88,7 @@ where
     /// By default, the worker will send heartbeats every 2 minutes to extend
     /// claims for long-running tasks. This prevents claim expiration while
     /// still allowing failed workers to be detected within the TTL window.
+    ///
     pub fn new(worker_id: impl Into<String>, backend: B, registry: TaskRegistry) -> Self {
         Self {
             worker_id: worker_id.into(),
@@ -95,7 +96,7 @@ where
             registry: Arc::new(registry),
             claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
             heartbeat_interval: Some(Duration::from_secs(2 * 60)), // Default 2 minutes (before TTL)
-            batch_size: NonZeroUsize::new(1).unwrap(),    // Default: fetch one task at a time
+            batch_size: NonZeroUsize::MIN,                // Default: fetch one task at a time (1)
         }
     }
 
@@ -122,7 +123,7 @@ where
 
     /// Set the number of tasks to fetch per poll (default: 1).
     ///
-    /// With batch_size=1, the worker fetches one task, executes it, then polls again.
+    /// With `batch_size=1`, the worker fetches one task, executes it, then polls again.
     /// Other workers can pick up remaining tasks immediately.
     ///
     /// Higher values reduce polling overhead but may cause workers to hold task IDs
@@ -167,6 +168,7 @@ where
     }
 
     /// Get a reference to the backend.
+    #[must_use]
     pub fn backend(&self) -> &Arc<B> {
         &self.backend
     }
@@ -201,6 +203,7 @@ where
     /// - The workflow definition hash doesn't match
     /// - Task execution fails
     /// - Snapshot update fails
+    #[allow(clippy::too_many_lines)]
     pub async fn execute_task<C, Input, M>(
         &self,
         workflow: &Workflow<C, Input, M>,
@@ -230,22 +233,19 @@ where
             )
             .await?;
 
-        match claim {
-            Some(_) => {
-                tracing::debug!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    "Claim successful"
-                );
-            }
-            None => {
-                tracing::debug!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    "Task was already claimed by another worker"
-                );
-                return Ok(WorkflowStatus::InProgress);
-            }
+        if claim.is_some() {
+            tracing::debug!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Claim successful"
+            );
+        } else {
+            tracing::debug!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Task was already claimed by another worker"
+            );
+            return Ok(WorkflowStatus::InProgress);
         }
 
         let mut snapshot = self
@@ -330,7 +330,7 @@ where
 
                 loop {
                     tokio::select! {
-                        _ = cancel_token.cancelled() => {
+                        () = cancel_token.cancelled() => {
                             tracing::trace!(
                                 instance_id = %instance_id,
                                 task_id = %task_id,
@@ -440,7 +440,7 @@ where
                 );
 
                 release_claim().await;
-                return Err(anyhow::anyhow!("Task panicked: {}", panic_msg));
+                return Err(anyhow::anyhow!("Task panicked: {panic_msg}"));
             }
         };
 
@@ -525,6 +525,10 @@ where
     ///
     /// - `poll_interval`: How often to poll for new tasks
     /// - `workflows`: Map of workflow definition hash to workflow (for task execution)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if polling the backend fails.
     #[allow(clippy::type_complexity)]
     pub async fn start_polling<C, Input, M>(
         &self,
@@ -596,6 +600,7 @@ where
     }
 
     /// Execute a task by ID from the workflow continuation (iterative, no boxing).
+    #[allow(clippy::manual_async_fn)]
     fn execute_task_by_id<'a>(
         continuation: &'a WorkflowContinuation,
         task_id: &'a str,
@@ -618,7 +623,7 @@ where
                     WorkflowContinuation::Fork { branches, join } => {
                         // Check branches
                         let mut found_in_branch = false;
-                        for branch in branches.iter() {
+                        for branch in branches {
                             if Self::find_task_id_in_continuation(branch, task_id) {
                                 current = branch;
                                 found_in_branch = true;
@@ -690,7 +695,7 @@ where
             }
             WorkflowContinuation::Fork { branches, join } => {
                 // All branches must be completed (recursively check entire branch chain)
-                for branch in branches.iter() {
+                for branch in branches {
                     if !Self::is_workflow_complete(branch, snapshot) {
                         return false;
                     }
