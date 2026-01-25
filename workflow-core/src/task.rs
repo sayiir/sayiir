@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Metadata associated with a task definition.
@@ -52,6 +54,7 @@ pub struct RetryPolicy {
 /// # Errors
 ///
 /// Returns an error if the buffer is malformed or too small.
+#[allow(clippy::indexing_slicing)]
 pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String, Bytes>> {
     let mut offset = 0;
     let mut results = HashMap::new();
@@ -271,15 +274,40 @@ where
     FnTask(f, PhantomData)
 }
 
+/// A type-erased future that outputs `Result<Bytes>`.
+///
+/// This is a newtype around a pinned boxed future, providing a concrete type
+/// for the `Future` associated type in `UntypedCoreTask`. While it still uses
+/// boxing internally (necessary for type erasure), the named type provides:
+/// - Better error messages and stack traces
+/// - A concrete type instead of `dyn Future`
+/// - Clearer API boundaries
+pub struct BytesFuture(Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>);
+
+impl Future for BytesFuture {
+    type Output = Result<Bytes>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.0.as_mut().poll(cx)
+    }
+}
+
+impl BytesFuture {
+    /// Create a new `BytesFuture` from any future that outputs `Result<Bytes>`.
+    pub fn new<F>(fut: F) -> Self
+    where
+        F: Future<Output = Result<Bytes>> + Send + 'static,
+    {
+        BytesFuture(Box::pin(fut))
+    }
+}
+
 /// A boxed core task that can be used to run a task without knowing the input and output types.
-pub type UntypedCoreTask = Box<
-    dyn CoreTask<
-            Input = Bytes,
-            Output = Bytes,
-            Future = std::pin::Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>,
-        > + Send
-        + Sync,
->;
+///
+/// Uses `BytesFuture` as the concrete future type, which internally boxes the future.
+/// This boxing is necessary for type erasure when storing heterogeneous tasks.
+pub type UntypedCoreTask =
+    Box<dyn CoreTask<Input = Bytes, Output = Bytes, Future = BytesFuture> + Send + Sync>;
 
 /// Internal wrapper that implements `CoreTask<Input = Bytes, Output = Bytes>` for async functions.
 struct UntypedTaskFnWrapper<F, I, O, Fut, C> {
@@ -298,12 +326,12 @@ where
 {
     type Input = Bytes;
     type Output = Bytes;
-    type Future = std::pin::Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+    type Future = BytesFuture;
 
     fn run(&self, input: Bytes) -> Self::Future {
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
-        Box::pin(async move {
+        BytesFuture::new(async move {
             let decoded_input = codec.decode::<I>(input)?;
             let output = func(decoded_input).await?;
             codec.encode(&output)
@@ -422,12 +450,12 @@ where
     {
         type Input = Bytes;
         type Output = Bytes;
-        type Future = std::pin::Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+        type Future = BytesFuture;
 
         fn run(&self, input: Bytes) -> Self::Future {
             let codec = Arc::clone(&self.codec);
             let func = Arc::clone(&self.func);
-            Box::pin(async move {
+            BytesFuture::new(async move {
                 let decoded_input = codec.decode::<I>(input)?;
                 let output = func(decoded_input).await?;
                 codec.encode(&output)
@@ -462,12 +490,12 @@ where
 {
     type Input = Bytes;
     type Output = Bytes;
-    type Future = std::pin::Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>;
+    type Future = BytesFuture;
 
     fn run(&self, input: Bytes) -> Self::Future {
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
-        Box::pin(async move {
+        BytesFuture::new(async move {
             let named_results = deserialize_named_branch_results(&input)?;
             let branch_outputs = BranchOutputs::new(named_results, codec.clone());
 
