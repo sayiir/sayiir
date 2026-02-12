@@ -168,111 +168,87 @@ pub async fn execute_continuation_async(
     continuation: &WorkflowContinuation,
     input: Bytes,
 ) -> anyhow::Result<Bytes> {
-    let mut current = continuation;
-    let mut current_input = input;
-
-    loop {
-        match current {
-            WorkflowContinuation::Task {
-                func: Some(func),
-                next,
-                ..
-            } => {
-                let output = func.run(current_input).await?;
-
-                match next {
-                    Some(next_cont) => {
-                        current = next_cont;
-                        current_input = output;
-                    }
-                    None => return Ok(output),
-                }
-            }
-            WorkflowContinuation::Task { func: None, id, .. } => {
-                return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
-            }
-            WorkflowContinuation::Fork { branches, join } => {
-                let branch_handles: Vec<_> = branches
-                    .iter()
-                    .map(|branch| {
-                        let branch_id = continuation_id(branch);
-                        let branch = Arc::clone(branch);
-                        let branch_input = current_input.clone();
-                        tokio::task::spawn(async move {
-                            execute_branch_async(&branch, branch_input)
-                                .await
-                                .map(|output| (branch_id, output))
-                        })
-                    })
-                    .collect();
-
-                let branch_results: Vec<(String, Bytes)> =
-                    futures::future::try_join_all(branch_handles)
-                        .await?
-                        .into_iter()
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-
-                match resolve_join(join.as_deref(), &branch_results)? {
-                    JoinResolution::Continue { next, input } => {
-                        current = next;
-                        current_input = input;
-                    }
-                    JoinResolution::Done(output) => return Ok(output),
-                }
-            }
-        }
-    }
+    execute_async_inner(continuation, input, true).await
 }
 
-/// Execute a branch asynchronously.
-async fn execute_branch_async(
-    continuation: &WorkflowContinuation,
+/// Shared implementation for async continuation execution.
+///
+/// When `parallel_branches` is `true`, top-level fork branches are spawned as
+/// parallel tokio tasks. When `false` (used inside branches to avoid unbounded
+/// spawning), branches run sequentially.
+///
+/// Returns a boxed future so the recursive call is provably `Send` for `tokio::spawn`.
+fn execute_async_inner<'a>(
+    continuation: &'a WorkflowContinuation,
     input: Bytes,
-) -> anyhow::Result<Bytes> {
-    let mut current = continuation;
-    let mut current_input = input;
+    parallel_branches: bool,
+) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Bytes>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut current = continuation;
+        let mut current_input = input;
 
-    loop {
-        match current {
-            WorkflowContinuation::Task {
-                func: Some(func),
-                next,
-                ..
-            } => {
-                let output = func.run(current_input).await?;
+        loop {
+            match current {
+                WorkflowContinuation::Task {
+                    func: Some(func),
+                    next,
+                    ..
+                } => {
+                    let output = func.run(current_input).await?;
 
-                match next {
-                    Some(next_cont) => {
-                        current = next_cont;
-                        current_input = output;
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = output;
+                        }
+                        None => return Ok(output),
                     }
-                    None => return Ok(output),
                 }
-            }
-            WorkflowContinuation::Task { func: None, id, .. } => {
-                return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
-            }
-            WorkflowContinuation::Fork { branches, join } => {
-                // Nested forks in branches: execute sequentially to avoid unbounded spawning
-                let mut branch_results = Vec::new();
-
-                for branch in branches {
-                    let branch_id = continuation_id(branch);
-                    let output =
-                        Box::pin(execute_branch_async(branch, current_input.clone())).await?;
-                    branch_results.push((branch_id, output));
+                WorkflowContinuation::Task { func: None, id, .. } => {
+                    return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                 }
+                WorkflowContinuation::Fork { branches, join } => {
+                    let branch_results = if parallel_branches {
+                        let branch_handles: Vec<_> = branches
+                            .iter()
+                            .map(|branch| {
+                                let branch_id = continuation_id(branch);
+                                let branch = Arc::clone(branch);
+                                let branch_input = current_input.clone();
+                                tokio::task::spawn(async move {
+                                    execute_async_inner(&branch, branch_input, false)
+                                        .await
+                                        .map(|output| (branch_id, output))
+                                })
+                            })
+                            .collect();
 
-                match resolve_join(join.as_deref(), &branch_results)? {
-                    JoinResolution::Continue { next, input } => {
-                        current = next;
-                        current_input = input;
+                        futures::future::try_join_all(branch_handles)
+                            .await?
+                            .into_iter()
+                            .collect::<anyhow::Result<Vec<_>>>()?
+                    } else {
+                        let mut results = Vec::new();
+                        for branch in branches {
+                            let branch_id = continuation_id(branch);
+                            let output =
+                                execute_async_inner(branch, current_input.clone(), false).await?;
+                            results.push((branch_id, output));
+                        }
+                        results
+                    };
+
+                    match resolve_join(join.as_deref(), &branch_results)? {
+                        JoinResolution::Continue { next, input } => {
+                            current = next;
+                            current_input = input;
+                        }
+                        JoinResolution::Done(output) => return Ok(output),
                     }
-                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
         }
-    }
+    })
 }
 
 /// Execute a workflow continuation with checkpointing after each task.
@@ -575,24 +551,8 @@ where
     }
 
     // Check if already in terminal state
-    if snapshot.state.is_completed() {
-        return Ok(ResumeOutcome::AlreadyTerminal(WorkflowStatus::Completed));
-    }
-    if let WorkflowSnapshotState::Failed { ref error } = snapshot.state {
-        return Ok(ResumeOutcome::AlreadyTerminal(WorkflowStatus::Failed(
-            WorkflowError::ResumeError(error.clone()).into(),
-        )));
-    }
-    if let WorkflowSnapshotState::Cancelled {
-        ref reason,
-        ref cancelled_by,
-        ..
-    } = snapshot.state
-    {
-        return Ok(ResumeOutcome::AlreadyTerminal(WorkflowStatus::Cancelled {
-            reason: reason.clone(),
-            cancelled_by: cancelled_by.clone(),
-        }));
+    if let Some(status) = snapshot.state.as_terminal_status() {
+        return Ok(ResumeOutcome::AlreadyTerminal(status));
     }
 
     // Determine resume input
@@ -1386,13 +1346,14 @@ mod tests {
         backend.save_snapshot(snapshot.clone()).await.unwrap();
 
         // Request cancellation before execution
-        let request = workflow_core::snapshot::CancellationRequest {
-            reason: Some("test cancel".into()),
-            requested_by: Some("tester".into()),
-            requested_at: chrono::Utc::now(),
-        };
         backend
-            .request_cancellation("inst-1", request)
+            .request_cancellation(
+                "inst-1",
+                workflow_core::snapshot::CancellationRequest::new(
+                    Some("test cancel".into()),
+                    Some("tester".into()),
+                ),
+            )
             .await
             .unwrap();
 

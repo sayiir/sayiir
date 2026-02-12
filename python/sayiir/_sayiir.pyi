@@ -33,7 +33,6 @@ class PyFlowBuilder:
 
     def __init__(self, name: str) -> None: ...
     def then(self, task_id: str, metadata: PyTaskMetadata | None = None) -> None: ...
-    def fork(self) -> PyForkBuilder: ...
     def add_fork(
         self,
         branches: list[list[tuple[str, PyTaskMetadata | None]]],
@@ -41,11 +40,6 @@ class PyFlowBuilder:
         join_metadata: PyTaskMetadata | None = None,
     ) -> None: ...
     def build(self) -> PyWorkflow: ...
-
-class PyForkBuilder:
-    """Fork builder."""
-
-    def branch(self, task_id: str, metadata: PyTaskMetadata | None = None) -> None: ...
 
 class PyWorkflow:
     """Compiled workflow definition."""

@@ -55,6 +55,18 @@ pub struct CancellationRequest {
     pub requested_at: DateTime<Utc>,
 }
 
+impl CancellationRequest {
+    /// Create a new cancellation request with the current timestamp.
+    #[must_use]
+    pub fn new(reason: Option<String>, requested_by: Option<String>) -> Self {
+        Self {
+            reason,
+            requested_by,
+            requested_at: Utc::now(),
+        }
+    }
+}
+
 /// State of a workflow snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSnapshotState {
@@ -122,6 +134,30 @@ impl WorkflowSnapshotState {
                 | WorkflowSnapshotState::Failed { .. }
                 | WorkflowSnapshotState::Cancelled { .. }
         )
+    }
+
+    /// Convert a terminal state to a [`WorkflowStatus`](crate::workflow::WorkflowStatus).
+    ///
+    /// Returns `Some(status)` for `Completed`, `Failed`, and `Cancelled` states,
+    /// or `None` if still `InProgress`.
+    #[must_use]
+    pub fn as_terminal_status(&self) -> Option<crate::workflow::WorkflowStatus> {
+        use crate::workflow::WorkflowStatus;
+        match self {
+            Self::Completed { .. } => Some(WorkflowStatus::Completed),
+            Self::Failed { error } => Some(WorkflowStatus::Failed(
+                crate::error::WorkflowError::ResumeError(error.clone()).into(),
+            )),
+            Self::Cancelled {
+                reason,
+                cancelled_by,
+                ..
+            } => Some(WorkflowStatus::Cancelled {
+                reason: reason.clone(),
+                cancelled_by: cancelled_by.clone(),
+            }),
+            Self::InProgress { .. } => None,
+        }
     }
 
     /// Extract cancellation details if in `Cancelled` state.

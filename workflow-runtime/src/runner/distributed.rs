@@ -11,16 +11,13 @@
 //! horizontal scaling with multiple workers collaborating on tasks.
 
 use bytes::Bytes;
-use chrono::Utc;
 use futures::future;
 use std::sync::Arc;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::{WorkflowContext, with_context};
 use workflow_core::error::WorkflowError;
-use workflow_core::snapshot::{
-    CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
-};
+use workflow_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
 
@@ -99,14 +96,8 @@ where
         reason: Option<String>,
         cancelled_by: Option<String>,
     ) -> anyhow::Result<()> {
-        let request = CancellationRequest {
-            reason,
-            requested_by: cancelled_by,
-            requested_at: Utc::now(),
-        };
-
         self.backend
-            .request_cancellation(instance_id, request)
+            .request_cancellation(instance_id, CancellationRequest::new(reason, cancelled_by))
             .await?;
 
         Ok(())
@@ -216,27 +207,9 @@ where
             .into());
         }
 
-        // Check if already completed, failed, or cancelled
-        if snapshot.state.is_completed() {
-            return Ok(WorkflowStatus::Completed);
-        }
-        if snapshot.state.is_failed()
-            && let WorkflowSnapshotState::Failed { error } = &snapshot.state
-        {
-            return Ok(WorkflowStatus::Failed(
-                WorkflowError::ResumeError(error.clone()).into(),
-            ));
-        }
-        if let WorkflowSnapshotState::Cancelled {
-            reason,
-            cancelled_by,
-            ..
-        } = &snapshot.state
-        {
-            return Ok(WorkflowStatus::Cancelled {
-                reason: reason.clone(),
-                cancelled_by: cancelled_by.clone(),
-            });
+        // Check if already in terminal state
+        if let Some(status) = snapshot.state.as_terminal_status() {
+            return Ok(status);
         }
 
         // Resume execution

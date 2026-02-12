@@ -27,7 +27,6 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<task::PyRetryPolicy>()?;
     m.add_class::<task::PyTaskMetadata>()?;
     m.add_class::<flow::PyFlowBuilder>()?;
-    m.add_class::<flow::PyForkBuilder>()?;
     m.add_class::<flow::PyWorkflow>()?;
     m.add_class::<engine::PyWorkflowEngine>()?;
     m.add_class::<engine::PyWorkflowStatus>()?;

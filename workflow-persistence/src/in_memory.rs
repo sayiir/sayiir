@@ -684,13 +684,15 @@ mod tests {
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         backend.save_snapshot(snapshot).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: Some("User requested".to_string()),
-            requested_by: Some("admin".to_string()),
-            requested_at: chrono::Utc::now(),
-        };
-
-        let result = backend.request_cancellation("test-123", request).await;
+        let result = backend
+            .request_cancellation(
+                "test-123",
+                CancellationRequest::new(
+                    Some("User requested".to_string()),
+                    Some("admin".to_string()),
+                ),
+            )
+            .await;
         assert!(result.is_ok(), "request_cancellation should succeed");
 
         let stored = backend.get_cancellation_request("test-123").await.unwrap();
@@ -704,13 +706,9 @@ mod tests {
     async fn test_request_cancellation_not_found() {
         let backend = InMemoryBackend::new();
 
-        let request = CancellationRequest {
-            reason: None,
-            requested_by: None,
-            requested_at: chrono::Utc::now(),
-        };
-
-        let result = backend.request_cancellation("nonexistent", request).await;
+        let result = backend
+            .request_cancellation("nonexistent", CancellationRequest::new(None, None))
+            .await;
         assert!(
             matches!(result, Err(BackendError::NotFound(_))),
             "should return NotFound for non-existent workflow"
@@ -724,13 +722,9 @@ mod tests {
         snapshot.mark_completed(bytes::Bytes::from("result"));
         backend.save_snapshot(snapshot).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: None,
-            requested_by: None,
-            requested_at: chrono::Utc::now(),
-        };
-
-        let result = backend.request_cancellation("test-123", request).await;
+        let result = backend
+            .request_cancellation("test-123", CancellationRequest::new(None, None))
+            .await;
         assert!(
             matches!(result, Err(BackendError::CannotCancel(_))),
             "should return CannotCancel for completed workflow"
@@ -744,13 +738,9 @@ mod tests {
         snapshot.mark_failed("Some error".to_string());
         backend.save_snapshot(snapshot).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: None,
-            requested_by: None,
-            requested_at: chrono::Utc::now(),
-        };
-
-        let result = backend.request_cancellation("test-123", request).await;
+        let result = backend
+            .request_cancellation("test-123", CancellationRequest::new(None, None))
+            .await;
         assert!(
             matches!(result, Err(BackendError::CannotCancel(_))),
             "should return CannotCancel for failed workflow"
@@ -764,13 +754,12 @@ mod tests {
         snapshot.mark_cancelled(Some("First cancel".to_string()), None, None);
         backend.save_snapshot(snapshot).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: Some("Second cancel".to_string()),
-            requested_by: None,
-            requested_at: chrono::Utc::now(),
-        };
-
-        let result = backend.request_cancellation("test-123", request).await;
+        let result = backend
+            .request_cancellation(
+                "test-123",
+                CancellationRequest::new(Some("Second cancel".to_string()), None),
+            )
+            .await;
         assert!(
             result.is_ok(),
             "cancelling already-cancelled workflow should be idempotent"
@@ -794,13 +783,11 @@ mod tests {
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         backend.save_snapshot(snapshot).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: Some("Test".to_string()),
-            requested_by: None,
-            requested_at: chrono::Utc::now(),
-        };
         backend
-            .request_cancellation("test-123", request)
+            .request_cancellation(
+                "test-123",
+                CancellationRequest::new(Some("Test".to_string()), None),
+            )
             .await
             .unwrap();
 
@@ -834,13 +821,11 @@ mod tests {
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         backend.save_snapshot(snapshot).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: Some("Timeout".to_string()),
-            requested_by: Some("system".to_string()),
-            requested_at: chrono::Utc::now(),
-        };
         backend
-            .request_cancellation("test-123", request)
+            .request_cancellation(
+                "test-123",
+                CancellationRequest::new(Some("Timeout".to_string()), Some("system".to_string())),
+            )
             .await
             .unwrap();
 
@@ -911,14 +896,7 @@ mod tests {
         // Add a cancellation request directly (bypassing state check)
         {
             let mut requests = backend.cancellation_requests.write().unwrap();
-            requests.insert(
-                "test-123".to_string(),
-                CancellationRequest {
-                    reason: None,
-                    requested_by: None,
-                    requested_at: chrono::Utc::now(),
-                },
-            );
+            requests.insert("test-123".to_string(), CancellationRequest::new(None, None));
         }
 
         let result = backend.check_and_cancel("test-123", None).await.unwrap();
@@ -950,13 +928,8 @@ mod tests {
         });
         backend.save_snapshot(snapshot2).await.unwrap();
 
-        let request = CancellationRequest {
-            reason: None,
-            requested_by: None,
-            requested_at: chrono::Utc::now(),
-        };
         backend
-            .request_cancellation("workflow-1", request)
+            .request_cancellation("workflow-1", CancellationRequest::new(None, None))
             .await
             .unwrap();
 

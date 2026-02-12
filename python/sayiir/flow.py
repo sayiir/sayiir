@@ -52,6 +52,17 @@ def _maybe_wrap_pydantic(task_func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _register_task(
+    task_func: Callable[..., Any],
+    registry: dict[str, Callable[..., Any]],
+) -> tuple[str, PyTaskMetadata | None]:
+    """Extract task id/metadata and register the wrapped task."""
+    task_id = getattr(task_func, "_task_id", task_func.__name__)
+    metadata = getattr(task_func, "_metadata", None)
+    registry[task_id] = _maybe_wrap_pydantic(task_func)
+    return task_id, metadata
+
+
 class Workflow:
     """A compiled workflow with its task registry.
 
@@ -96,23 +107,26 @@ class ForkBuilder:
 
             .branch(step_a)                  # single-task branch
             .branch(step_a, step_b, step_c)  # multi-step branch
+
+        Raises:
+            ValueError: If no task functions are provided.
         """
+        if not task_funcs:
+            raise ValueError("branch() requires at least one task function")
         chain: list[tuple[str, Callable[..., Any]]] = []
         for func in task_funcs:
-            task_id = getattr(func, "_task_id", func.__name__)
-            self._flow._task_registry[task_id] = _maybe_wrap_pydantic(func)
+            task_id, _ = _register_task(func, self._flow._task_registry)
             chain.append((task_id, func))
         self._branches.append(chain)
         return self
 
     def join(self, task_func: Callable[..., Any]) -> "Flow":
         """Join branches with a combining task."""
-        task_id = getattr(task_func, "_task_id", task_func.__name__)
-        metadata = getattr(task_func, "_metadata", None)
+        task_id, metadata = _register_task(task_func, self._flow._task_registry)
         branches: list[list[tuple[str, PyTaskMetadata | None]]] = [
-            [(name, None) for name, _ in chain] for chain in self._branches
+            [(name, getattr(func, "_metadata", None)) for name, func in chain]
+            for chain in self._branches
         ]
-        self._flow._task_registry[task_id] = _maybe_wrap_pydantic(task_func)
         self._flow._builder.add_fork(branches, task_id, metadata)
         return self._flow
 
@@ -139,9 +153,7 @@ class Flow:
 
     def then(self, task_func: Callable[..., Any]) -> "Flow":
         """Add a sequential task."""
-        task_id = getattr(task_func, "_task_id", task_func.__name__)
-        metadata = getattr(task_func, "_metadata", None)
-        self._task_registry[task_id] = _maybe_wrap_pydantic(task_func)
+        task_id, metadata = _register_task(task_func, self._task_registry)
         self._builder.then(task_id, metadata)
         return self
 

@@ -316,6 +316,38 @@ impl BytesFuture {
 pub type UntypedCoreTask =
     Box<dyn CoreTask<Input = Bytes, Output = Bytes, Future = BytesFuture> + Send + Sync>;
 
+/// Implement `CoreTask<Bytes, Bytes>` for a struct that has `func` and `codec` fields.
+///
+/// The generated `run` method: decodes the input via the codec, calls the function,
+/// and encodes the output back to `Bytes`.
+macro_rules! impl_codec_task {
+    (
+        $wrapper:ident < $($gen:ident),+ >
+        where $func_type:ty : Fn($input:ty) -> $fut_type:ty,
+              $($bound:tt)+
+    ) => {
+        impl< $($gen),+ > CoreTask for $wrapper < $($gen),+ >
+        where
+            $func_type : Fn($input) -> $fut_type + Send + Sync + 'static,
+            $($bound)+
+        {
+            type Input = Bytes;
+            type Output = Bytes;
+            type Future = BytesFuture;
+
+            fn run(&self, input: Bytes) -> Self::Future {
+                let func = Arc::clone(&self.func);
+                let codec = Arc::clone(&self.codec);
+                BytesFuture::new(async move {
+                    let decoded_input = codec.decode::<$input>(input)?;
+                    let output = func(decoded_input).await?;
+                    codec.encode(&output)
+                })
+            }
+        }
+    };
+}
+
 /// Internal wrapper that implements `CoreTask<Input = Bytes, Output = Bytes>` for async functions.
 struct UntypedTaskFnWrapper<F, I, O, Fut, C> {
     func: Arc<F>,
@@ -323,28 +355,14 @@ struct UntypedTaskFnWrapper<F, I, O, Fut, C> {
     _phantom: std::marker::PhantomData<fn(I) -> (O, Fut)>,
 }
 
-impl<F, I, O, Fut, C> CoreTask for UntypedTaskFnWrapper<F, I, O, Fut, C>
-where
-    F: Fn(I) -> Fut + Send + Sync + 'static,
-    I: Send + 'static,
-    O: Send + 'static,
-    Fut: Future<Output = Result<O>> + Send + 'static,
-    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
-{
-    type Input = Bytes;
-    type Output = Bytes;
-    type Future = BytesFuture;
-
-    fn run(&self, input: Bytes) -> Self::Future {
-        let func = Arc::clone(&self.func);
-        let codec = Arc::clone(&self.codec);
-        BytesFuture::new(async move {
-            let decoded_input = codec.decode::<I>(input)?;
-            let output = func(decoded_input).await?;
-            codec.encode(&output)
-        })
-    }
-}
+impl_codec_task!(
+    UntypedTaskFnWrapper<F, I, O, Fut, C>
+    where F: Fn(I) -> Fut,
+          I: Send + 'static,
+          O: Send + 'static,
+          Fut: Future<Output = Result<O>> + Send + 'static,
+          C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+);
 
 /// Create a new untyped task from any function using a codec.
 ///
@@ -445,26 +463,13 @@ where
         _phantom: PhantomData<fn(I) -> O>,
     }
 
-    impl<I, O, C> CoreTask for ArcBranchWrapper<I, O, C>
-    where
-        I: Send + 'static,
-        O: Send + 'static,
-        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
-    {
-        type Input = Bytes;
-        type Output = Bytes;
-        type Future = BytesFuture;
-
-        fn run(&self, input: Bytes) -> Self::Future {
-            let codec = Arc::clone(&self.codec);
-            let func = Arc::clone(&self.func);
-            BytesFuture::new(async move {
-                let decoded_input = codec.decode::<I>(input)?;
-                let output = func(decoded_input).await?;
-                codec.encode(&output)
-            })
-        }
-    }
+    impl_codec_task!(
+        ArcBranchWrapper<I, O, C>
+        where BoxedBranchFn<I, O>: Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O>> + Send>>,
+              I: Send + 'static,
+              O: Send + 'static,
+              C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+    );
 
     Box::new(ArcBranchWrapper {
         func,

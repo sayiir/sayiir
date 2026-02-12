@@ -4,7 +4,6 @@
 //! to the Rust checkpointing runtime. Supports run, resume, and cancel.
 
 use bytes::Bytes;
-use chrono::Utc;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -62,29 +61,30 @@ impl PyDurableEngine {
         let first_task_id = continuation.first_task_id();
         let registry = Arc::new(task_registry);
 
-        let status = self
-            .runtime
-            .block_on(async {
-                let mut snapshot = prepare_run(
-                    instance_id,
-                    definition_hash,
-                    input_bytes.clone(),
-                    first_task_id,
-                    backend.as_ref(),
-                )
-                .await?;
+        let status = py
+            .detach(|| {
+                self.runtime.block_on(async {
+                    let mut snapshot = prepare_run(
+                        instance_id,
+                        definition_hash,
+                        input_bytes.clone(),
+                        first_task_id,
+                        backend.as_ref(),
+                    )
+                    .await?;
 
-                let executor = make_task_executor(&registry);
-                let result = execute_continuation_with_checkpointing(
-                    &continuation,
-                    input_bytes,
-                    &mut snapshot,
-                    backend.as_ref(),
-                    &executor,
-                )
-                .await;
+                    let executor = make_task_executor(&registry);
+                    let result = execute_continuation_with_checkpointing(
+                        &continuation,
+                        input_bytes,
+                        &mut snapshot,
+                        backend.as_ref(),
+                        &executor,
+                    )
+                    .await;
 
-                finalize_execution(result, &mut snapshot, backend.as_ref()).await
+                    finalize_execution(result, &mut snapshot, backend.as_ref()).await
+                })
             })
             .map_err(|e: anyhow::Error| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
@@ -101,35 +101,35 @@ impl PyDurableEngine {
         instance_id: String,
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
-        let _ = py;
         let continuation = Arc::clone(&workflow.continuation);
         let backend = Arc::clone(&self.backend);
         let registry = Arc::new(task_registry);
 
-        let status = self
-            .runtime
-            .block_on(async {
-                match prepare_resume(&instance_id, &workflow.definition_hash, backend.as_ref())
-                    .await?
-                {
-                    ResumeOutcome::AlreadyTerminal(status) => Ok(status),
-                    ResumeOutcome::Ready {
-                        mut snapshot,
-                        input_bytes,
-                    } => {
-                        let executor = make_task_executor(&registry);
-                        let result = execute_continuation_with_checkpointing(
-                            &continuation,
+        let status = py
+            .detach(|| {
+                self.runtime.block_on(async {
+                    match prepare_resume(&instance_id, &workflow.definition_hash, backend.as_ref())
+                        .await?
+                    {
+                        ResumeOutcome::AlreadyTerminal(status) => Ok(status),
+                        ResumeOutcome::Ready {
+                            mut snapshot,
                             input_bytes,
-                            &mut snapshot,
-                            backend.as_ref(),
-                            &executor,
-                        )
-                        .await;
+                        } => {
+                            let executor = make_task_executor(&registry);
+                            let result = execute_continuation_with_checkpointing(
+                                &continuation,
+                                input_bytes,
+                                &mut snapshot,
+                                backend.as_ref(),
+                                &executor,
+                            )
+                            .await;
 
-                        finalize_execution(result, &mut snapshot, backend.as_ref()).await
+                            finalize_execution(result, &mut snapshot, backend.as_ref()).await
+                        }
                     }
-                }
+                })
             })
             .map_err(|e: anyhow::Error| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
@@ -146,14 +146,13 @@ impl PyDurableEngine {
         reason: Option<String>,
         cancelled_by: Option<String>,
     ) -> PyResult<()> {
-        let request = CancellationRequest {
-            reason,
-            requested_by: cancelled_by,
-            requested_at: Utc::now(),
-        };
-
         self.runtime
-            .block_on(self.backend.request_cancellation(&instance_id, request))
+            .block_on(
+                self.backend.request_cancellation(
+                    &instance_id,
+                    CancellationRequest::new(reason, cancelled_by),
+                ),
+            )
             .map_err(backend_err_to_py)
     }
 

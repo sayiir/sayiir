@@ -75,13 +75,6 @@ impl PyFlowBuilder {
         });
     }
 
-    /// Start a fork builder.
-    fn fork(&mut self) -> PyForkBuilder {
-        PyForkBuilder {
-            branches: Vec::new(),
-        }
-    }
-
     /// Add a fork with branches (each branch is a chain of tasks) and a join.
     #[pyo3(signature = (branches, join_id, join_metadata=None))]
     fn add_fork(
@@ -89,7 +82,19 @@ impl PyFlowBuilder {
         branches: Vec<Vec<(String, Option<PyTaskMetadata>)>>,
         join_id: String,
         join_metadata: Option<PyTaskMetadata>,
-    ) {
+    ) -> PyResult<()> {
+        if branches.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Fork must have at least one branch",
+            ));
+        }
+        for (i, branch) in branches.iter().enumerate() {
+            if branch.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Branch {i} must have at least one task"
+                )));
+            }
+        }
         let branches = branches
             .into_iter()
             .map(|chain| {
@@ -104,6 +109,7 @@ impl PyFlowBuilder {
             join_id,
             join_metadata: join_metadata.map(Into::into).unwrap_or_default(),
         });
+        Ok(())
     }
 
     /// Build the workflow.
@@ -143,7 +149,7 @@ impl PyFlowBuilder {
                 } => {
                     let branch_conts: Vec<Arc<WorkflowContinuation>> = branches
                         .iter()
-                        .map(|chain| {
+                        .map(|chain| -> PyResult<Arc<WorkflowContinuation>> {
                             // Build the chain in reverse to link tasks together
                             let mut branch_current: Option<WorkflowContinuation> = None;
                             for (id, _) in chain.iter().rev() {
@@ -153,9 +159,13 @@ impl PyFlowBuilder {
                                     next: branch_current.map(Box::new),
                                 });
                             }
-                            Arc::new(branch_current.expect("branch must have at least one task"))
+                            Ok(Arc::new(branch_current.ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    "Each branch must have at least one task",
+                                )
+                            })?))
                         })
-                        .collect();
+                        .collect::<PyResult<Vec<_>>>()?;
 
                     let join_cont = WorkflowContinuation::Task {
                         id: join_id.clone(),
@@ -174,20 +184,5 @@ impl PyFlowBuilder {
         current.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to build workflow")
         })
-    }
-}
-
-/// Python-exposed fork builder.
-#[pyclass]
-pub struct PyForkBuilder {
-    branches: Vec<(String, TaskMetadata)>,
-}
-
-#[pymethods]
-impl PyForkBuilder {
-    #[pyo3(signature = (task_id, metadata=None))]
-    fn branch(&mut self, task_id: String, metadata: Option<PyTaskMetadata>) {
-        self.branches
-            .push((task_id, metadata.map(Into::into).unwrap_or_default()));
     }
 }

@@ -13,7 +13,6 @@
 
 use bytes::Bytes;
 use chrono;
-use chrono::Utc;
 use futures::FutureExt;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -155,14 +154,8 @@ where
         reason: Option<String>,
         cancelled_by: Option<String>,
     ) -> anyhow::Result<()> {
-        let request = CancellationRequest {
-            reason,
-            requested_by: cancelled_by,
-            requested_at: Utc::now(),
-        };
-
         self.backend
-            .request_cancellation(instance_id, request)
+            .request_cancellation(instance_id, CancellationRequest::new(reason, cancelled_by))
             .await?;
 
         Ok(())

@@ -10,7 +10,6 @@ from sayiir import (
     task,
 )
 
-
 # ── Task definitions ──────────────────────────────────────────────
 
 
@@ -279,3 +278,20 @@ class TestDurableEngine:
         assert status.error is None
         assert status.reason is None
         assert status.cancelled_by is None
+
+
+# ── Edge-case / validation tests ─────────────────────────────────
+
+
+class TestValidation:
+    def test_branch_with_no_tasks_raises(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="at least one task"):
+            Flow("bad").fork().branch()
+
+    def test_fork_with_no_branches_raises(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="at least one branch"):
+            Flow("bad").fork().join(join_branches).build()
