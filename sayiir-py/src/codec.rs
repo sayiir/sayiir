@@ -25,33 +25,36 @@ pub fn encode_pyobject(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Bytes
 
 /// Decodes JSON bytes to a Python object.
 ///
-/// Tries JSON first (fast path for normal tasks). If the bytes are not valid
-/// UTF-8 or not valid JSON, falls back to decoding JSON-encoded branch
-/// results (used by fork/join — see [`decode_branch_results_to_pydict`]).
+/// Branch results (fork/join) are checked first because `serialize_branch_results`
+/// now produces serde-JSON that `json.loads` would parse as a list-of-lists
+/// instead of the dict that Python join tasks expect.
 pub fn decode_to_pyobject(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> {
-    // Fast path: try UTF-8 + JSON
-    if let Ok(json_str) = std::str::from_utf8(bytes) {
-        let json_mod = py.import(intern!(py, "json"))?;
-        if let Ok(obj) = json_mod.call_method1(intern!(py, "loads"), (json_str,)) {
-            return Ok(obj.unbind());
+    // Try branch results first: serde-JSON for NamedBranchResults is
+    // [[name, [u8...]], ...] — a very specific shape that won't match
+    // normal task inputs (numbers, strings, objects, flat arrays).
+    if let Ok(named) = serde_json::from_slice::<NamedBranchResults>(bytes) {
+        if !named.is_empty() {
+            return decode_branch_results_to_pydict(py, &named);
         }
     }
 
-    // Fallback: JSON-encoded branch results from fork/join
-    decode_branch_results_to_pydict(py, bytes)
+    // Regular JSON path for normal task inputs
+    let json_str = std::str::from_utf8(bytes)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let json_mod = py.import(intern!(py, "json"))?;
+    Ok(json_mod
+        .call_method1(intern!(py, "loads"), (json_str,))?
+        .unbind())
 }
 
-/// Decodes JSON-encoded branch results into a Python dict.
-///
-/// The JSON format is produced by `serialize_branch_results()` in the runtime,
-/// which serializes a `NamedBranchResults` via serde.
+/// Converts deserialized `NamedBranchResults` into a Python dict.
 ///
 /// Each branch value is individually JSON-decoded (since `encode_pyobject`
 /// produces valid JSON for each branch output).
-fn decode_branch_results_to_pydict(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> {
-    let named: NamedBranchResults = serde_json::from_slice(bytes)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
+fn decode_branch_results_to_pydict(
+    py: Python<'_>,
+    named: &NamedBranchResults,
+) -> PyResult<Py<PyAny>> {
     let json_mod = py.import(intern!(py, "json"))?;
     let dict = PyDict::new(py);
 
