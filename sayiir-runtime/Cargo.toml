@@ -24,7 +24,6 @@ serde = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 thiserror = { workspace = true }
-tokio-util = "0.7"
 futures = "0.3"
 chrono = { workspace = true }
 serde_json = { workspace = true }

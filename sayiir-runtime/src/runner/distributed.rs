@@ -11,7 +11,6 @@
 //! horizontal scaling with multiple workers collaborating on tasks.
 
 use bytes::Bytes;
-use futures::future;
 use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
 use sayiir_core::context::{WorkflowContext, with_context};
@@ -26,8 +25,8 @@ use std::sync::Arc;
 use crate::error::RuntimeError;
 use crate::execution::{
     ForkBranchOutcome, check_guards, check_parked_position, collect_cached_branches,
-    execute_or_skip_task, finalize_execution, get_resume_input, park_at_delay,
-    serialize_branch_results, settle_fork_branches,
+    execute_or_skip_task, finalize_execution, get_resume_input, park_at_delay, park_at_fork,
+    save_join_position, serialize_branch_results,
 };
 
 /// A single-process workflow runner with checkpointing for crash recovery.
@@ -338,7 +337,7 @@ where
     }
 
     /// Execute continuation with checkpointing after each task (iterative, no boxing).
-    #[allow(clippy::manual_async_fn)]
+    #[allow(clippy::manual_async_fn, clippy::too_many_lines)]
     async fn execute_with_checkpointing<'a, C, M>(
         continuation: &'a WorkflowContinuation,
         input: Bytes,
@@ -427,14 +426,27 @@ where
                                 &context,
                             )
                             .await?;
-                            settle_fork_branches(
-                                fork_id,
-                                outcome,
-                                join.as_deref(),
-                                snapshot,
-                                backend.as_ref(),
-                            )
-                            .await?
+                            {
+                                if let Some(wake_at) = outcome.max_wake_at {
+                                    return Err(park_at_fork(
+                                        fork_id,
+                                        &outcome.results,
+                                        wake_at,
+                                        snapshot,
+                                        backend.as_ref(),
+                                    )
+                                    .await);
+                                }
+                                check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
+                                save_join_position(
+                                    &outcome.results,
+                                    join.as_deref(),
+                                    snapshot,
+                                    backend.as_ref(),
+                                )
+                                .await?;
+                                outcome.results
+                            }
                         };
 
                     // Proceed to join or return
@@ -470,7 +482,7 @@ where
         M: Send + Sync + 'static,
     {
         let mut branch_results = Vec::with_capacity(branches.len());
-        let mut branch_handles = Vec::with_capacity(branches.len());
+        let mut set = tokio::task::JoinSet::new();
         let instance_id = snapshot.instance_id.clone();
 
         for branch in branches {
@@ -479,41 +491,41 @@ where
             if let Some(result) = snapshot.get_task_result(&branch_id) {
                 branch_results.push((branch_id, result.output.clone()));
             } else {
+                let branch = Arc::clone(branch);
                 let branch_input = input.clone();
                 let branch_backend = Arc::clone(backend);
                 let branch_instance_id = instance_id.clone();
-                let branch_context = context.clone();
+                let ctx_for_work = context.clone();
 
-                branch_handles.push(tokio::task::spawn(Self::execute_branch_task(
-                    Arc::clone(branch),
-                    branch_input,
-                    branch_backend,
-                    branch_instance_id,
-                    branch_context,
-                    branch_id,
-                )));
+                set.spawn(with_context(context.clone(), || async move {
+                    let result = Self::execute_branch_with_checkpoint(
+                        &branch,
+                        branch_input,
+                        branch_backend,
+                        branch_instance_id,
+                        ctx_for_work,
+                    )
+                    .await?;
+                    Ok((branch_id, result))
+                }));
             }
         }
 
         let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
 
-        if !branch_handles.is_empty() {
-            let all_results = future::join_all(branch_handles).await;
-
-            for result in all_results {
-                match result {
-                    Ok(Ok((branch_id, output))) => {
-                        branch_results.push((branch_id, output));
-                    }
-                    Ok(Err(RuntimeError::Workflow(WorkflowError::Waiting { wake_at }))) => {
-                        max_wake_at = Some(match max_wake_at {
-                            Some(existing) => existing.max(wake_at),
-                            None => wake_at,
-                        });
-                    }
-                    Ok(Err(e)) => return Err(e),
-                    Err(join_err) => return Err(RuntimeError::from(join_err)),
+        while let Some(result) = set.join_next().await {
+            match result {
+                Ok(Ok((branch_id, output))) => {
+                    branch_results.push((branch_id, output));
                 }
+                Ok(Err(RuntimeError::Workflow(WorkflowError::Waiting { wake_at }))) => {
+                    max_wake_at = Some(match max_wake_at {
+                        Some(existing) => existing.max(wake_at),
+                        None => wake_at,
+                    });
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(join_err) => return Err(RuntimeError::from(join_err)),
             }
         }
 
@@ -521,37 +533,6 @@ where
             results: branch_results,
             max_wake_at,
         })
-    }
-
-    /// Execute a branch in a spawned task (takes ownership for Send).
-    #[allow(clippy::manual_async_fn)]
-    fn execute_branch_task<C, M>(
-        branch: Arc<WorkflowContinuation>,
-        input: Bytes,
-        backend: Arc<B>,
-        instance_id: String,
-        context: WorkflowContext<C, M>,
-        branch_id: String,
-    ) -> impl std::future::Future<Output = Result<(String, Bytes), RuntimeError>> + Send
-    where
-        B: 'static,
-        C: Codec + 'static,
-        M: Send + Sync + 'static,
-    {
-        async move {
-            with_context(context.clone(), || async {
-                let result = Self::execute_branch_with_checkpoint(
-                    &branch,
-                    input,
-                    backend,
-                    instance_id,
-                    context,
-                )
-                .await?;
-                Ok((branch_id, result))
-            })
-            .await
-        }
     }
 
     /// Execute branch continuation with per-task checkpointing (iterative, no boxing).
@@ -636,32 +617,34 @@ where
                     }
                     WorkflowContinuation::Fork { branches, join, .. } => {
                         // Nested fork within a branch
-                        let branch_handles: Vec<_> = branches
-                            .iter()
-                            .map(|branch| {
-                                let id = branch.id().to_string();
-                                let branch = Arc::clone(branch);
-                                let branch_input = current_input.clone();
-                                let branch_backend = Arc::clone(&backend);
-                                let branch_instance_id = instance_id.clone();
-                                let branch_context = context.clone();
+                        let mut set: tokio::task::JoinSet<Result<(String, Bytes), RuntimeError>> =
+                            tokio::task::JoinSet::new();
+                        for branch in branches {
+                            let id = branch.id().to_string();
+                            let branch = Arc::clone(branch);
+                            let branch_input = current_input.clone();
+                            let branch_backend = Arc::clone(&backend);
+                            let branch_instance_id = instance_id.clone();
+                            let ctx_for_work = context.clone();
 
-                                tokio::task::spawn(Self::execute_nested_branch(
-                                    branch,
+                            set.spawn(with_context(context.clone(), || async move {
+                                let result = Self::execute_branch_with_checkpoint(
+                                    &branch,
                                     branch_input,
                                     branch_backend,
                                     branch_instance_id,
-                                    branch_context,
-                                    id,
-                                ))
-                            })
-                            .collect();
+                                    ctx_for_work,
+                                )
+                                .await?;
+                                Ok((id, result))
+                            }));
+                        }
 
-                        let branch_results: Vec<(String, Bytes)> =
-                            future::try_join_all(branch_handles)
-                                .await?
-                                .into_iter()
-                                .collect::<Result<Vec<_>, RuntimeError>>()?;
+                        let mut branch_results: Vec<(String, Bytes)> =
+                            Vec::with_capacity(set.len());
+                        while let Some(res) = set.join_next().await {
+                            branch_results.push(res??);
+                        }
 
                         match join {
                             Some(join_continuation) => {
@@ -679,37 +662,6 @@ where
                     }
                 }
             }
-        }
-    }
-
-    /// Execute a nested branch in a spawned task (takes ownership for Send).
-    #[allow(clippy::manual_async_fn)]
-    fn execute_nested_branch<C, M>(
-        branch: Arc<WorkflowContinuation>,
-        input: Bytes,
-        backend: Arc<B>,
-        instance_id: String,
-        context: WorkflowContext<C, M>,
-        branch_id: String,
-    ) -> impl std::future::Future<Output = Result<(String, Bytes), RuntimeError>> + Send
-    where
-        B: 'static,
-        C: Codec + 'static,
-        M: Send + Sync + 'static,
-    {
-        async move {
-            with_context(context.clone(), || async {
-                let result = Self::execute_branch_with_checkpoint(
-                    &branch,
-                    input,
-                    backend,
-                    instance_id,
-                    context,
-                )
-                .await?;
-                Ok((branch_id, result))
-            })
-            .await
         }
     }
 }

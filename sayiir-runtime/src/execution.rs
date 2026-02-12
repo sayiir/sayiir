@@ -256,22 +256,6 @@ pub(crate) struct ForkBranchOutcome {
     pub max_wake_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Park if any branch is delayed, otherwise check guards and save join position.
-pub(crate) async fn settle_fork_branches<B: PersistentBackend>(
-    fork_id: &str,
-    outcome: ForkBranchOutcome,
-    join: Option<&WorkflowContinuation>,
-    snapshot: &mut WorkflowSnapshot,
-    backend: &B,
-) -> Result<Vec<(String, Bytes)>, RuntimeError> {
-    if let Some(wake_at) = outcome.max_wake_at {
-        return Err(park_at_fork(fork_id, &outcome.results, wake_at, snapshot, backend).await);
-    }
-    check_guards(backend, &snapshot.instance_id, None).await?;
-    save_join_position(&outcome.results, join, snapshot, backend).await?;
-    Ok(outcome.results)
-}
-
 /// Execute fork branches sequentially, collecting results and tracking delays.
 pub(crate) async fn execute_fork_branches_sequential<F, Fut, B>(
     branches: &[Arc<WorkflowContinuation>],
@@ -527,24 +511,23 @@ fn execute_async_inner<'a>(
                 WorkflowContinuation::Fork { branches, join, .. } => {
                     let branch_results = if parallel_branches && branches.len() > 1 {
                         // Multiple branches: spawn each as a tokio task for parallelism
-                        let branch_handles: Vec<_> = branches
-                            .iter()
-                            .map(|branch| {
-                                let branch_id = branch.id().to_string();
-                                let branch = Arc::clone(branch);
-                                let branch_input = current_input.clone();
-                                tokio::task::spawn(async move {
-                                    execute_async_inner(&branch, branch_input, false)
-                                        .await
-                                        .map(|output| (branch_id, output))
-                                })
-                            })
-                            .collect();
+                        let mut set = tokio::task::JoinSet::new();
+                        for branch in branches {
+                            let branch_id = branch.id().to_string();
+                            let branch = Arc::clone(branch);
+                            let branch_input = current_input.clone();
+                            set.spawn(async move {
+                                execute_async_inner(&branch, branch_input, false)
+                                    .await
+                                    .map(|output| (branch_id, output))
+                            });
+                        }
 
-                        futures::future::try_join_all(branch_handles)
-                            .await?
-                            .into_iter()
-                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                        let mut results = Vec::with_capacity(set.len());
+                        while let Some(res) = set.join_next().await {
+                            results.push(res??);
+                        }
+                        results
                     } else {
                         // Single branch or non-parallel: run inline (no spawn overhead)
                         let mut results = Vec::with_capacity(branches.len());
@@ -659,21 +642,36 @@ where
             } => {
                 check_guards(backend, &snapshot.instance_id, None).await?;
 
-                let branch_results =
-                    if let Some(cached) = collect_cached_branches(branches, snapshot) {
-                        cached
-                    } else {
-                        let outcome = execute_fork_branches_sequential(
-                            branches,
-                            &current_input,
-                            snapshot,
-                            backend,
-                            execute_task,
-                        )
-                        .await?;
-                        settle_fork_branches(fork_id, outcome, join.as_deref(), snapshot, backend)
-                            .await?
-                    };
+                let branch_results = if let Some(cached) =
+                    collect_cached_branches(branches, snapshot)
+                {
+                    cached
+                } else {
+                    let outcome = execute_fork_branches_sequential(
+                        branches,
+                        &current_input,
+                        snapshot,
+                        backend,
+                        execute_task,
+                    )
+                    .await?;
+                    {
+                        if let Some(wake_at) = outcome.max_wake_at {
+                            return Err(park_at_fork(
+                                fork_id,
+                                &outcome.results,
+                                wake_at,
+                                snapshot,
+                                backend,
+                            )
+                            .await);
+                        }
+                        check_guards(backend, &snapshot.instance_id, None).await?;
+                        save_join_position(&outcome.results, join.as_deref(), snapshot, backend)
+                            .await?;
+                        outcome.results
+                    }
+                };
 
                 match resolve_join(join.as_deref(), &branch_results)? {
                     JoinResolution::Continue { next, input } => {
