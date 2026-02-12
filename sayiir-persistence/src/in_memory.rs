@@ -429,8 +429,10 @@ impl TaskClaimStore for InMemoryBackend {
                 continue;
             }
 
-            // Skip workflows with pending cancellation requests
-            if signals.contains_key(&(instance_id.clone(), SignalKind::Cancel)) {
+            // Skip workflows with pending cancellation or pause requests
+            if signals.contains_key(&(instance_id.clone(), SignalKind::Cancel))
+                || signals.contains_key(&(instance_id.clone(), SignalKind::Pause))
+            {
                 continue;
             }
 
@@ -1167,6 +1169,435 @@ mod tests {
         assert!(
             !tasks.iter().any(|t| t.instance_id == "workflow-1"),
             "workflow with pending cancellation should be skipped"
+        );
+    }
+
+    // ========================================================================
+    // check_and_pause tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_check_and_pause_success() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(Some("maintenance".to_string()), Some("ops".to_string())),
+            )
+            .await
+            .unwrap();
+
+        let result = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            result,
+            "check_and_pause should return true when pause pending"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(snapshot.state.is_paused(), "workflow should be paused");
+
+        let WorkflowSnapshotState::Paused {
+            reason, paused_by, ..
+        } = &snapshot.state
+        else {
+            panic!("Expected Paused state");
+        };
+        assert_eq!(reason, &Some("maintenance".to_string()));
+        assert_eq!(paused_by, &Some("ops".to_string()));
+
+        assert!(
+            backend
+                .get_signal("test-123", SignalKind::Pause)
+                .await
+                .unwrap()
+                .is_none(),
+            "pause signal should be cleared after check_and_pause"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_pause_no_request() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            !result,
+            "check_and_pause should return false when no pause pending"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_in_progress(),
+            "workflow should still be in progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_pause_not_in_progress() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_completed(bytes::Bytes::from("done"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Add a pause signal directly (bypassing state check)
+        {
+            let mut signals = backend.signals.write().unwrap();
+            signals.insert(
+                ("test-123".to_string(), SignalKind::Pause),
+                SignalRequest::new(None, None),
+            );
+        }
+
+        let result = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            !result,
+            "check_and_pause should return false for non-in-progress workflow"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_completed(),
+            "workflow should still be completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_pause_preserves_position() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-3".to_string(),
+        });
+        snapshot.mark_task_completed("task-1".to_string(), bytes::Bytes::from("out1"));
+        snapshot.mark_task_completed("task-2".to_string(), bytes::Bytes::from("out2"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
+            .await
+            .unwrap();
+
+        backend.check_and_pause("test-123").await.unwrap();
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        let WorkflowSnapshotState::Paused {
+            completed_tasks,
+            position,
+            last_completed_task_id,
+            ..
+        } = &snapshot.state
+        else {
+            panic!("Expected Paused state");
+        };
+
+        assert_eq!(completed_tasks.len(), 2);
+        assert!(completed_tasks.contains_key("task-1"));
+        assert!(completed_tasks.contains_key("task-2"));
+        assert!(matches!(
+            position,
+            ExecutionPosition::AtTask { task_id } if task_id == "task-3"
+        ));
+        assert_eq!(last_completed_task_id, &Some("task-2".to_string()));
+    }
+
+    // ========================================================================
+    // unpause tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_unpause_success() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-2".to_string(),
+        });
+        snapshot.mark_task_completed("task-1".to_string(), bytes::Bytes::from("out1"));
+        snapshot.mark_paused(&PauseRequest::new(
+            Some("maintenance".to_string()),
+            Some("ops".to_string()),
+        ));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.unpause("test-123").await.unwrap();
+
+        assert!(
+            result.state.is_in_progress(),
+            "unpaused workflow should be in progress"
+        );
+
+        // Verify position and tasks were restored
+        let WorkflowSnapshotState::InProgress {
+            position,
+            completed_tasks,
+            last_completed_task_id,
+        } = &result.state
+        else {
+            panic!("Expected InProgress state");
+        };
+        assert!(matches!(
+            position,
+            ExecutionPosition::AtTask { task_id } if task_id == "task-2"
+        ));
+        assert!(completed_tasks.contains_key("task-1"));
+        assert_eq!(last_completed_task_id, &Some("task-1".to_string()));
+
+        // Verify persisted state matches
+        let loaded = backend.load_snapshot("test-123").await.unwrap();
+        assert!(loaded.state.is_in_progress());
+    }
+
+    #[tokio::test]
+    async fn test_unpause_not_paused_errors() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.unpause("test-123").await;
+        assert!(
+            matches!(result, Err(BackendError::CannotPause(_))),
+            "unpause on in-progress workflow should error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpause_completed_errors() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_completed(bytes::Bytes::from("done"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.unpause("test-123").await;
+        assert!(
+            matches!(result, Err(BackendError::CannotPause(_))),
+            "unpause on completed workflow should error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpause_not_found() {
+        let backend = InMemoryBackend::new();
+        let result = backend.unpause("nonexistent").await;
+        assert!(matches!(result, Err(BackendError::NotFound(_))));
+    }
+
+    // ========================================================================
+    // Concurrent signals tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_cancel_and_pause_simultaneously_cancel_wins() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Store both signals
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("cancel reason".to_string()), None),
+            )
+            .await
+            .unwrap();
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(Some("pause reason".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        // check_and_cancel should process the cancel signal
+        let cancelled = backend
+            .check_and_cancel("test-123", Some("task-1"))
+            .await
+            .unwrap();
+        assert!(cancelled, "cancel should succeed");
+
+        // Now check_and_pause — workflow is already cancelled (not in progress)
+        let paused = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            !paused,
+            "pause should return false since workflow is already cancelled"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(snapshot.state.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_signal_independent_of_pause_signal() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Store both signals
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("cancel".to_string()), None),
+            )
+            .await
+            .unwrap();
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(Some("pause".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        // Clear only cancel
+        backend
+            .clear_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap();
+
+        // Cancel should be gone, pause should remain
+        assert!(
+            backend
+                .get_signal("test-123", SignalKind::Cancel)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            backend
+                .get_signal("test-123", SignalKind::Pause)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // ========================================================================
+    // find_available_tasks + pause signal
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_find_available_tasks_skips_paused_workflows() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot1 = WorkflowSnapshot::with_initial_input(
+            "workflow-1".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![1]),
+        );
+        snapshot1.update_position(ExecutionPosition::AtTask {
+            task_id: "task-1".to_string(),
+        });
+        backend.save_snapshot(&snapshot1).await.unwrap();
+
+        let mut snapshot2 = WorkflowSnapshot::with_initial_input(
+            "workflow-2".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![2]),
+        );
+        snapshot2.update_position(ExecutionPosition::AtTask {
+            task_id: "task-2".to_string(),
+        });
+        backend.save_snapshot(&snapshot2).await.unwrap();
+
+        // Pause workflow-1
+        backend
+            .store_signal(
+                "workflow-1",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
+            .await
+            .unwrap();
+
+        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+
+        assert!(
+            !tasks.iter().any(|t| t.instance_id == "workflow-1"),
+            "workflow with pending pause should be skipped"
+        );
+        assert!(
+            tasks.iter().any(|t| t.instance_id == "workflow-2"),
+            "workflow without signals should be available"
+        );
+    }
+
+    // ========================================================================
+    // Orphaned signals
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delete_snapshot_leaves_orphaned_signals() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("reason".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        // Delete the snapshot
+        backend.delete_snapshot("test-123").await.unwrap();
+
+        // Signal is still there (orphaned) — this documents current behavior
+        let signal = backend
+            .get_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap();
+        assert!(
+            signal.is_some(),
+            "signal persists after snapshot deletion (orphaned)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_signal_overwrites_previous() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("first".to_string()), None),
+            )
+            .await
+            .unwrap();
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("second".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        let signal = backend
+            .get_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            signal.reason,
+            Some("second".to_string()),
+            "latest signal should overwrite previous"
         );
     }
 

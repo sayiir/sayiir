@@ -779,6 +779,80 @@ mod tests {
         assert!(snapshot.updated_at > 0);
         assert_eq!(snapshot.created_at, snapshot.updated_at);
     }
+
+    // ========================================================================
+    // From conversion tests
+    // ========================================================================
+
+    #[test]
+    fn test_cancellation_request_to_signal_request() {
+        let cr = CancellationRequest::new(Some("timeout".into()), Some("admin".into()));
+        let ts = cr.requested_at;
+        let sr: SignalRequest = cr.into();
+        assert_eq!(sr.reason, Some("timeout".into()));
+        assert_eq!(sr.requested_by, Some("admin".into()));
+        assert_eq!(sr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_pause_request_to_signal_request() {
+        let pr = PauseRequest::new(Some("maintenance".into()), Some("ops".into()));
+        let ts = pr.requested_at;
+        let sr: SignalRequest = pr.into();
+        assert_eq!(sr.reason, Some("maintenance".into()));
+        assert_eq!(sr.requested_by, Some("ops".into()));
+        assert_eq!(sr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_signal_request_to_cancellation_request() {
+        let sr = SignalRequest::new(Some("done".into()), Some("user".into()));
+        let ts = sr.requested_at;
+        let cr: CancellationRequest = sr.into();
+        assert_eq!(cr.reason, Some("done".into()));
+        assert_eq!(cr.requested_by, Some("user".into()));
+        assert_eq!(cr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_signal_request_to_pause_request() {
+        let sr = SignalRequest::new(Some("scaling".into()), Some("system".into()));
+        let ts = sr.requested_at;
+        let pr: PauseRequest = sr.into();
+        assert_eq!(pr.reason, Some("scaling".into()));
+        assert_eq!(pr.requested_by, Some("system".into()));
+        assert_eq!(pr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_cancellation_request_roundtrip() {
+        let original = CancellationRequest::new(Some("reason".into()), Some("who".into()));
+        let ts = original.requested_at;
+        let signal: SignalRequest = original.into();
+        let back: CancellationRequest = signal.into();
+        assert_eq!(back.reason, Some("reason".into()));
+        assert_eq!(back.requested_by, Some("who".into()));
+        assert_eq!(back.requested_at, ts);
+    }
+
+    #[test]
+    fn test_pause_request_roundtrip() {
+        let original = PauseRequest::new(Some("reason".into()), Some("who".into()));
+        let ts = original.requested_at;
+        let signal: SignalRequest = original.into();
+        let back: PauseRequest = signal.into();
+        assert_eq!(back.reason, Some("reason".into()));
+        assert_eq!(back.requested_by, Some("who".into()));
+        assert_eq!(back.requested_at, ts);
+    }
+
+    #[test]
+    fn test_from_conversion_with_none_fields() {
+        let sr = SignalRequest::new(None, None);
+        let cr: CancellationRequest = sr.into();
+        assert!(cr.reason.is_none());
+        assert!(cr.requested_by.is_none());
+    }
 }
 
 #[cfg(test)]
