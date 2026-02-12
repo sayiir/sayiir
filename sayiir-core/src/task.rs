@@ -190,10 +190,9 @@ impl<C: Codec> BranchOutputs<C> {
 ///
 /// ```rust,ignore
 /// use sayiir_core::task::CoreTask;
+/// use sayiir_core::error::BoxError;
 /// use std::pin::Pin;
 /// use std::future::Future;
-///
-/// type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 ///
 /// /// A task that doubles its input.
 /// struct DoubleTask;
