@@ -1,13 +1,19 @@
 [workspace]
-members = ["workflow-core", "workflow-persistence", "workflow-runtime", "workflow-macros"]
+members = ["sayiir-core", "sayiir-persistence", "sayiir-runtime", "sayiir-macros", "sayiir-py"]
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
+authors = ["Sayiir Contributors"]
+edition = "2024"
 license = "MIT"
+repository = "https://github.com/sayiir/sayiir"
+homepage = "https://github.com/sayiir/sayiir"
+categories = ["asynchronous", "concurrency"]
+keywords = ["workflow", "orchestration", "durable", "async", "distributed"]
 
 [workspace.dependencies]
 tracing = "0.1"
-petgraph = "0.8"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
@@ -17,3 +23,4 @@ rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 bytecheck = "0.8"
 tokio = { version = "1", features = ["rt", "macros"] }
 sha2 = "0.10"
+thiserror = "2"

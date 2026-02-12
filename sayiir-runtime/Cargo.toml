@@ -1,0 +1,36 @@
+[package]
+name = "sayiir-runtime"
+description = "Execution runtime, checkpointing runner and distributed workers for Sayiir workflows"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[features]
+default = ["rkyv", "json"]
+json = ["dep:serde_json"]
+rkyv = ["dep:rkyv", "dep:bytecheck"]
+
+[dependencies]
+sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
+sayiir-persistence = { version = "0.1.0", path = "../sayiir-persistence" }
+sayiir-macros = { version = "0.1.0", path = "../sayiir-macros" }
+tracing = { workspace = true }
+serde = { workspace = true }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tokio-util = "0.7"
+futures = "0.3"
+chrono = { workspace = true }
+serde_json = { workspace = true, optional = true }
+rkyv = { workspace = true, optional = true }
+bytecheck = { workspace = true, optional = true }
+
+[lib]
+name = "sayiir_runtime"
+path = "src/lib.rs"

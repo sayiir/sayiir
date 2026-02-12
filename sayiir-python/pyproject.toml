@@ -1,0 +1,62 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sayiir"
+version = "0.1.0"
+description = "Durable workflow engine with Rust core and Python bindings — checkpointing, fork/join, distributed workers"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Sayiir Contributors" },
+]
+keywords = ["workflow", "orchestration", "durable", "rust", "distributed"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/sayiir/sayiir"
+Repository = "https://github.com/sayiir/sayiir"
+Issues = "https://github.com/sayiir/sayiir/issues"
+Discord = "https://discord.gg/MWSzsHeg"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+pydantic = ["pydantic>=2.0"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingModuleSource = false
+exclude = ["tests"]
+
+[tool.maturin]
+manifest-path = "../sayiir-py/Cargo.toml"
+module-name = "sayiir._sayiir"
+python-source = "."
+features = ["pyo3/extension-module"]
