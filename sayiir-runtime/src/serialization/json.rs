@@ -1,6 +1,6 @@
-use anyhow::Result;
 use bytes::Bytes;
 use sayiir_core::codec::{Decoder, Encoder, sealed};
+use sayiir_core::error::BoxError;
 use serde::{Deserialize, Serialize};
 
 /// A codec that can serialize and deserialize values using `serde_json`.
@@ -27,7 +27,7 @@ impl<T> sealed::EncodeValue<T> for JsonCodec
 where
     T: Serialize,
 {
-    fn encode_value(&self, value: &T) -> Result<Bytes> {
+    fn encode_value(&self, value: &T) -> Result<Bytes, BoxError> {
         Ok(Bytes::from(serde_json::to_vec(value)?))
     }
 }
@@ -38,7 +38,7 @@ impl<T> sealed::DecodeValue<T> for JsonCodec
 where
     T: for<'de> Deserialize<'de>,
 {
-    fn decode_value(&self, bytes: Bytes) -> Result<T> {
+    fn decode_value(&self, bytes: Bytes) -> Result<T, BoxError> {
         Ok(serde_json::from_slice(&bytes)?)
     }
 }

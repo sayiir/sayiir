@@ -34,11 +34,11 @@
 //! ```
 
 use crate::codec::{Codec, sealed};
+use crate::error::BoxError;
 use crate::task::{
     BranchOutputs, BytesFuture, CoreTask, TaskMetadata, UntypedCoreTask,
     to_heterogeneous_join_task_arc,
 };
-use anyhow::Result;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::future::Future;
@@ -171,7 +171,7 @@ impl TaskRegistry {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         self.register_fn_with_metadata(id, codec, func, TaskMetadata::default());
@@ -190,7 +190,7 @@ impl TaskRegistry {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         self.register_fn_arc(id, codec, Arc::new(func), metadata);
@@ -207,7 +207,7 @@ impl TaskRegistry {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         let factory = Box::new(move || -> UntypedCoreTask {
@@ -228,7 +228,7 @@ impl TaskRegistry {
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         self.register_join_with_metadata(id, codec, func, TaskMetadata::default());
@@ -244,7 +244,7 @@ impl TaskRegistry {
     ) where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         self.register_arc_join(id, codec, Arc::new(func), metadata);
@@ -260,7 +260,7 @@ impl TaskRegistry {
     ) where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         let factory = Box::new(move || -> UntypedCoreTask {
@@ -400,7 +400,7 @@ impl<C: Codec> RegistryBuilder<C> {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         self.registry.register_fn(id, Arc::clone(&self.codec), func);
@@ -419,7 +419,7 @@ impl<C: Codec> RegistryBuilder<C> {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         self.registry
@@ -433,7 +433,7 @@ impl<C: Codec> RegistryBuilder<C> {
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         self.registry
@@ -452,7 +452,7 @@ impl<C: Codec> RegistryBuilder<C> {
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: Future<Output = Result<O>> + Send + 'static,
+        Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         self.registry
@@ -479,7 +479,7 @@ where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
     O: Send + 'static,
-    Fut: Future<Output = Result<O>> + Send + 'static,
+    Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
     C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
     type Input = Bytes;
@@ -535,12 +535,12 @@ mod tests {
     impl Encoder for DummyCodec {}
     impl Decoder for DummyCodec {}
     impl sealed::EncodeValue<u32> for DummyCodec {
-        fn encode_value(&self, _: &u32) -> Result<Bytes> {
+        fn encode_value(&self, _: &u32) -> Result<Bytes, BoxError> {
             Ok(Bytes::from_static(b"encoded"))
         }
     }
     impl sealed::DecodeValue<u32> for DummyCodec {
-        fn decode_value(&self, _: Bytes) -> Result<u32> {
+        fn decode_value(&self, _: Bytes) -> Result<u32, BoxError> {
             Ok(42)
         }
     }

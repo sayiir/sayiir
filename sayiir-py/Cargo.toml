@@ -12,9 +12,8 @@ name = "_sayiir"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module", "anyhow"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 bytes = { workspace = true }
-anyhow = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 

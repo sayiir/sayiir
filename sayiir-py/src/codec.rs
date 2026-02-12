@@ -5,6 +5,7 @@
 //! decoding binary-encoded fork/join branch results into Python dicts.
 
 use bytes::Bytes;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use sayiir_core::task::deserialize_named_branch_results;
@@ -12,10 +13,11 @@ use sayiir_core::task::deserialize_named_branch_results;
 /// Encodes a Python object to JSON bytes.
 ///
 /// Uses Python's `json.dumps()` to serialize the object.
+/// String constants are interned to avoid repeated Python string allocation.
 pub fn encode_pyobject(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Bytes> {
-    let json_mod = py.import("json")?;
+    let json_mod = py.import(intern!(py, "json"))?;
     let json_str: String = json_mod
-        .call_method1("dumps", (obj,))?
+        .call_method1(intern!(py, "dumps"), (obj,))?
         .cast::<PyString>()?
         .extract()?;
     Ok(Bytes::from(json_str))
@@ -29,8 +31,8 @@ pub fn encode_pyobject(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Bytes
 pub fn decode_to_pyobject(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> {
     // Fast path: try UTF-8 + JSON
     if let Ok(json_str) = std::str::from_utf8(bytes) {
-        let json_mod = py.import("json")?;
-        if let Ok(obj) = json_mod.call_method1("loads", (json_str,)) {
+        let json_mod = py.import(intern!(py, "json"))?;
+        if let Ok(obj) = json_mod.call_method1(intern!(py, "loads"), (json_str,)) {
             return Ok(obj.unbind());
         }
     }
@@ -50,13 +52,13 @@ fn decode_branch_results_to_pydict(py: Python<'_>, bytes: &Bytes) -> PyResult<Py
     let named = deserialize_named_branch_results(bytes)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    let json_mod = py.import("json")?;
+    let json_mod = py.import(intern!(py, "json"))?;
     let dict = PyDict::new(py);
 
     for (name, data) in &named {
         let json_str = std::str::from_utf8(data)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let val = json_mod.call_method1("loads", (json_str,))?;
+        let val = json_mod.call_method1(intern!(py, "loads"), (json_str,))?;
         dict.set_item(name, val)?;
     }
 

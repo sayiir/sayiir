@@ -60,7 +60,7 @@ impl PyDurableEngine {
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
         let backend = Arc::clone(&self.backend);
-        let first_task_id = continuation.first_task_id();
+        let first_task_id = continuation.first_task_id().to_string();
         let registry = Arc::new(task_registry);
 
         let (status, output_bytes) = py
@@ -88,7 +88,7 @@ impl PyDurableEngine {
                     finalize_execution(result, &mut snapshot, backend.as_ref()).await
                 })
             })
-            .map_err(|e: anyhow::Error| {
+            .map_err(|e: sayiir_runtime::RuntimeError| {
                 PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
             })?;
 
@@ -146,7 +146,7 @@ impl PyDurableEngine {
                     }
                 })
             })
-            .map_err(|e: anyhow::Error| {
+            .map_err(|e: sayiir_runtime::RuntimeError| {
                 PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
             })?;
 
@@ -188,13 +188,15 @@ fn backend_err_to_py(e: sayiir_persistence::BackendError) -> PyErr {
 /// Build the task executor callback for `execute_continuation_with_checkpointing`.
 ///
 /// Returns a closure that acquires the GIL and delegates to `execute_python_task`.
+#[allow(clippy::type_complexity)]
 fn make_task_executor(
     registry: &Arc<Py<PyDict>>,
 ) -> impl Fn(
     &str,
     Bytes,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send>>
-       + Send
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Bytes, sayiir_core::error::BoxError>> + Send>,
+> + Send
        + Sync
        + '_ {
     move |task_id: &str, task_input: Bytes| {
@@ -203,9 +205,9 @@ fn make_task_executor(
         Box::pin(async move {
             Python::try_attach(|py| {
                 execute_python_task(py, &task_id, &task_input, reg.bind(py))
-                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
             })
-            .unwrap_or_else(|| Err(anyhow::anyhow!("Failed to acquire Python GIL")))
+            .unwrap_or_else(|| Err("Failed to acquire Python GIL".into()))
         })
     }
 }

@@ -12,12 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.100"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -465,7 +459,6 @@ version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fcf3ccafdf54c050be48a3a086d372f77ba6615f5057211607cd30e5ac5cec6d"
 dependencies = [
- "anyhow",
  "libc",
  "once_cell",
  "portable-atomic",
@@ -585,7 +578,6 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 name = "sayiir-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytes",
  "chrono",
  "serde",
@@ -620,7 +612,6 @@ dependencies = [
 name = "sayiir-py"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytes",
  "chrono",
  "pyo3",
@@ -635,7 +626,6 @@ dependencies = [
 name = "sayiir-runtime"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytecheck",
  "bytes",
  "chrono",
@@ -646,6 +636,7 @@ dependencies = [
  "sayiir-persistence",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",

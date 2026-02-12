@@ -18,7 +18,7 @@ use sayiir_core::workflow::{Workflow, WorkflowStatus};
 /// # use sayiir_core::context::WorkflowContext;
 /// # use sayiir_runtime::serialization::RkyvCodec;
 /// # use std::sync::Arc;
-/// # async fn example() -> anyhow::Result<()> {
+/// # async fn example() -> Result<(), sayiir_core::error::BoxError> {
 /// let ctx = WorkflowContext::new("my-workflow", Arc::new(RkyvCodec), Arc::new(()));
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("test", |i: u32| async move { Ok(i + 1) })
@@ -36,7 +36,7 @@ impl WorkflowRunner for InProcessRunner {
         &self,
         workflow: &'w Workflow<C, Input, M>,
         input: Input,
-    ) -> impl std::future::Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w
+    ) -> impl std::future::Future<Output = Result<WorkflowStatus, crate::error::RuntimeError>> + Send + 'w
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
@@ -50,7 +50,7 @@ impl WorkflowRunner for InProcessRunner {
                 let input_bytes = codec.encode(&input)?;
                 match execute_continuation_async(continuation, input_bytes).await {
                     Ok(_) => Ok(WorkflowStatus::Completed),
-                    Err(e) => Ok(WorkflowStatus::Failed(e)),
+                    Err(e) => Ok(WorkflowStatus::Failed(e.to_string())),
                 }
             })
             .await
@@ -108,7 +108,7 @@ mod tests {
     async fn test_task_failure_returns_failed_status() {
         let workflow = WorkflowBuilder::new(ctx())
             .then("fail", |_i: u32| async move {
-                Err::<u32, _>(anyhow::anyhow!("intentional failure"))
+                Err::<u32, sayiir_core::error::BoxError>("intentional failure".into())
             })
             .build()
             .unwrap();
@@ -150,7 +150,7 @@ mod tests {
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
             .then("fail_step", |_i: u32| async move {
-                Err::<u32, _>(anyhow::anyhow!("step2 failed"))
+                Err::<u32, sayiir_core::error::BoxError>("step2 failed".into())
             })
             .then("step3", |i: u32| async move { Ok(i * 2) })
             .build()

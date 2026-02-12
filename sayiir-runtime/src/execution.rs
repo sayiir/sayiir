@@ -4,7 +4,7 @@
 //! (in-process, Python bindings, etc.) by supplying task execution callbacks.
 
 use bytes::Bytes;
-use sayiir_core::error::WorkflowError;
+use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::snapshot::{
     ExecutionPosition, TaskResult, WorkflowSnapshot, WorkflowSnapshotState,
 };
@@ -12,6 +12,8 @@ use sayiir_core::workflow::{WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
 use std::future::Future;
 use std::sync::Arc;
+
+use crate::error::RuntimeError;
 
 /// Outcome of resolving a fork's join.
 enum JoinResolution<'a> {
@@ -32,7 +34,7 @@ enum JoinResolution<'a> {
 fn resolve_join<'a>(
     join: Option<&'a WorkflowContinuation>,
     branch_results: &[(String, Bytes)],
-) -> anyhow::Result<JoinResolution<'a>> {
+) -> Result<JoinResolution<'a>, RuntimeError> {
     if let Some(join_cont) = join {
         let input = serialize_branch_results(branch_results)?;
         Ok(JoinResolution::Continue {
@@ -62,35 +64,44 @@ fn resolve_join<'a>(
 ///
 /// Returns an error if writing to the buffer fails.
 #[allow(clippy::cast_possible_truncation)]
-pub fn serialize_branch_results(branch_results: &[(String, Bytes)]) -> anyhow::Result<Bytes> {
+pub fn serialize_branch_results(branch_results: &[(String, Bytes)]) -> Result<Bytes, RuntimeError> {
     use std::io::Write;
 
-    let mut buffer = Vec::new();
+    let write_inner = || -> Result<Vec<u8>, std::io::Error> {
+        // Pre-calculate exact buffer size: 4 (count) + per-branch (4 + name_len + 4 + data_len)
+        let capacity = 4 + branch_results
+            .iter()
+            .map(|(n, d)| 8 + n.len() + d.len())
+            .sum::<usize>();
+        let mut buffer = Vec::with_capacity(capacity);
 
-    // Safe: we never have more than u32::MAX branches in practice
-    buffer.write_all(&(branch_results.len() as u32).to_le_bytes())?;
+        // Safe: we never have more than u32::MAX branches in practice
+        buffer.write_all(&(branch_results.len() as u32).to_le_bytes())?;
 
-    // Write each branch result with name and length prefix
-    for (name, data) in branch_results {
-        // Write name length and name
-        let name_bytes = name.as_bytes();
-        buffer.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
-        buffer.write_all(name_bytes)?;
+        // Write each branch result with name and length prefix
+        for (name, data) in branch_results {
+            // Write name length and name
+            let name_bytes = name.as_bytes();
+            buffer.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
+            buffer.write_all(name_bytes)?;
 
-        // Write data length and data
-        buffer.write_all(&(data.len() as u32).to_le_bytes())?;
-        buffer.write_all(data.as_ref())?;
-    }
+            // Write data length and data
+            buffer.write_all(&(data.len() as u32).to_le_bytes())?;
+            buffer.write_all(data.as_ref())?;
+        }
 
-    Ok(Bytes::from(buffer))
+        Ok(buffer)
+    };
+
+    Ok(Bytes::from(write_inner().map_err(BoxError::from)?))
 }
 
 /// Get the ID of a continuation (for branch identification).
 #[must_use]
-pub fn continuation_id(continuation: &WorkflowContinuation) -> String {
+pub fn continuation_id(continuation: &WorkflowContinuation) -> &str {
     match continuation {
-        WorkflowContinuation::Task { id, .. } => id.clone(),
-        WorkflowContinuation::Fork { .. } => String::from("unnamed"),
+        WorkflowContinuation::Task { id, .. } => id,
+        WorkflowContinuation::Fork { .. } => "unnamed",
     }
 }
 
@@ -110,9 +121,9 @@ pub fn execute_continuation_sync<F>(
     continuation: &WorkflowContinuation,
     input: Bytes,
     execute_task: &F,
-) -> anyhow::Result<Bytes>
+) -> Result<Bytes, RuntimeError>
 where
-    F: Fn(&str, Bytes) -> anyhow::Result<Bytes>,
+    F: Fn(&str, Bytes) -> Result<Bytes, BoxError>,
 {
     let mut current = continuation;
     let mut current_input = input;
@@ -132,10 +143,10 @@ where
             }
             WorkflowContinuation::Fork { branches, join } => {
                 // Execute branches sequentially
-                let mut branch_results = Vec::new();
+                let mut branch_results = Vec::with_capacity(branches.len());
 
                 for branch in branches {
-                    let branch_id = continuation_id(branch);
+                    let branch_id = continuation_id(branch).to_string();
                     let output =
                         execute_continuation_sync(branch, current_input.clone(), execute_task)?;
                     branch_results.push((branch_id, output));
@@ -167,7 +178,7 @@ where
 pub async fn execute_continuation_async(
     continuation: &WorkflowContinuation,
     input: Bytes,
-) -> anyhow::Result<Bytes> {
+) -> Result<Bytes, RuntimeError> {
     execute_async_inner(continuation, input, true).await
 }
 
@@ -182,7 +193,7 @@ fn execute_async_inner<'a>(
     continuation: &'a WorkflowContinuation,
     input: Bytes,
     parallel_branches: bool,
-) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Bytes>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn Future<Output = Result<Bytes, RuntimeError>> + Send + 'a>> {
     Box::pin(async move {
         let mut current = continuation;
         let mut current_input = input;
@@ -208,11 +219,12 @@ fn execute_async_inner<'a>(
                     return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                 }
                 WorkflowContinuation::Fork { branches, join } => {
-                    let branch_results = if parallel_branches {
+                    let branch_results = if parallel_branches && branches.len() > 1 {
+                        // Multiple branches: spawn each as a tokio task for parallelism
                         let branch_handles: Vec<_> = branches
                             .iter()
                             .map(|branch| {
-                                let branch_id = continuation_id(branch);
+                                let branch_id = continuation_id(branch).to_string();
                                 let branch = Arc::clone(branch);
                                 let branch_input = current_input.clone();
                                 tokio::task::spawn(async move {
@@ -226,11 +238,12 @@ fn execute_async_inner<'a>(
                         futures::future::try_join_all(branch_handles)
                             .await?
                             .into_iter()
-                            .collect::<anyhow::Result<Vec<_>>>()?
+                            .collect::<Result<Vec<_>, RuntimeError>>()?
                     } else {
-                        let mut results = Vec::new();
+                        // Single branch or non-parallel: run inline (no spawn overhead)
+                        let mut results = Vec::with_capacity(branches.len());
                         for branch in branches {
-                            let branch_id = continuation_id(branch);
+                            let branch_id = continuation_id(branch).to_string();
                             let output =
                                 execute_async_inner(branch, current_input.clone(), false).await?;
                             results.push((branch_id, output));
@@ -277,11 +290,11 @@ pub async fn execute_continuation_with_checkpointing<F, Fut, B>(
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
     execute_task: &F,
-) -> anyhow::Result<Bytes>
+) -> Result<Bytes, RuntimeError>
 where
     B: PersistentBackend,
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
-    Fut: Future<Output = anyhow::Result<Bytes>> + Send,
+    Fut: Future<Output = Result<Bytes, BoxError>> + Send,
 {
     let mut current = continuation;
     let mut current_input = input;
@@ -308,11 +321,11 @@ where
 
                 if let Some(next_cont) = next {
                     snapshot.update_position(ExecutionPosition::AtTask {
-                        task_id: next_cont.first_task_id(),
+                        task_id: next_cont.first_task_id().to_string(),
                     });
                 }
 
-                backend.save_snapshot(snapshot.clone()).await?;
+                backend.save_snapshot(snapshot).await?;
 
                 // Check for cancellation after task completion
                 if backend
@@ -341,10 +354,10 @@ where
 
                 // Check if all branches already completed (resume case)
                 let mut all_branches_completed = true;
-                let mut branch_results = Vec::new();
+                let mut branch_results = Vec::with_capacity(branches.len());
 
                 for branch in branches {
-                    let branch_id = continuation_id(branch);
+                    let branch_id = continuation_id(branch).to_string();
 
                     if let Some(result) = snapshot.get_task_result(&branch_id) {
                         branch_results.push((branch_id, result.output.clone()));
@@ -359,7 +372,7 @@ where
                     branch_results.clear();
 
                     for branch in branches {
-                        let branch_id = continuation_id(branch);
+                        let branch_id = continuation_id(branch).to_string();
 
                         // Check if this specific branch was already completed
                         let output = if let Some(result) = snapshot.get_task_result(&branch_id) {
@@ -409,12 +422,12 @@ where
                                 })
                                 .collect();
                         snapshot.update_position(ExecutionPosition::AtJoin {
-                            join_id: join_cont.first_task_id(),
+                            join_id: join_cont.first_task_id().to_string(),
                             completed_branches,
                         });
                     }
 
-                    backend.save_snapshot(snapshot.clone()).await?;
+                    backend.save_snapshot(snapshot).await?;
                 }
 
                 // Proceed to join or return
@@ -440,11 +453,11 @@ async fn execute_branch_with_checkpointing<F, Fut, B>(
     instance_id: &str,
     backend: &B,
     execute_task: &F,
-) -> anyhow::Result<Bytes>
+) -> Result<Bytes, RuntimeError>
 where
     B: PersistentBackend,
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
-    Fut: Future<Output = anyhow::Result<Bytes>> + Send,
+    Fut: Future<Output = Result<Bytes, BoxError>> + Send,
 {
     let mut current = continuation;
     let mut current_input = input;
@@ -469,10 +482,10 @@ where
             }
             WorkflowContinuation::Fork { branches, join } => {
                 // Nested fork within a branch: execute sequentially
-                let mut branch_results = Vec::new();
+                let mut branch_results = Vec::with_capacity(branches.len());
 
                 for branch in branches {
-                    let branch_id = continuation_id(branch);
+                    let branch_id = continuation_id(branch).to_string();
                     let output = Box::pin(execute_branch_with_checkpointing(
                         branch,
                         current_input.clone(),
@@ -508,7 +521,7 @@ pub async fn prepare_run<B>(
     input_bytes: Bytes,
     first_task_id: String,
     backend: &B,
-) -> anyhow::Result<WorkflowSnapshot>
+) -> Result<WorkflowSnapshot, RuntimeError>
 where
     B: PersistentBackend,
 {
@@ -517,7 +530,7 @@ where
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: first_task_id,
     });
-    backend.save_snapshot(snapshot.clone()).await?;
+    backend.save_snapshot(&snapshot).await?;
     Ok(snapshot)
 }
 
@@ -535,7 +548,7 @@ pub async fn prepare_resume<B>(
     instance_id: &str,
     definition_hash: &str,
     backend: &B,
-) -> anyhow::Result<ResumeOutcome>
+) -> Result<ResumeOutcome, RuntimeError>
 where
     B: PersistentBackend,
 {
@@ -584,7 +597,7 @@ pub enum ResumeOutcome {
 ///
 /// # Errors
 /// Returns an error if no resume input can be determined.
-pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> anyhow::Result<Bytes> {
+pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> Result<Bytes, RuntimeError> {
     match &snapshot.state {
         WorkflowSnapshotState::InProgress {
             completed_tasks, ..
@@ -618,47 +631,46 @@ pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> anyhow::Result<Bytes> {
 /// # Errors
 /// Returns an error if saving the snapshot to the backend fails.
 pub async fn finalize_execution<B>(
-    result: anyhow::Result<Bytes>,
+    result: Result<Bytes, RuntimeError>,
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
-) -> anyhow::Result<(WorkflowStatus, Option<Bytes>)>
+) -> Result<(WorkflowStatus, Option<Bytes>), RuntimeError>
 where
     B: PersistentBackend,
 {
     match result {
         Ok(output) => {
             snapshot.mark_completed(output.clone());
-            backend.save_snapshot(snapshot.clone()).await?;
+            backend.save_snapshot(snapshot).await?;
             Ok((WorkflowStatus::Completed, Some(output)))
         }
-        Err(e) => {
-            // Check if this was a cancellation using downcasting
-            if let Some(WorkflowError::Cancelled { .. }) = e.downcast_ref::<WorkflowError>() {
-                // Reload snapshot to get cancellation details (set by check_and_cancel)
-                if let Ok(cancelled_snapshot) = backend.load_snapshot(&snapshot.instance_id).await
-                    && let Some((reason, cancelled_by)) =
-                        cancelled_snapshot.state.cancellation_details()
-                {
-                    return Ok((
-                        WorkflowStatus::Cancelled {
-                            reason,
-                            cancelled_by,
-                        },
-                        None,
-                    ));
-                }
-                // Fallback if we couldn't get details
+        Err(RuntimeError::Workflow(WorkflowError::Cancelled { .. })) => {
+            // Reload snapshot to get cancellation details (set by check_and_cancel)
+            if let Ok(cancelled_snapshot) = backend.load_snapshot(&snapshot.instance_id).await
+                && let Some((reason, cancelled_by)) =
+                    cancelled_snapshot.state.cancellation_details()
+            {
                 return Ok((
                     WorkflowStatus::Cancelled {
-                        reason: None,
-                        cancelled_by: None,
+                        reason,
+                        cancelled_by,
                     },
                     None,
                 ));
             }
+            // Fallback if we couldn't get details
+            Ok((
+                WorkflowStatus::Cancelled {
+                    reason: None,
+                    cancelled_by: None,
+                },
+                None,
+            ))
+        }
+        Err(e) => {
             snapshot.mark_failed(e.to_string());
-            let _ = backend.save_snapshot(snapshot.clone()).await;
-            Ok((WorkflowStatus::Failed(e), None))
+            let _ = backend.save_snapshot(snapshot).await;
+            Ok((WorkflowStatus::Failed(e.to_string()), None))
         }
     }
 }
@@ -698,7 +710,7 @@ mod tests {
     ) -> WorkflowContinuation
     where
         F: Fn(u32) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<u32>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<u32, BoxError>> + Send + 'static,
     {
         let c = codec();
         WorkflowContinuation::Task {
@@ -785,7 +797,7 @@ mod tests {
         let input = encode_u32(5);
         let cont = stub_node("add_one", None);
 
-        let callback = |_id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+        let callback = |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
             let val = decode_u32(&input);
             Ok(encode_u32(val + 1))
         };
@@ -800,12 +812,12 @@ mod tests {
         let add_one = stub_node("add_one", Some(Box::new(double)));
         let input = encode_u32(10);
 
-        let callback = |id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+        let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
             let val = decode_u32(&input);
             match id {
                 "add_one" => Ok(encode_u32(val + 1)),
                 "double" => Ok(encode_u32(val * 2)),
-                _ => anyhow::bail!("Unknown task: {id}"),
+                _ => Err(format!("Unknown task: {id}").into()),
             }
         };
 
@@ -827,7 +839,7 @@ mod tests {
 
         let input = encode_u32(10);
 
-        let callback = |id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+        let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
             let val: u32 = serde_json::from_slice(&input).unwrap_or(0);
             match id {
                 "branch_a" => Ok(encode_u32(val * 2)),
@@ -838,7 +850,7 @@ mod tests {
                     let b = decode_u32(&branches["branch_b"]);
                     Ok(encode_u32(a + b))
                 }
-                _ => anyhow::bail!("Unknown task: {id}"),
+                _ => Err(format!("Unknown task: {id}").into()),
             }
         };
 
@@ -859,12 +871,12 @@ mod tests {
 
         let input = encode_u32(10);
 
-        let callback = |id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+        let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
             let val = decode_u32(&input);
             match id {
                 "branch_a" => Ok(encode_u32(val * 2)),
                 "branch_b" => Ok(encode_u32(val + 5)),
-                _ => anyhow::bail!("Unknown"),
+                _ => Err("Unknown".into()),
             }
         };
 
@@ -879,7 +891,7 @@ mod tests {
         let input = encode_u32(1);
 
         let callback =
-            |_id: &str, _input: Bytes| -> anyhow::Result<Bytes> { anyhow::bail!("task exploded") };
+            |_id: &str, _input: Bytes| -> Result<Bytes, BoxError> { Err("task exploded".into()) };
 
         let result = execute_continuation_sync(&cont, input, &callback);
         assert!(result.is_err());
@@ -959,7 +971,7 @@ mod tests {
     async fn test_async_task_failure_propagates() {
         let cont = task_node(
             "fail",
-            |_i: u32| async move { anyhow::bail!("async task failed") },
+            |_i: u32| async move { Err::<u32, BoxError>("async task failed".into()) },
             None,
         );
 
@@ -1002,7 +1014,7 @@ mod tests {
             "hash-1".into(),
             Bytes::from("input"),
         );
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
         match outcome {
@@ -1026,7 +1038,7 @@ mod tests {
             Bytes::from("initial"),
         );
         snapshot.mark_task_completed("task-1".into(), Bytes::from("task1_output"));
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
         match outcome {
@@ -1043,7 +1055,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_completed(Bytes::from("result"));
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
         match outcome {
@@ -1057,7 +1069,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_failed("err".into());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
         match outcome {
@@ -1071,7 +1083,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_cancelled(Some("reason".into()), Some("admin".into()), None);
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
         match outcome {
@@ -1086,7 +1098,7 @@ mod tests {
     async fn test_prepare_resume_hash_mismatch() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = prepare_resume("inst-1", "wrong-hash", &backend).await;
         assert!(result.is_err());
@@ -1097,7 +1109,7 @@ mod tests {
     async fn test_finalize_execution_success() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let (status, output) =
             finalize_execution(Ok(Bytes::from("output")), &mut snapshot, &backend)
@@ -1118,12 +1130,15 @@ mod tests {
     async fn test_finalize_execution_failure() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
-        let (status, output) =
-            finalize_execution(Err(anyhow::anyhow!("task failed")), &mut snapshot, &backend)
-                .await
-                .unwrap();
+        let (status, output) = finalize_execution(
+            Err(RuntimeError::from(BoxError::from("task failed"))),
+            &mut snapshot,
+            &backend,
+        )
+        .await
+        .unwrap();
 
         match status {
             WorkflowStatus::Failed(e) => {
@@ -1143,7 +1158,7 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         // Mark as cancelled in backend so finalize can reload details
         snapshot.mark_cancelled(Some("timeout".into()), Some("system".into()), None);
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         // Reset local snapshot to in-progress for finalize logic
         let mut local_snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
@@ -1180,7 +1195,7 @@ mod tests {
 
         let mut snapshot =
             WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let cont = stub_node("add_one", None);
 
@@ -1190,7 +1205,7 @@ mod tests {
                 let val: u32 = serde_json::from_slice(&input)?;
                 match id.as_str() {
                     "add_one" => Ok(Bytes::from(serde_json::to_vec(&(val + 1))?)),
-                    _ => anyhow::bail!("Unknown: {id}"),
+                    _ => Err(format!("Unknown: {id}").into()),
                 }
             }
         };
@@ -1216,7 +1231,7 @@ mod tests {
 
         let mut snapshot =
             WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let double = stub_node("double", None);
         let add_one = stub_node("add_one", Some(Box::new(double)));
@@ -1228,7 +1243,7 @@ mod tests {
                 match id.as_str() {
                     "add_one" => Ok(Bytes::from(serde_json::to_vec(&(val + 1))?)),
                     "double" => Ok(Bytes::from(serde_json::to_vec(&(val * 2))?)),
-                    _ => anyhow::bail!("Unknown: {id}"),
+                    _ => Err(format!("Unknown: {id}").into()),
                 }
             }
         };
@@ -1257,7 +1272,7 @@ mod tests {
             WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
         // Pre-mark task as completed (simulates resume)
         snapshot.mark_task_completed("add_one".into(), encode_u32(11));
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let double = stub_node("double", None);
         let add_one = stub_node("add_one", Some(Box::new(double)));
@@ -1276,7 +1291,7 @@ mod tests {
                         Ok(Bytes::from(serde_json::to_vec(&(val + 1))?))
                     }
                     "double" => Ok(Bytes::from(serde_json::to_vec(&(val * 2))?)),
-                    _ => anyhow::bail!("Unknown: {id}"),
+                    _ => Err(format!("Unknown: {id}").into()),
                 }
             }
         };
@@ -1304,7 +1319,7 @@ mod tests {
 
         let mut snapshot =
             WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let branch_a = Arc::new(stub_node("branch_a", None));
         let branch_b = Arc::new(stub_node("branch_b", None));
@@ -1328,7 +1343,7 @@ mod tests {
                         let b: u32 = serde_json::from_slice(&branches["branch_b"])?;
                         Ok(Bytes::from(serde_json::to_vec(&(a + b))?))
                     }
-                    _ => anyhow::bail!("Unknown: {id}"),
+                    _ => Err(format!("Unknown: {id}").into()),
                 }
             }
         };
@@ -1354,7 +1369,7 @@ mod tests {
 
         let mut snapshot =
             WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         // Request cancellation before execution
         backend
@@ -1370,7 +1385,9 @@ mod tests {
 
         let cont = stub_node("task1", None);
 
-        let callback = |_id: &str, _input: Bytes| async { anyhow::bail!("Should not be called") };
+        let callback = |_id: &str, _input: Bytes| async {
+            Err::<Bytes, BoxError>("Should not be called".into())
+        };
 
         let result = execute_continuation_with_checkpointing(
             &cont,
@@ -1383,7 +1400,10 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.downcast_ref::<WorkflowError>().is_some());
+        assert!(matches!(
+            err,
+            RuntimeError::Workflow(WorkflowError::Cancelled { .. })
+        ));
     }
 
     // ========================================================================

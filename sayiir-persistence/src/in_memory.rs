@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 ///
 /// let backend = InMemoryBackend::new();
 /// let snapshot = WorkflowSnapshot::new("instance-123".to_string(), "hash-abc".to_string());
-/// backend.save_snapshot(snapshot).await?;
+/// backend.save_snapshot(&snapshot).await?;
 /// ```
 #[derive(Clone, Default)]
 pub struct InMemoryBackend {
@@ -55,10 +55,9 @@ impl InMemoryBackend {
 
 #[async_trait]
 impl PersistentBackend for InMemoryBackend {
-    async fn save_snapshot(&self, snapshot: WorkflowSnapshot) -> Result<(), BackendError> {
-        let instance_id = snapshot.instance_id.clone();
+    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
-        snapshots.insert(instance_id, snapshot);
+        snapshots.insert(snapshot.instance_id.clone(), snapshot.clone());
         Ok(())
     }
 
@@ -378,7 +377,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
 
-        backend.save_snapshot(snapshot.clone()).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
         let loaded = backend.load_snapshot("test-123").await.unwrap();
 
         assert_eq!(snapshot.instance_id, loaded.instance_id);
@@ -397,7 +396,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
 
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
         backend.delete_snapshot("test-123").await.unwrap();
 
         let result = backend.load_snapshot("test-123").await;
@@ -409,14 +408,14 @@ mod tests {
         let backend = InMemoryBackend::new();
 
         backend
-            .save_snapshot(WorkflowSnapshot::new(
+            .save_snapshot(&WorkflowSnapshot::new(
                 "test-1".to_string(),
                 "hash-1".to_string(),
             ))
             .await
             .unwrap();
         backend
-            .save_snapshot(WorkflowSnapshot::new(
+            .save_snapshot(&WorkflowSnapshot::new(
                 "test-2".to_string(),
                 "hash-2".to_string(),
             ))
@@ -682,7 +681,7 @@ mod tests {
     async fn test_request_cancellation_success() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
             .request_cancellation(
@@ -720,7 +719,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_completed(bytes::Bytes::from("result"));
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
             .request_cancellation("test-123", CancellationRequest::new(None, None))
@@ -736,7 +735,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_failed("Some error".to_string());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
             .request_cancellation("test-123", CancellationRequest::new(None, None))
@@ -752,7 +751,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_cancelled(Some("First cancel".to_string()), None, None);
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
             .request_cancellation(
@@ -781,7 +780,7 @@ mod tests {
     async fn test_clear_cancellation_request() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         backend
             .request_cancellation(
@@ -819,7 +818,7 @@ mod tests {
     async fn test_check_and_cancel_success() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         backend
             .request_cancellation(
@@ -871,7 +870,7 @@ mod tests {
     async fn test_check_and_cancel_no_request() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend.check_and_cancel("test-123", None).await.unwrap();
         assert!(
@@ -891,7 +890,7 @@ mod tests {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_completed(bytes::Bytes::from("done"));
-        backend.save_snapshot(snapshot).await.unwrap();
+        backend.save_snapshot(&snapshot).await.unwrap();
 
         // Add a cancellation request directly (bypassing state check)
         {
@@ -920,13 +919,13 @@ mod tests {
         snapshot1.update_position(ExecutionPosition::AtTask {
             task_id: "task-1".to_string(),
         });
-        backend.save_snapshot(snapshot1).await.unwrap();
+        backend.save_snapshot(&snapshot1).await.unwrap();
 
         let mut snapshot2 = WorkflowSnapshot::new("workflow-2".to_string(), "hash-abc".to_string());
         snapshot2.update_position(ExecutionPosition::AtTask {
             task_id: "task-2".to_string(),
         });
-        backend.save_snapshot(snapshot2).await.unwrap();
+        backend.save_snapshot(&snapshot2).await.unwrap();
 
         backend
             .request_cancellation("workflow-1", CancellationRequest::new(None, None))
