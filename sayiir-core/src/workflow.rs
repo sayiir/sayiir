@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// Generate a `find_duplicate_id` method for continuation-like enums.
 ///
 macro_rules! impl_find_duplicate_id {
-    ($name:ident, task_fields: { $($task_extra:tt)* }, deref_branch: $deref:expr) => {
+    ($name:ident, task_fields: { $($task_extra:tt)* }, delay_extra: { $($delay_extra:tt)* }, deref_branch: $deref:expr) => {
         impl $name {
             fn find_duplicate_id(&self) -> Option<String> {
                 fn collect(cont: &$name, seen: &mut HashSet<String>) -> Option<String> {
@@ -25,12 +25,21 @@ macro_rules! impl_find_duplicate_id {
                             }
                             next.as_ref().and_then(|n| collect(n, seen))
                         }
-                        $name::Fork { branches, join } => {
+                        $name::Fork { id, branches, join } => {
+                            if !seen.insert(id.clone()) {
+                                return Some(id.clone());
+                            }
                             let deref_fn: fn(&_) -> &$name = $deref;
                             branches
                                 .iter()
                                 .find_map(|b| collect(deref_fn(b), seen))
                                 .or_else(|| join.as_ref().and_then(|j| collect(j, seen)))
+                        }
+                        $name::Delay { id, next, $($delay_extra)* } => {
+                            if !seen.insert(id.clone()) {
+                                return Some(id.clone());
+                            }
+                            next.as_ref().and_then(|n| collect(n, seen))
                         }
                     }
                 }
@@ -50,18 +59,44 @@ pub enum WorkflowContinuation {
         next: Option<Box<WorkflowContinuation>>,
     },
     Fork {
+        id: String,
         branches: Box<[Arc<WorkflowContinuation>]>,
         join: Option<Box<WorkflowContinuation>>,
+    },
+    /// A durable delay node. Input passes through unchanged.
+    Delay {
+        id: String,
+        duration: std::time::Duration,
+        next: Option<Box<WorkflowContinuation>>,
     },
 }
 
 impl_find_duplicate_id!(
     WorkflowContinuation,
     task_fields: { .. },
+    delay_extra: { .. },
     deref_branch: |b: &Arc<WorkflowContinuation>| -> &WorkflowContinuation { b }
 );
 
 impl WorkflowContinuation {
+    /// Derive a fork ID from a list of branch IDs.
+    ///
+    /// The fork ID is a concatenation of branch IDs separated by `||`.
+    #[must_use]
+    pub fn derive_fork_id(branch_ids: &[&str]) -> String {
+        branch_ids.join("||")
+    }
+
+    /// Get the ID of this continuation node.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        match self {
+            WorkflowContinuation::Task { id, .. }
+            | WorkflowContinuation::Fork { id, .. }
+            | WorkflowContinuation::Delay { id, .. } => id,
+        }
+    }
+
     /// Get the first task ID from this continuation.
     ///
     /// For a `Task`, returns its ID. For a `Fork`, returns the first task ID
@@ -69,7 +104,7 @@ impl WorkflowContinuation {
     #[must_use]
     pub fn first_task_id(&self) -> &str {
         match self {
-            WorkflowContinuation::Task { id, .. } => id,
+            WorkflowContinuation::Task { id, .. } | WorkflowContinuation::Delay { id, .. } => id,
             WorkflowContinuation::Fork { branches, .. } => {
                 if let Some(first_branch) = branches.first() {
                     first_branch.first_task_id()
@@ -88,9 +123,16 @@ impl WorkflowContinuation {
                 id: id.clone(),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
-            WorkflowContinuation::Fork { branches, join } => SerializableContinuation::Fork {
+            WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
+                id: id.clone(),
                 branches: branches.iter().map(|b| b.to_serializable()).collect(),
                 join: join.as_ref().map(|j| Box::new(j.to_serializable())),
+            },
+            #[allow(clippy::cast_possible_truncation)] // Durations > u64::MAX ms are not realistic
+            WorkflowContinuation::Delay { id, duration, next } => SerializableContinuation::Delay {
+                id: id.clone(),
+                duration_ms: duration.as_millis() as u64,
+                next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
         }
     }
@@ -119,14 +161,21 @@ pub enum SerializableContinuation {
         next: Option<Box<SerializableContinuation>>,
     },
     Fork {
+        id: String,
         branches: Vec<SerializableContinuation>,
         join: Option<Box<SerializableContinuation>>,
+    },
+    Delay {
+        id: String,
+        duration_ms: u64,
+        next: Option<Box<SerializableContinuation>>,
     },
 }
 
 impl_find_duplicate_id!(
     SerializableContinuation,
     task_fields: {},
+    delay_extra: { .. },
     deref_branch: |b: &SerializableContinuation| -> &SerializableContinuation { b }
 );
 
@@ -169,7 +218,7 @@ impl SerializableContinuation {
                     next,
                 })
             }
-            SerializableContinuation::Fork { branches, join } => {
+            SerializableContinuation::Fork { id, branches, join } => {
                 let branches: Result<Vec<_>, _> = branches
                     .iter()
                     .map(|b| b.to_runnable_unchecked(registry).map(Arc::new))
@@ -179,8 +228,24 @@ impl SerializableContinuation {
                     .map(|j| j.to_runnable_unchecked(registry).map(Box::new))
                     .transpose()?;
                 Ok(WorkflowContinuation::Fork {
+                    id: id.clone(),
                     branches: branches?.into_boxed_slice(),
                     join,
+                })
+            }
+            SerializableContinuation::Delay {
+                id,
+                duration_ms,
+                next,
+            } => {
+                let next = next
+                    .as_ref()
+                    .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
+                    .transpose()?;
+                Ok(WorkflowContinuation::Delay {
+                    id: id.clone(),
+                    duration: std::time::Duration::from_millis(*duration_ms),
+                    next,
                 })
             }
         }
@@ -191,13 +256,15 @@ impl SerializableContinuation {
     pub fn task_ids(&self) -> Vec<&str> {
         fn collect<'a>(cont: &'a SerializableContinuation, ids: &mut Vec<&'a str>) {
             match cont {
-                SerializableContinuation::Task { id, next } => {
+                SerializableContinuation::Task { id, next }
+                | SerializableContinuation::Delay { id, next, .. } => {
                     ids.push(id.as_str());
                     if let Some(n) = next {
                         collect(n, ids);
                     }
                 }
-                SerializableContinuation::Fork { branches, join } => {
+                SerializableContinuation::Fork { id, branches, join } => {
+                    ids.push(id.as_str());
                     for b in branches {
                         collect(b, ids);
                     }
@@ -232,8 +299,10 @@ impl SerializableContinuation {
                         hash_continuation(n, hasher);
                     }
                 }
-                SerializableContinuation::Fork { branches, join } => {
-                    hasher.update(b"F:["); // Tag for Fork
+                SerializableContinuation::Fork { id, branches, join } => {
+                    hasher.update(b"F:");
+                    hasher.update(id.as_bytes());
+                    hasher.update(b"[");
                     for branch in branches {
                         hash_continuation(branch, hasher);
                         hasher.update(b",");
@@ -242,6 +311,20 @@ impl SerializableContinuation {
                     if let Some(j) = join {
                         hasher.update(b"J:");
                         hash_continuation(j, hasher);
+                    }
+                }
+                SerializableContinuation::Delay {
+                    id,
+                    duration_ms,
+                    next,
+                } => {
+                    hasher.update(b"D:");
+                    hasher.update(id.as_bytes());
+                    hasher.update(b":");
+                    hasher.update(duration_ms.to_string().as_bytes());
+                    hasher.update(b";");
+                    if let Some(n) = next {
+                        hash_continuation(n, hasher);
                     }
                 }
             }
@@ -286,6 +369,13 @@ pub enum WorkflowStatus {
         reason: Option<String>,
         /// Optional identifier of who cancelled the workflow.
         cancelled_by: Option<String>,
+    },
+    /// The workflow is waiting for a delay to expire.
+    Waiting {
+        /// When the delay expires.
+        wake_at: chrono::DateTime<chrono::Utc>,
+        /// The delay node ID.
+        delay_id: String,
     },
 }
 
@@ -541,6 +631,40 @@ where
     }
 }
 
+/// Delay method — available for all registry/continuation combinations.
+impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
+where
+    Cont: ContinuationState,
+{
+    /// Add a durable delay to the workflow.
+    ///
+    /// The delay is transparent to data flow — the input passes through unchanged.
+    /// In non-durable runners the delay is a simple sleep. In durable runners
+    /// the workflow parks at the delay, persists `wake_at`, and returns
+    /// `WorkflowStatus::Waiting`. A later `resume()` call advances past the
+    /// delay once the wall clock reaches `wake_at`.
+    #[must_use]
+    pub fn delay(
+        self,
+        id: &str,
+        duration: std::time::Duration,
+    ) -> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, R> {
+        let new_node = WorkflowContinuation::Delay {
+            id: id.to_string(),
+            duration,
+            next: None,
+        };
+        let continuation = self.continuation.append(new_node);
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(id.to_string()),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// Methods for referencing pre-registered tasks (only available with `TaskRegistry`).
 impl<C, Input, Output, M, Cont> WorkflowBuilder<C, Input, Output, M, Cont, TaskRegistry>
 where
@@ -784,10 +908,12 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
 /// Helper function to append a task to the continuation chain.
 fn append_to_chain(continuation: &mut WorkflowContinuation, new_task: WorkflowContinuation) {
     match continuation {
-        WorkflowContinuation::Task { next, .. } => match next {
-            Some(next_box) => append_to_chain(next_box, new_task),
-            None => *next = Some(Box::new(new_task)),
-        },
+        WorkflowContinuation::Task { next, .. } | WorkflowContinuation::Delay { next, .. } => {
+            match next {
+                Some(next_box) => append_to_chain(next_box, new_task),
+                None => *next = Some(Box::new(new_task)),
+            }
+        }
         WorkflowContinuation::Fork { join, .. } => match join {
             Some(join_box) => append_to_chain(join_box, new_task),
             None => *join = Some(Box::new(new_task)),
@@ -896,6 +1022,14 @@ where
 
         let join_task_fn = to_heterogeneous_join_task_arc(func, codec);
 
+        let fork_id = WorkflowContinuation::derive_fork_id(
+            &self
+                .branches
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>(),
+        );
+
         let branch_continuations: Vec<Arc<WorkflowContinuation>> = self
             .branches
             .into_iter()
@@ -915,6 +1049,7 @@ where
         };
 
         let fork_continuation = WorkflowContinuation::Fork {
+            id: fork_id,
             branches: branch_continuations.into_boxed_slice(),
             join: Some(Box::new(join_task)),
         };
@@ -978,6 +1113,14 @@ where
             .get(id)
             .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
 
+        let fork_id = WorkflowContinuation::derive_fork_id(
+            &self
+                .branches
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>(),
+        );
+
         let branch_continuations: Vec<Arc<WorkflowContinuation>> = self
             .branches
             .into_iter()
@@ -997,6 +1140,7 @@ where
         };
 
         let fork_continuation = WorkflowContinuation::Fork {
+            id: fork_id,
             branches: branch_continuations.into_boxed_slice(),
             join: Some(Box::new(join_task)),
         };
@@ -1390,12 +1534,13 @@ mod tests {
         let serializable = workflow.continuation().to_serializable();
         let task_ids = serializable.task_ids();
 
-        // Should contain: prepare, branch_a, branch_b, merge
+        // Should contain: prepare, fork (branch_a||branch_b), branch_a, branch_b, merge
         assert!(task_ids.contains(&"prepare"));
+        assert!(task_ids.contains(&"branch_a||branch_b"));
         assert!(task_ids.contains(&"branch_a"));
         assert!(task_ids.contains(&"branch_b"));
         assert!(task_ids.contains(&"merge"));
-        assert_eq!(task_ids.len(), 4);
+        assert_eq!(task_ids.len(), 5);
     }
 
     #[test]
@@ -1605,5 +1750,259 @@ mod tests {
             result,
             Err(WorkflowError::DuplicateTaskId(id)) if id == "step1"
         ));
+    }
+
+    // ========================================================================
+    // Delay tests
+    // ========================================================================
+
+    #[test]
+    fn test_delay_builder() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::{Workflow, WorkflowContinuation};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait_1s", Duration::from_secs(1))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Verify the chain structure: Task -> Delay -> Task
+        let mut ids = Vec::new();
+        let mut current = workflow.continuation();
+        loop {
+            match current {
+                WorkflowContinuation::Task { id, next, .. } => {
+                    ids.push(format!("task:{id}"));
+                    match next {
+                        Some(n) => current = n,
+                        None => break,
+                    }
+                }
+                WorkflowContinuation::Delay {
+                    id, duration, next, ..
+                } => {
+                    ids.push(format!("delay:{id}:{}ms", duration.as_millis()));
+                    match next {
+                        Some(n) => current = n,
+                        None => break,
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!(
+            ids,
+            vec!["task:step1", "delay:wait_1s:1000ms", "task:step2"]
+        );
+    }
+
+    #[test]
+    fn test_delay_serialization_roundtrip() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::SerializableContinuation;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait_5s", Duration::from_secs(5))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Convert to serializable
+        let serializable = workflow.to_serializable();
+
+        // Check structure
+        let task_ids = serializable.continuation.task_ids();
+        assert_eq!(task_ids, vec!["step1", "wait_5s", "step2"]);
+
+        // Check delay duration is preserved
+        match &serializable.continuation {
+            SerializableContinuation::Task { next, .. } => {
+                let next = next.as_ref().unwrap();
+                match next.as_ref() {
+                    SerializableContinuation::Delay {
+                        id, duration_ms, ..
+                    } => {
+                        assert_eq!(id, "wait_5s");
+                        assert_eq!(*duration_ms, 5000);
+                    }
+                    other => panic!("Expected Delay, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Task, got {other:?}"),
+        }
+
+        // Hydrate back to runnable
+        let hydrated = workflow.to_runnable(&serializable);
+        assert!(hydrated.is_ok());
+    }
+
+    #[test]
+    fn test_delay_first_task_id() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .delay("initial_delay", Duration::from_secs(10))
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        assert_eq!(workflow.continuation().first_task_id(), "initial_delay");
+    }
+
+    #[test]
+    fn test_delay_duplicate_id_detection() {
+        use crate::context::WorkflowContext;
+        use crate::error::WorkflowError;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let result = WorkflowBuilder::<_, u32, _>::new(ctx)
+            .then("dup", |i: u32| async move { Ok(i + 1) })
+            .delay("dup", Duration::from_secs(1))
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(WorkflowError::DuplicateTaskId(id)) if id == "dup"
+        ));
+    }
+
+    #[test]
+    fn test_delay_definition_hash_includes_duration() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::SerializableWorkflow;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Workflow with 1-second delay
+        let ctx1 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf1: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx1)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait", Duration::from_secs(1))
+            .build()
+            .unwrap();
+
+        // Workflow with 60-second delay (same ID, different duration)
+        let ctx2 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait", Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        // Hashes should differ because duration differs
+        assert_ne!(wf1.definition_hash(), wf2.definition_hash());
+    }
+
+    #[test]
+    fn test_delay_definition_hash_differs_from_task() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::SerializableWorkflow;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Workflow with task
+        let ctx1 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf1: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx1)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        // Workflow with delay instead
+        let ctx2 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
+            .with_registry()
+            .delay("step1", Duration::from_secs(1))
+            .build()
+            .unwrap();
+
+        // Hashes should differ (Task vs Delay are tagged differently)
+        assert_ne!(wf1.definition_hash(), wf2.definition_hash());
+    }
+
+    #[test]
+    fn test_delay_task_ids() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .then("fetch", |i: u32| async move { Ok(i) })
+            .delay("wait_24h", Duration::from_secs(86400))
+            .then("process", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        let serializable = workflow.continuation().to_serializable();
+        let ids = serializable.task_ids();
+        assert_eq!(ids, vec!["fetch", "wait_24h", "process"]);
+    }
+
+    #[test]
+    fn test_delay_only_workflow() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::workflow::Workflow;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .delay("just_wait", Duration::from_millis(10))
+            .build()
+            .unwrap();
+
+        assert_eq!(workflow.continuation().first_task_id(), "just_wait");
+
+        let serializable = workflow.continuation().to_serializable();
+        assert_eq!(serializable.task_ids(), vec!["just_wait"]);
+    }
+
+    #[test]
+    fn test_delay_to_runnable_no_registry_needed() {
+        use crate::registry::TaskRegistry;
+        use crate::workflow::SerializableContinuation;
+
+        // A delay doesn't need a registry entry (it has no func)
+        let delay = SerializableContinuation::Delay {
+            id: "wait".to_string(),
+            duration_ms: 5000,
+            next: None,
+        };
+
+        let empty_registry = TaskRegistry::new();
+        let result = delay.to_runnable(&empty_registry);
+        assert!(result.is_ok());
+
+        let runnable = result.unwrap();
+        match runnable {
+            crate::workflow::WorkflowContinuation::Delay {
+                id, duration, next, ..
+            } => {
+                assert_eq!(id, "wait");
+                assert_eq!(duration, std::time::Duration::from_millis(5000));
+                assert!(next.is_none());
+            }
+            _ => panic!("Expected Delay variant"),
+        }
     }
 }

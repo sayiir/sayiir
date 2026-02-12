@@ -231,6 +231,7 @@ After studying these solutions, the pattern is clear:
 | Crash recovery and resume      | Stable |
 | Panic-safe execution           | Stable |
 | Pluggable storage backends     | Stable |
+| Durable timers/delays          | Stable |
 | Distributed worker pools       | Stable |
 | Claim-based task distribution  | Stable |
 | Zero-copy serialization (rkyv) | Stable |
@@ -244,6 +245,7 @@ After studying these solutions, the pattern is clear:
 | Durable execution with checkpointing | Done |
 | Resume and cancel | Done |
 | Fork/join with multi-step branches | Done |
+| Durable delays (`.delay()`) | Done |
 | Pydantic integration (automatic validation) | Done |
 | Type stubs and PEP 561 compliance | Done |
 | Async task support | Done |
@@ -327,6 +329,30 @@ workflow = Flow("order").then(process_order).then(send_confirmation).build()
 # Checkpoints after each task — resume from last checkpoint on crash
 status = run_durable_workflow(workflow, "order-123", 42)
 print(status.output)
+```
+
+**Durable delays (survive restarts):**
+
+```python
+from datetime import timedelta
+from sayiir import task, Flow, run_durable_workflow
+
+@task
+def fetch_data(url: str) -> dict:
+    return {"url": url, "data": "..."}
+
+@task
+def process_data(data: dict) -> str:
+    return f"processed {data['url']}"
+
+workflow = (
+    Flow("pipeline")
+    .then(fetch_data)
+    .delay("wait_1h", timedelta(hours=1))  # durable — no worker held
+    .then(process_data)
+    .build()
+)
+status = run_durable_workflow(workflow, "job-1", "https://api.example.com")
 ```
 
 **Parallel execution (fork/join):**
@@ -418,6 +444,22 @@ let worker = PooledWorker::new("worker-1", backend, registry)
 
 // Start polling - tasks are automatically distributed across workers
 worker.start_polling(Duration::from_secs(1), workflows).await?;
+```
+
+**Durable delays:**
+
+```rust
+use std::time::Duration;
+
+let workflow = WorkflowBuilder::new(ctx)
+    .then("fetch", |input: String| async move {
+        Ok(fetch_data(&input).await?)
+    })
+    .delay("wait_24h", Duration::from_secs(86400))  // persisted, no worker held
+    .then("process", |data: Data| async move {
+        Ok(process(data).await?)
+    })
+    .build();
 ```
 
 **DAG workflows (fork/join):**

@@ -30,6 +30,14 @@ pub enum ExecutionPosition {
         join_id: String,
         completed_branches: HashMap<String, TaskResult>,
     },
+    /// Execution is parked at a delay node, waiting for `wake_at`.
+    AtDelay {
+        delay_id: String,
+        entered_at: DateTime<Utc>,
+        wake_at: DateTime<Utc>,
+        /// First task ID after the delay (so backends can advance without traversing the workflow tree).
+        next_task_id: Option<String>,
+    },
 }
 
 /// Result of a completed task execution.

@@ -54,6 +54,10 @@ enum BuilderTask {
         #[allow(dead_code)]
         join_metadata: TaskMetadata,
     },
+    Delay {
+        delay_id: String,
+        duration_secs: f64,
+    },
 }
 
 #[pymethods]
@@ -72,6 +76,14 @@ impl PyFlowBuilder {
         self.tasks.push(BuilderTask::Sequential {
             task_id,
             metadata: metadata.map(Into::into).unwrap_or_default(),
+        });
+    }
+
+    /// Add a durable delay.
+    fn delay(&mut self, delay_id: String, seconds: f64) {
+        self.tasks.push(BuilderTask::Delay {
+            delay_id,
+            duration_secs: seconds,
         });
     }
 
@@ -144,9 +156,23 @@ impl PyFlowBuilder {
                     func: None,
                     next: current.map(Box::new),
                 },
+                BuilderTask::Delay {
+                    delay_id,
+                    duration_secs,
+                } => WorkflowContinuation::Delay {
+                    id: delay_id.clone(),
+                    duration: std::time::Duration::from_secs_f64(*duration_secs),
+                    next: current.map(Box::new),
+                },
                 BuilderTask::Fork {
                     branches, join_id, ..
                 } => {
+                    let branch_ids: Vec<&str> = branches
+                        .iter()
+                        .filter_map(|chain| chain.first().map(|(id, _)| id.as_str()))
+                        .collect();
+                    let fork_id = WorkflowContinuation::derive_fork_id(&branch_ids);
+
                     let branch_conts: Vec<Arc<WorkflowContinuation>> = branches
                         .iter()
                         .map(|chain| -> PyResult<Arc<WorkflowContinuation>> {
@@ -174,6 +200,7 @@ impl PyFlowBuilder {
                     };
 
                     WorkflowContinuation::Fork {
+                        id: fork_id,
                         branches: branch_conts.into_boxed_slice(),
                         join: Some(Box::new(join_cont)),
                     }

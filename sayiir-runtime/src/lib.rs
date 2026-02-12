@@ -36,7 +36,7 @@ pub mod worker;
 // Re-exports
 pub use error::RuntimeError;
 pub use execution::{
-    ResumeOutcome, continuation_id, execute_continuation_async, execute_continuation_sync,
+    ResumeOutcome, execute_continuation_async, execute_continuation_sync,
     execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
     serialize_branch_results,
 };

@@ -5,7 +5,7 @@
 
 use crate::backend::{BackendError, PersistentBackend};
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use sayiir_core::snapshot::{
     CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
 };
@@ -197,6 +197,66 @@ impl PersistentBackend for InMemoryBackend {
         {
             let mut claims = self.claims.write().map_err(Self::lock_error)?;
             claims.retain(|_, claim| !claim.is_expired());
+        }
+
+        // Collect delay-expired workflows that need position advancement
+        let mut delay_advances: Vec<(String, String, bytes::Bytes)> = Vec::new();
+        let mut delay_completions: Vec<(String, String)> = Vec::new();
+
+        {
+            let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+            let cancellation_requests = self
+                .cancellation_requests
+                .read()
+                .map_err(Self::lock_error)?;
+
+            for (instance_id, snapshot) in snapshots.iter() {
+                if !snapshot.state.is_in_progress() {
+                    continue;
+                }
+                if cancellation_requests.contains_key(instance_id) {
+                    continue;
+                }
+                if let WorkflowSnapshotState::InProgress {
+                    position:
+                        ExecutionPosition::AtDelay {
+                            wake_at,
+                            delay_id,
+                            next_task_id,
+                            ..
+                        },
+                    ..
+                } = &snapshot.state
+                    && Utc::now() >= *wake_at
+                {
+                    if let Some(next_id) = next_task_id {
+                        // Delay expired, need to advance to next task
+                        let input = snapshot.get_task_result_bytes(delay_id).unwrap_or_default();
+                        delay_advances.push((instance_id.clone(), next_id.clone(), input));
+                    } else {
+                        // Delay was the last node — mark workflow completed
+                        delay_completions.push((instance_id.clone(), delay_id.clone()));
+                    }
+                }
+            }
+        }
+
+        // Apply delay advancements with write lock
+        if !delay_advances.is_empty() || !delay_completions.is_empty() {
+            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+            for (instance_id, next_task_id, _) in &delay_advances {
+                if let Some(snapshot) = snapshots.get_mut(instance_id) {
+                    snapshot.update_position(ExecutionPosition::AtTask {
+                        task_id: next_task_id.clone(),
+                    });
+                }
+            }
+            for (instance_id, delay_id) in &delay_completions {
+                if let Some(snapshot) = snapshots.get_mut(instance_id) {
+                    let output = snapshot.get_task_result_bytes(delay_id).unwrap_or_default();
+                    snapshot.mark_completed(output);
+                }
+            }
         }
 
         let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
@@ -937,6 +997,113 @@ mod tests {
         assert!(
             !tasks.iter().any(|t| t.instance_id == "workflow-1"),
             "workflow with pending cancellation should be skipped"
+        );
+    }
+
+    // ========================================================================
+    // Delay tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_find_available_tasks_skips_unexpired_delay() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "workflow-1".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![42]),
+        );
+        // Park at a delay that expires in the future
+        let wake_at = Utc::now() + chrono::Duration::hours(1);
+        snapshot.update_position(ExecutionPosition::AtDelay {
+            delay_id: "wait_1h".to_string(),
+            entered_at: Utc::now(),
+            wake_at,
+            next_task_id: Some("next_step".to_string()),
+        });
+        snapshot.mark_task_completed("wait_1h".to_string(), bytes::Bytes::from(vec![42]));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+        assert!(
+            tasks.is_empty(),
+            "workflow at unexpired delay should not appear in available tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_advances_expired_delay() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "workflow-1".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![42]),
+        );
+        // Park at a delay that has already expired
+        let wake_at = Utc::now() - chrono::Duration::seconds(1);
+        snapshot.update_position(ExecutionPosition::AtDelay {
+            delay_id: "wait_done".to_string(),
+            entered_at: Utc::now() - chrono::Duration::seconds(2),
+            wake_at,
+            next_task_id: Some("process".to_string()),
+        });
+        snapshot.mark_task_completed("wait_done".to_string(), bytes::Bytes::from(vec![42]));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+
+        // The delay has expired, so the position should have been advanced to "process"
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].instance_id, "workflow-1");
+        assert_eq!(tasks[0].task_id, "process");
+
+        // Verify position was advanced in the snapshot
+        let loaded = backend.load_snapshot("workflow-1").await.unwrap();
+        match &loaded.state {
+            WorkflowSnapshotState::InProgress {
+                position: ExecutionPosition::AtTask { task_id },
+                ..
+            } => {
+                assert_eq!(task_id, "process");
+            }
+            other => panic!("Expected AtTask position, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_completes_expired_delay_last_node() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "workflow-1".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![42]),
+        );
+        // Park at a delay that has expired AND has no next task (delay is last node)
+        let wake_at = Utc::now() - chrono::Duration::seconds(1);
+        snapshot.update_position(ExecutionPosition::AtDelay {
+            delay_id: "final_wait".to_string(),
+            entered_at: Utc::now() - chrono::Duration::seconds(2),
+            wake_at,
+            next_task_id: None,
+        });
+        snapshot.mark_task_completed("final_wait".to_string(), bytes::Bytes::from(vec![42]));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+
+        // No available tasks — the workflow should have been marked completed
+        assert!(
+            tasks.is_empty(),
+            "completed workflow should not appear in available tasks"
+        );
+
+        // Verify workflow was marked completed
+        let loaded = backend.load_snapshot("workflow-1").await.unwrap();
+        assert!(
+            loaded.state.is_completed(),
+            "workflow should be completed when delay is last node and expired"
         );
     }
 }

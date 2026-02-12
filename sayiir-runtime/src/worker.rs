@@ -573,7 +573,14 @@ where
     fn find_task_id_in_continuation(continuation: &WorkflowContinuation, task_id: &str) -> bool {
         match continuation {
             WorkflowContinuation::Task { id, .. } => id == task_id,
-            WorkflowContinuation::Fork { branches, join } => {
+            WorkflowContinuation::Delay { id, next, .. } => {
+                if id == task_id {
+                    return true;
+                }
+                next.as_ref()
+                    .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
+            }
+            WorkflowContinuation::Fork { branches, join, .. } => {
                 // Check branches
                 for branch in branches {
                     if Self::find_task_id_in_continuation(branch, task_id) {
@@ -615,7 +622,15 @@ where
                             return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
-                    WorkflowContinuation::Fork { branches, join } => {
+                    WorkflowContinuation::Delay { next, .. } => {
+                        // Skip over delay nodes when searching for a task
+                        if let Some(next_cont) = next {
+                            current = next_cont;
+                        } else {
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
+                        }
+                    }
+                    WorkflowContinuation::Fork { branches, join, .. } => {
                         // Check branches
                         let mut found_in_branch = false;
                         for branch in branches {
@@ -647,7 +662,8 @@ where
         snapshot: &mut WorkflowSnapshot,
     ) {
         match continuation {
-            WorkflowContinuation::Task { id, next, .. } => {
+            WorkflowContinuation::Task { id, next, .. }
+            | WorkflowContinuation::Delay { id, next, .. } => {
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
@@ -658,7 +674,7 @@ where
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
                 }
             }
-            WorkflowContinuation::Fork { branches, join } => {
+            WorkflowContinuation::Fork { branches, join, .. } => {
                 // Check if any branch task completed
                 for branch in branches {
                     Self::update_position_after_task(branch, completed_task_id, snapshot);
@@ -688,7 +704,14 @@ where
                     true // Last task completed
                 }
             }
-            WorkflowContinuation::Fork { branches, join } => {
+            WorkflowContinuation::Delay { id, next, .. } => {
+                if snapshot.get_task_result(id).is_none() {
+                    return false;
+                }
+                next.as_ref()
+                    .is_none_or(|n| Self::is_workflow_complete(n, snapshot))
+            }
+            WorkflowContinuation::Fork { branches, join, .. } => {
                 // All branches must be completed (recursively check entire branch chain)
                 for branch in branches {
                     if !Self::is_workflow_complete(branch, snapshot) {
