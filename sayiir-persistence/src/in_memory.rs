@@ -332,6 +332,7 @@ impl TaskClaimStore for InMemoryBackend {
                     claim.worker_id
                 )));
             }
+
             if let Some(expires_at) = claim.expires_at {
                 let expires_datetime = chrono::DateTime::from_timestamp(expires_at as i64, 0)
                     .ok_or_else(|| BackendError::Backend("Invalid timestamp".to_string()))?;
