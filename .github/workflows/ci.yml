@@ -90,7 +90,7 @@ jobs:
 
       - name: Install and test import
         run: |
-          uv pip install --system dist/*.whl
+          uv pip install --system sayiir-python/dist/*.whl
           python -c "import sayiir; print(sayiir)"
 
       - name: Run pytest
