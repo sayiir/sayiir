@@ -9,7 +9,6 @@ name = "workflow_core"
 path = "src/lib.rs"
 
 [dependencies]
-petgraph = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }

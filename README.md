@@ -33,7 +33,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 
 **One problem, solved well.** Sayiir is an orchestrator, not a compute engine. It coordinates steps, handles retries, and checkpoints progress—while the actual heavy lifting (ETL, data pipelines, GPU training, API calls) runs in external systems you call from your tasks. We don't try to be a platform, a UI, or a kitchen sink. We make your workflows durable and let you focus on your business logic.
 
-**Why Rust? Why not just Python, Go or Node.js?** The core runtime is written in Rust for safety, performance, and correctness—the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Our goal is to bring durable workflows to Python, Go and Node.js developers through native bindings, so you get Rust's reliability without leaving your ecosystem.
+**Why Rust? Why not just Python, Go or Node.js?** The core runtime is written in Rust for safety, performance, and correctness—the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Python bindings are available today, with Go and Node.js planned—so you get Rust's reliability without leaving your ecosystem. The binding is a thin layer: you write task functions in your language, Rust handles all orchestration, checkpointing, and execution.
 
 ---
 
@@ -244,6 +244,31 @@ let workflow = WorkflowBuilder::new(ctx)
     .build();
 ```
 
+### Python Bindings
+
+Rust handles all orchestration. Python provides task implementations via a thin binding layer.
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def fetch_user(user_id: int) -> dict:
+    return {"id": user_id, "name": "Alice"}
+
+@task
+def send_email(user: dict) -> str:
+    return f"Sent welcome to {user['name']}"
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+result = run_workflow(workflow, 42)
+```
+
+Install with:
+
+```bash
+cd python && pip install -e ".[dev]"
+```
+
 ### Task Registry (Reusable Activities)
 
 Build libraries of reusable tasks and compose them:
@@ -271,8 +296,15 @@ let workflow = WorkflowBuilder::new(ctx)
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │                        Your Application                          │
+│               (Rust, Python, or future bindings)                 │
 ├──────────────────────────────────────────────────────────────────┤
-│                         Sayiir Runtime                           │
+│  Language Bindings (thin layer — workflow definition only)        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                        │
+│  │  Rust    │  │  Python  │  │  Node.js │                        │
+│  │ (native) │  │  (PyO3)  │  │ (planned)│                        │
+│  └──────────┘  └──────────┘  └──────────┘                        │
+├──────────────────────────────────────────────────────────────────┤
+│                    Sayiir Runtime (Rust)                          │
 │  ┌─────────────────────┐  ┌──────────────────────────────────┐   │
 │  │ CheckpointingRunner │  │          PooledWorker            │   │
 │  │  (single process)   │  │  (distributed, multi-machine)    │   │
@@ -388,7 +420,7 @@ Sayiir is under active development. Core is stable, some features are in progres
 | workflow-persistence | Stable      |
 | PostgreSQL backend   | In Progress |
 | Cloudflare Workers   | In Progress |
-| Python bindings      | Planned     |
+| Python bindings      | In Progress |
 | Node.js bindings     | Planned     |
 | Enterprise server    | Planned     |
 

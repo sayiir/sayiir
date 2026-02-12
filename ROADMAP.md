@@ -24,15 +24,34 @@ Run Sayiir on the edge via Durable Objects.
 
 ---
 
+## In Progress
+
+### Python Bindings
+
+PyO3-based bindings — Rust orchestrates, Python provides task implementations.
+
+**Done:**
+- Core binding layer (workflow builder, engine, task metadata)
+- `@task` decorator with global registry
+- Fluent `Flow` builder API
+- Synchronous execution via `execute_continuation_sync`
+- JSON codec for Python object serialization
+- Type stubs (`.pyi`) and PEP 561 marker
+- Durable execution with checkpointing (`DurableEngine`, `InMemoryBackend`)
+- Resume and cancel support from Python
+- Shared execution logic — Python layer is thin, all decision logic lives in Rust
+- Fork/join codec — join task receives decoded `dict[str, value]` with automatic binary→JSON fallback
+- Pydantic integration — optional `BaseModel` validation for task inputs/outputs
+- Multi-step branches — `branch(step_a, step_b, ...)` chains tasks within a single fork branch
+
+**Planned:**
+- Native async/await support (currently coroutines are run synchronously)
+
+---
+
 ## Planned
 
 ### Language Bindings
-
-#### Python
-
-- PyO3-based bindings
-- Native async/await support
-- Pydantic integration for task inputs/outputs
 
 #### Node.js / TypeScript
 

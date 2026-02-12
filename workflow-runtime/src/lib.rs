@@ -27,11 +27,17 @@
 //! | Multiple workers, horizontal scaling | [`PooledWorker`] |
 //! | Simple in-memory execution | [`InProcessRunner`] |
 
+pub mod execution;
 mod runner;
 pub mod serialization;
 pub mod worker;
 
 // Re-exports
+pub use execution::{
+    ResumeOutcome, continuation_id, execute_continuation_async, execute_continuation_sync,
+    execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
+    serialize_branch_results,
+};
 pub use runner::WorkflowRunner;
 pub use runner::distributed::CheckpointingRunner;
 pub use runner::in_process::InProcessRunner;

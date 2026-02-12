@@ -35,3 +35,61 @@ jobs:
 
       - name: Run cargo test
         run: cargo test --workspace --all-features
+
+  python-lint:
+    name: Python Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: pip install ruff pyright
+
+      - name: Run ruff check
+        run: ruff check python/
+
+      - name: Run ruff format check
+        run: ruff format --check python/
+
+      - name: Run pyright
+        run: pyright python/
+
+  python:
+    name: Python Binding
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          args: --out dist
+
+      - name: Install and test import
+        run: |
+          pip install dist/*.whl
+          python -c "import sayiir; print(sayiir)"
+
+      - name: Run pytest
+        run: |
+          pip install pytest pydantic
+          pytest python/tests/ -v
