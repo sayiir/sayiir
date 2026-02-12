@@ -52,6 +52,7 @@ select = ["E", "F", "I", "UP"]
 [tool.pyright]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
+exclude = ["tests"]
 
 [tool.maturin]
 manifest-path = "../sayiir-py/Cargo.toml"
