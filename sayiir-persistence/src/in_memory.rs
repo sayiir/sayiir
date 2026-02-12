@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 pub struct InMemoryBackend {
     snapshots: Arc<RwLock<HashMap<String, WorkflowSnapshot>>>,
     claims: Arc<RwLock<HashMap<String, TaskClaim>>>, // Key: "{instance_id}:{task_id}"
-    signals: Arc<RwLock<HashMap<(String, SignalKind), SignalRequest>>>,
+    signals: Arc<RwLock<HashMap<String, HashMap<SignalKind, SignalRequest>>>>,
 }
 
 impl InMemoryBackend {
@@ -138,7 +138,10 @@ impl SignalStore for InMemoryBackend {
         }
 
         let mut signals = self.signals.write().map_err(Self::lock_error)?;
-        signals.insert((instance_id.to_string(), kind), request);
+        signals
+            .entry(instance_id.to_string())
+            .or_default()
+            .insert(kind, request);
         Ok(())
     }
 
@@ -148,12 +151,17 @@ impl SignalStore for InMemoryBackend {
         kind: SignalKind,
     ) -> Result<Option<SignalRequest>, BackendError> {
         let signals = self.signals.read().map_err(Self::lock_error)?;
-        Ok(signals.get(&(instance_id.to_string(), kind)).cloned())
+        Ok(signals.get(instance_id).and_then(|m| m.get(&kind)).cloned())
     }
 
     async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
         let mut signals = self.signals.write().map_err(Self::lock_error)?;
-        signals.remove(&(instance_id.to_string(), kind));
+        if let Some(inner) = signals.get_mut(instance_id) {
+            inner.remove(&kind);
+            if inner.is_empty() {
+                signals.remove(instance_id);
+            }
+        }
         Ok(())
     }
 
@@ -165,7 +173,10 @@ impl SignalStore for InMemoryBackend {
     ) -> Result<bool, BackendError> {
         let request = {
             let signals = self.signals.read().map_err(Self::lock_error)?;
-            match signals.get(&(instance_id.to_string(), SignalKind::Cancel)) {
+            match signals
+                .get(instance_id)
+                .and_then(|m| m.get(&SignalKind::Cancel))
+            {
                 Some(req) => req.clone(),
                 None => return Ok(false),
             }
@@ -188,7 +199,12 @@ impl SignalStore for InMemoryBackend {
 
         {
             let mut signals = self.signals.write().map_err(Self::lock_error)?;
-            signals.remove(&(instance_id.to_string(), SignalKind::Cancel));
+            if let Some(inner) = signals.get_mut(instance_id) {
+                inner.remove(&SignalKind::Cancel);
+                if inner.is_empty() {
+                    signals.remove(instance_id);
+                }
+            }
         }
 
         Ok(true)
@@ -198,7 +214,10 @@ impl SignalStore for InMemoryBackend {
     async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError> {
         let request = {
             let signals = self.signals.read().map_err(Self::lock_error)?;
-            match signals.get(&(instance_id.to_string(), SignalKind::Pause)) {
+            match signals
+                .get(instance_id)
+                .and_then(|m| m.get(&SignalKind::Pause))
+            {
                 Some(req) => req.clone(),
                 None => return Ok(false),
             }
@@ -218,7 +237,12 @@ impl SignalStore for InMemoryBackend {
 
         {
             let mut signals = self.signals.write().map_err(Self::lock_error)?;
-            signals.remove(&(instance_id.to_string(), SignalKind::Pause));
+            if let Some(inner) = signals.get_mut(instance_id) {
+                inner.remove(&SignalKind::Pause);
+                if inner.is_empty() {
+                    signals.remove(instance_id);
+                }
+            }
         }
 
         Ok(true)
@@ -373,10 +397,16 @@ impl TaskClaimStore for InMemoryBackend {
                 if !snapshot.state.is_in_progress() {
                     continue;
                 }
-                if signals.contains_key(&(instance_id.clone(), SignalKind::Cancel)) {
+                if signals
+                    .get(instance_id.as_str())
+                    .is_some_and(|m| m.contains_key(&SignalKind::Cancel))
+                {
                     continue;
                 }
-                if signals.contains_key(&(instance_id.clone(), SignalKind::Pause)) {
+                if signals
+                    .get(instance_id.as_str())
+                    .is_some_and(|m| m.contains_key(&SignalKind::Pause))
+                {
                     continue;
                 }
                 if let WorkflowSnapshotState::InProgress {
@@ -430,8 +460,9 @@ impl TaskClaimStore for InMemoryBackend {
             }
 
             // Skip workflows with pending cancellation or pause requests
-            if signals.contains_key(&(instance_id.clone(), SignalKind::Cancel))
-                || signals.contains_key(&(instance_id.clone(), SignalKind::Pause))
+            if let Some(instance_signals) = signals.get(instance_id.as_str())
+                && (instance_signals.contains_key(&SignalKind::Cancel)
+                    || instance_signals.contains_key(&SignalKind::Pause))
             {
                 continue;
             }
@@ -1120,10 +1151,10 @@ mod tests {
         // Add a cancel signal directly (bypassing state check)
         {
             let mut signals = backend.signals.write().unwrap();
-            signals.insert(
-                ("test-123".to_string(), SignalKind::Cancel),
-                SignalRequest::new(None, None),
-            );
+            signals
+                .entry("test-123".to_string())
+                .or_default()
+                .insert(SignalKind::Cancel, SignalRequest::new(None, None));
         }
 
         let result = backend.check_and_cancel("test-123", None).await.unwrap();
@@ -1248,10 +1279,10 @@ mod tests {
         // Add a pause signal directly (bypassing state check)
         {
             let mut signals = backend.signals.write().unwrap();
-            signals.insert(
-                ("test-123".to_string(), SignalKind::Pause),
-                SignalRequest::new(None, None),
-            );
+            signals
+                .entry("test-123".to_string())
+                .or_default()
+                .insert(SignalKind::Pause, SignalRequest::new(None, None));
         }
 
         let result = backend.check_and_pause("test-123").await.unwrap();
