@@ -17,6 +17,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 
+serde_json = { workspace = true }
 sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
 sayiir-persistence = { version = "0.1.0", path = "../sayiir-persistence" }
 sayiir-runtime = { version = "0.1.0", path = "../sayiir-runtime" }

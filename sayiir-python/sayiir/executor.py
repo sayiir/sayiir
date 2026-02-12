@@ -106,3 +106,39 @@ def cancel_workflow(
 
     engine = PyDurableEngine(backend)
     engine.cancel(instance_id, reason, cancelled_by)
+
+
+def pause_workflow(
+    instance_id: str,
+    backend: Any,
+    reason: str | None = None,
+    paused_by: str | None = None,
+) -> None:
+    """Request pausing of a running durable workflow.
+
+    Args:
+        instance_id: The instance ID of the workflow to pause
+        backend: Persistence backend (must be the same one used for run)
+        reason: Optional reason for the pause
+        paused_by: Optional identifier of who requested the pause
+    """
+    from ._sayiir import PyDurableEngine
+
+    engine = PyDurableEngine(backend)
+    engine.pause(instance_id, reason, paused_by)
+
+
+def unpause_workflow(
+    instance_id: str,
+    backend: Any,
+) -> None:
+    """Unpause a paused durable workflow so it can be resumed.
+
+    Args:
+        instance_id: The instance ID of the workflow to unpause
+        backend: Persistence backend (must be the same one used for run)
+    """
+    from ._sayiir import PyDurableEngine
+
+    engine = PyDurableEngine(backend)
+    engine.unpause(instance_id)

@@ -49,6 +49,10 @@ impl PyWorkflowStatus {
         self.status == "in_progress"
     }
 
+    fn is_paused(&self) -> bool {
+        self.status == "paused"
+    }
+
     fn __repr__(&self) -> String {
         match self.status.as_str() {
             "completed" => "WorkflowStatus::Completed".to_string(),
@@ -58,6 +62,10 @@ impl PyWorkflowStatus {
             ),
             "cancelled" => format!(
                 "WorkflowStatus::Cancelled(reason={:?}, by={:?})",
+                self.reason, self.cancelled_by
+            ),
+            "paused" => format!(
+                "WorkflowStatus::Paused(reason={:?}, by={:?})",
                 self.reason, self.cancelled_by
             ),
             _ => format!("WorkflowStatus::{}", self.status),
@@ -97,6 +105,13 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 error: None,
                 reason,
                 cancelled_by,
+                output: None,
+            },
+            WorkflowStatus::Paused { reason, paused_by } => PyWorkflowStatus {
+                status: "paused".to_string(),
+                error: None,
+                reason,
+                cancelled_by: paused_by,
                 output: None,
             },
             WorkflowStatus::Waiting { wake_at, delay_id } => PyWorkflowStatus {

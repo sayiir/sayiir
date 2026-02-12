@@ -14,9 +14,11 @@ from ._sayiir import PyWorkflowStatus as WorkflowStatus
 from .decorators import task
 from .executor import (
     cancel_workflow,
+    pause_workflow,
     resume_workflow,
     run_durable_workflow,
     run_workflow,
+    unpause_workflow,
 )
 from .flow import Flow, Workflow
 
@@ -34,9 +36,11 @@ __all__ = [
     "WorkflowError",
     "WorkflowStatus",
     "cancel_workflow",
+    "pause_workflow",
     "resume_workflow",
     "run_durable_workflow",
     "run_workflow",
+    "unpause_workflow",
     "task",
 ]
 

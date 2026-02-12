@@ -229,7 +229,12 @@ impl TaskRegistry {
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
+        C: Codec
+            + sealed::EncodeValue<O>
+            + sealed::DecodeValue<crate::branch_results::NamedBranchResults>
+            + Send
+            + Sync
+            + 'static,
     {
         self.register_join_with_metadata(id, codec, func, TaskMetadata::default());
     }
@@ -245,7 +250,12 @@ impl TaskRegistry {
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
+        C: Codec
+            + sealed::EncodeValue<O>
+            + sealed::DecodeValue<crate::branch_results::NamedBranchResults>
+            + Send
+            + Sync
+            + 'static,
     {
         self.register_arc_join(id, codec, Arc::new(func), metadata);
     }
@@ -261,7 +271,12 @@ impl TaskRegistry {
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
+        C: Codec
+            + sealed::EncodeValue<O>
+            + sealed::DecodeValue<crate::branch_results::NamedBranchResults>
+            + Send
+            + Sync
+            + 'static,
     {
         let factory = Box::new(move || -> UntypedCoreTask {
             to_heterogeneous_join_task_arc(Arc::clone(&func), Arc::clone(&codec))
@@ -434,7 +449,11 @@ impl<C: Codec> RegistryBuilder<C> {
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
-        C: sealed::EncodeValue<O> + Send + Sync + 'static,
+        C: sealed::EncodeValue<O>
+            + sealed::DecodeValue<crate::branch_results::NamedBranchResults>
+            + Send
+            + Sync
+            + 'static,
     {
         self.registry
             .register_join(id, Arc::clone(&self.codec), func);
@@ -453,7 +472,11 @@ impl<C: Codec> RegistryBuilder<C> {
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
-        C: sealed::EncodeValue<O> + Send + Sync + 'static,
+        C: sealed::EncodeValue<O>
+            + sealed::DecodeValue<crate::branch_results::NamedBranchResults>
+            + Send
+            + Sync
+            + 'static,
     {
         self.registry
             .register_join_with_metadata(id, Arc::clone(&self.codec), func, metadata);

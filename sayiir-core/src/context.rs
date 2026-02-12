@@ -120,6 +120,26 @@ where
         .flatten()
 }
 
+/// Spawn a tokio task with the workflow context propagated to task-local storage.
+///
+/// This ensures [`sayiir_ctx!`] works inside spawned tasks without manual
+/// `with_context` wrapping. The context is cloned once for the task-local scope;
+/// if the spawned work also needs an owned context (e.g. for nested spawns),
+/// clone it beforehand and capture it in the closure.
+pub fn spawn_with_context<C, M, F, Fut>(
+    ctx: WorkflowContext<C, M>,
+    f: F,
+) -> tokio::task::JoinHandle<Fut::Output>
+where
+    C: Codec + 'static,
+    M: Send + Sync + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    tokio::spawn(with_context(ctx, f))
+}
+
 /// Macro to access the workflow context from within a task.
 ///
 /// Returns `Option<WorkflowContext<C, M>>` - `None` if called outside of workflow execution context.

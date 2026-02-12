@@ -37,6 +37,15 @@ pub enum WorkflowError {
         cancelled_by: Option<String>,
     },
 
+    /// The workflow was paused.
+    #[error("Workflow paused{}", reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default())]
+    Paused {
+        /// Optional reason for the pause.
+        reason: Option<String>,
+        /// Optional identifier of who paused the workflow.
+        paused_by: Option<String>,
+    },
+
     /// A fork has no branches and no join task.
     #[error("Fork has no branches and no join task")]
     EmptyFork,
@@ -72,6 +81,15 @@ impl WorkflowError {
         Self::Cancelled {
             reason: None,
             cancelled_by: None,
+        }
+    }
+
+    /// Create a new `Paused` error with no reason or source.
+    #[must_use]
+    pub fn paused() -> Self {
+        Self::Paused {
+            reason: None,
+            paused_by: None,
         }
     }
 }

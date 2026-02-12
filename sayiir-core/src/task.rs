@@ -39,75 +39,7 @@ pub struct RetryPolicy {
     pub backoff_multiplier: f32,
 }
 
-/// Deserialize named branch results from length-prefixed format (zero-copy).
-///
-/// Format:
-/// - 4 bytes: number of branches (u32, little-endian)
-/// - For each branch:
-///   - 4 bytes: name length (u32, little-endian)
-///   - N bytes: name (UTF-8)
-///   - 4 bytes: data length (u32, little-endian)
-///   - M bytes: data
-///
-/// Data portions are zero-copy slices into the original buffer.
-///
-/// # Errors
-///
-/// Returns an error if the buffer is malformed or too small.
-#[allow(clippy::indexing_slicing)]
-pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String, Bytes>, BoxError> {
-    let mut offset = 0;
-
-    // Read number of branches
-    if bytes.len() < 4 {
-        return Err(
-            WorkflowError::Deserialization("buffer too small for branch count".into()).into(),
-        );
-    }
-    let branch_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
-    offset += 4;
-
-    let mut results = HashMap::with_capacity(branch_count);
-
-    // Read each branch result
-    for _ in 0..branch_count {
-        // Read name length
-        if bytes.len() < offset + 4 {
-            return Err(
-                WorkflowError::Deserialization("buffer too small for name length".into()).into(),
-            );
-        }
-        let name_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
-        offset += 4;
-
-        // Read name (must copy for String conversion)
-        if bytes.len() < offset + name_len {
-            return Err(WorkflowError::Deserialization("buffer too small for name".into()).into());
-        }
-        let name = String::from_utf8(bytes[offset..offset + name_len].to_vec())?;
-        offset += name_len;
-
-        // Read data length
-        if bytes.len() < offset + 4 {
-            return Err(
-                WorkflowError::Deserialization("buffer too small for data length".into()).into(),
-            );
-        }
-        let data_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
-        offset += 4;
-
-        // Zero-copy slice for data
-        if bytes.len() < offset + data_len {
-            return Err(WorkflowError::Deserialization("buffer too small for data".into()).into());
-        }
-        let data = bytes.slice(offset..offset + data_len);
-        offset += data_len;
-
-        results.insert(name, data);
-    }
-
-    Ok(results)
-}
+pub use crate::branch_results::NamedBranchResults;
 
 /// A type-safe map of branch outputs for heterogeneous fork-join.
 ///
@@ -495,7 +427,12 @@ where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
     Fut: Future<Output = Result<JoinOutput, BoxError>> + Send + 'static,
-    C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
+    C: Codec
+        + sealed::EncodeValue<JoinOutput>
+        + sealed::DecodeValue<NamedBranchResults>
+        + Send
+        + Sync
+        + 'static,
 {
     type Input = Bytes;
     type Output = Bytes;
@@ -505,8 +442,8 @@ where
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
         BytesFuture::new(async move {
-            let named_results = deserialize_named_branch_results(&input)?;
-            let branch_outputs = BranchOutputs::new(named_results, codec.clone());
+            let named_results: NamedBranchResults = codec.decode(input)?;
+            let branch_outputs = BranchOutputs::new(named_results.into_map(), codec.clone());
 
             let output = func(branch_outputs).await?;
             codec.encode(&output)
@@ -533,7 +470,12 @@ where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
     Fut: Future<Output = Result<JoinOutput, BoxError>> + Send + 'static,
-    C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
+    C: Codec
+        + sealed::EncodeValue<JoinOutput>
+        + sealed::DecodeValue<NamedBranchResults>
+        + Send
+        + Sync
+        + 'static,
 {
     to_heterogeneous_join_task_arc(Arc::new(func), codec)
 }
@@ -550,7 +492,12 @@ where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
     Fut: Future<Output = Result<JoinOutput, BoxError>> + Send + 'static,
-    C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
+    C: Codec
+        + sealed::EncodeValue<JoinOutput>
+        + sealed::DecodeValue<NamedBranchResults>
+        + Send
+        + Sync
+        + 'static,
 {
     Box::new(HeterogeneousJoinTaskWrapper {
         func,
