@@ -52,13 +52,13 @@ jobs:
           python-version: "3.12"
 
       - name: Run ruff check
-        run: uvx ruff check python/
+        run: uvx ruff check sayiir-python/
 
       - name: Run ruff format check
-        run: uvx ruff format --check python/
+        run: uvx ruff format --check sayiir-python/
 
       - name: Run pyright
-        run: uvx pyright python/
+        run: uvx pyright sayiir-python/
 
   python:
     name: Python Binding
@@ -85,7 +85,7 @@ jobs:
       - name: Build with maturin
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python
+          working-directory: sayiir-python
           args: --out dist
 
       - name: Install and test import
@@ -96,4 +96,4 @@ jobs:
       - name: Run pytest
         run: |
           uv pip install --system pytest pydantic
-          pytest python/tests/ -v
+          pytest sayiir-python/tests/ -v

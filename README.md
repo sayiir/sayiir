@@ -13,7 +13,7 @@
 
 Most workflow engines force you to learn their mental model, their DSL, their way of thinking. You end up writing code *for the engine* instead of writing code *for your business*.
 
-**Sayiir is different.** Write async Rust. That's it. Your existing code, your existing patterns, your existing tests—they all just work.
+**Sayiir is different.** Write async Rust or plain Python. That's it. Your existing code, your existing patterns, your existing tests — they all just work.
 
 ```rust
 let workflow = WorkflowBuilder::new(ctx)
@@ -29,11 +29,82 @@ let workflow = WorkflowBuilder::new(ctx)
 runner.run(&workflow, "welcome-user-123", user_id).await?;
 ```
 
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def fetch_user(user_id: int) -> dict:
+    return db.get_user(user_id)
+
+@task
+def send_email(user: dict) -> str:
+    return email_service.send_welcome(user)
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+result = run_workflow(workflow, 42)
+```
+
 No annotations. No YAML. No separate worker processes. Just code.
 
-**One problem, solved well.** Sayiir is an orchestrator, not a compute engine. It coordinates steps, handles retries, and checkpoints progress—while the actual heavy lifting (ETL, data pipelines, GPU training, API calls) runs in external systems you call from your tasks. We don't try to be a platform, a UI, or a kitchen sink. We make your workflows durable and let you focus on your business logic.
+---
 
-**Why Rust? Why not just Python, Go or Node.js?** The core runtime is written in Rust for safety, performance, and correctness—the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Python bindings are available today, with Go and Node.js planned—so you get Rust's reliability without leaving your ecosystem. The binding is a thin layer: you write task functions in your language, Rust handles all orchestration, checkpointing, and execution.
+## How Sayiir Is Different
+
+### No deterministic replay
+
+This is the big one. Temporal, Restate, Azure Durable Functions, and most durable execution engines use **replay-based recovery**: when a workflow resumes, they re-execute your code from the beginning and skip completed steps. This requires your workflow code to be **deterministic** — no system time, no random values, no direct I/O, no side effects outside SDK-approved APIs.
+
+Developers consistently report this as the #1 source of production incidents, versioning nightmares, and onboarding friction.
+
+**Sayiir doesn't replay.** It checkpoints after each task and resumes from the last checkpoint. Your tasks can call any API, use any library, read the clock, generate random values — there are no determinism constraints. When a process crashes, Sayiir loads the last snapshot and picks up from where it left off. No re-execution. No replay storms. No versioning headaches.
+
+### A library, not a platform
+
+Temporal requires a multi-service cluster (frontend, history, matching, workers) plus a database. Airflow needs a scheduler, webserver, workers, and database. Even "lightweight" options like Inngest and Hatchet run a centralized server.
+
+**Sayiir is a library you import.** Add it as a dependency, write your workflow, run it. Works in a single process, across a cluster, or on serverless — no separate infrastructure to deploy, monitor, or operate. Your application *is* the workflow engine.
+
+### Rust core, thin language bindings
+
+Temporal recognized this was the right architecture — their newer Python, TypeScript, and .NET SDKs all wrap a shared Rust core (`sdk-core`). Sayiir was built this way from day one.
+
+The Rust runtime handles all orchestration, checkpointing, serialization, and execution. Language bindings are thin: you define tasks in your language, Rust does everything else. This means every language gets the same performance, correctness, and safety guarantees — because they share the same battle-tested core.
+
+### Hexagonal architecture
+
+Sayiir's internals follow hexagonal (ports & adapters) architecture. The core domain (`sayiir-core`) has **zero infrastructure dependencies** — pure business logic. All dependencies flow inward:
+
+```
+core ← persistence ← runtime ← language bindings
+```
+
+Every integration point is a trait-based port with swappable adapters:
+
+- **`Codec`** — rkyv, JSON, or your own serializer
+- **`PersistentBackend`** — InMemory, PostgreSQL, or your own storage
+- **`CoreTask`** — closures, registry lookups, or your own execution model
+- **`WorkflowRunner`** — single-process, distributed, or your own topology
+
+This isn't accidental. It means you can swap any layer without touching the others. Test with InMemory, deploy with PostgreSQL. Prototype with JSON, optimize with rkyv, or any custom Codec of your choice (protobuf, avro ..). Run single-process locally, distribute across machines in production. Same workflow code, different adapters.
+
+### Pluggable everything
+
+- **Storage backends** — InMemory for testing, PostgreSQL for production, or implement the `PersistentBackend` trait for anything else (Redis, DynamoDB, SQLite, Cloudflare Durable Objects)
+- **Codecs** — rkyv (zero-copy, default), JSON (human-readable), or bring your own (Protobuf, MessagePack)
+- **No lock-in** — MIT licensed, standard async patterns, portable across any runtime
+
+### How we compare
+
+| | Sayiir | Temporal | Restate | Inngest | DBOS |
+|---|---|---|---|---|---|
+| **Architecture** | Library (embedded) | Server cluster | Single binary server | Centralized server | Library + Postgres |
+| **Recovery model** | Checkpoint & resume | Deterministic replay | Journal replay | Step replay | Checkpoint & resume |
+| **Determinism required** | No | Yes | Yes | Yes | No |
+| **Infrastructure** | None (library) | Multi-service + DB | Single binary | Server | Postgres |
+| **Rust core** | Native | Migrating to | Written in | No | No |
+| **Language SDKs** | Rust, Python | Go, Java, TS, Python, .NET | TS, Java, Python, Go, Rust | TS, Python, Go | Python, TS, Go, Java |
+| **License** | MIT | MIT | BSL | SSPL | MIT |
+| **Self-host complexity** | Zero | High | Low | Medium | Low |
 
 ---
 
@@ -145,6 +216,19 @@ After studying these solutions, the pattern is clear:
 | Claim-based task distribution  | Stable |
 | Zero-copy serialization (rkyv) | Stable |
 
+### Python Bindings (Beta)
+
+| Feature | Status |
+|---|---|
+| `@task` decorator with metadata | Done |
+| Fluent `Flow` builder API | Done |
+| Durable execution with checkpointing | Done |
+| Resume and cancel | Done |
+| Fork/join with multi-step branches | Done |
+| Pydantic integration (automatic validation) | Done |
+| Type stubs and PEP 561 compliance | Done |
+| Async task support | Done |
+
 ### Pluggable Codecs
 
 Serialization is pluggable—bring your own format or use the built-in options:
@@ -181,9 +265,104 @@ impl PersistentBackend for MyBackend { ... }
 
 ## Quick Start
 
-### Single Process with Checkpointing
+### Python
 
-Best for: Single-node deployments, crash recovery, simple setup.
+Install with:
+
+```bash
+cd python && pip install -e ".[dev]"
+```
+
+**Simple workflow:**
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def fetch_user(user_id: int) -> dict:
+    return {"id": user_id, "name": "Alice"}
+
+@task
+def send_email(user: dict) -> str:
+    return f"Sent welcome to {user['name']}"
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+result = run_workflow(workflow, 42)
+```
+
+**Durable workflow (survives crashes):**
+
+```python
+from sayiir import task, Flow, run_durable_workflow, InMemoryBackend
+
+@task(timeout_secs=30)
+def process_order(order_id: int) -> dict:
+    return {"order_id": order_id, "status": "processed"}
+
+@task
+def send_confirmation(order: dict) -> str:
+    return f"Confirmed order {order['order_id']}"
+
+workflow = Flow("order").then(process_order).then(send_confirmation).build()
+
+# Checkpoints after each task — resume from last checkpoint on crash
+status = run_durable_workflow(workflow, "order-123", 42)
+print(status.output)
+```
+
+**Parallel execution (fork/join):**
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def validate_payment(order: dict) -> dict:
+    return {"payment": "valid"}
+
+@task
+def check_inventory(order: dict) -> dict:
+    return {"stock": "available"}
+
+@task
+def finalize(results: dict) -> str:
+    return f"Order complete: {results}"
+
+workflow = (
+    Flow("checkout")
+    .fork()
+        .branch(validate_payment)
+        .branch(check_inventory)
+    .join(finalize)
+    .build()
+)
+result = run_workflow(workflow, {"order_id": 1})
+```
+
+**Pydantic integration (automatic validation):**
+
+```python
+from pydantic import BaseModel
+from sayiir import task, Flow, run_workflow
+
+class OrderInput(BaseModel):
+    order_id: int
+    amount: float
+
+class OrderResult(BaseModel):
+    status: str
+    message: str
+
+@task
+def process(order: OrderInput) -> OrderResult:
+    return OrderResult(status="ok", message=f"Processed ${order.amount}")
+
+workflow = Flow("typed").then(process).build()
+result = run_workflow(workflow, {"order_id": 1, "amount": 99.99})
+```
+
+### Rust
+
+**Single process with checkpointing:**
 
 ```rust
 use sayiir::{CheckpointingRunner, InMemoryBackend, WorkflowBuilder};
@@ -207,9 +386,7 @@ let result = runner.run(&workflow, "instance-001", "hello".to_string()).await?;
 let result = runner.resume(&workflow, "instance-001").await?;
 ```
 
-### Distributed Workers
-
-Best for: Horizontal scaling, high throughput, fault tolerance across machines.
+**Distributed workers:**
 
 ```rust
 use sayiir::{PooledWorker, PostgresBackend};
@@ -224,7 +401,7 @@ let worker = PooledWorker::new("worker-1", backend, registry)
 worker.start_polling(Duration::from_secs(1), workflows).await?;
 ```
 
-### DAG Workflows (Fork/Join)
+**DAG workflows (fork/join):**
 
 ```rust
 let workflow = WorkflowBuilder::new(ctx)
@@ -244,34 +421,7 @@ let workflow = WorkflowBuilder::new(ctx)
     .build();
 ```
 
-### Python Bindings
-
-Rust handles all orchestration. Python provides task implementations via a thin binding layer.
-
-```python
-from sayiir import task, Flow, run_workflow
-
-@task
-def fetch_user(user_id: int) -> dict:
-    return {"id": user_id, "name": "Alice"}
-
-@task
-def send_email(user: dict) -> str:
-    return f"Sent welcome to {user['name']}"
-
-workflow = Flow("welcome").then(fetch_user).then(send_email).build()
-result = run_workflow(workflow, 42)
-```
-
-Install with:
-
-```bash
-cd python && pip install -e ".[dev]"
-```
-
-### Task Registry (Reusable Activities)
-
-Build libraries of reusable tasks and compose them:
+**Task registry (reusable activities):**
 
 ```rust
 // Domain module with reusable tasks
@@ -318,6 +468,10 @@ let workflow = WorkflowBuilder::new(ctx)
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+**One problem, solved well.** Sayiir is an orchestrator, not a compute engine. It coordinates steps, handles retries, and checkpoints progress — while the actual heavy lifting (ETL, data pipelines, GPU training, API calls) runs in external systems you call from your tasks. We don't try to be a platform, a UI, or a kitchen sink. We make your workflows durable and let you focus on your business logic.
+
+**Why Rust?** The core runtime is written in Rust for safety, performance, and correctness — the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Python bindings are available today, with TypeScript and Go planned — so you get Rust's reliability without leaving your ecosystem. The binding is a thin layer: you write task functions in your language, Rust handles all orchestration, checkpointing, and execution.
+
 ---
 
 ## Deployment
@@ -349,7 +503,7 @@ For teams that need more:
 
 ## Use Cases
 
-Every enterprise runs on workflows—whether they call them that or not. Order processing, user onboarding, payment reconciliation, data pipelines, compliance checks. These are all multi-step processes that need to be reliable, observable, and recoverable when things go wrong.
+Every enterprise runs on workflows — whether they call them that or not. Order processing, user onboarding, payment reconciliation, data pipelines, compliance checks. These are all multi-step processes that need to be reliable, observable, and recoverable when things go wrong.
 
 Sayiir is built for teams that need these guarantees without the complexity of traditional workflow engines.
 
@@ -389,6 +543,14 @@ Sayiir is built for teams that need these guarantees without the complexity of t
 - Feature engineering workflows
 - Data quality and validation checks
 
+### AI Agents
+
+- Multi-step agent orchestration with checkpointing
+- Tool call durability — resume after failures without re-running LLM calls
+- Human-in-the-loop approval chains
+- Long-running agent loops (hours/days) with crash recovery
+- No determinism constraints — LLM calls are inherently non-deterministic, and that's fine
+
 ### Infrastructure & DevOps
 
 - CI/CD pipeline orchestration
@@ -415,12 +577,12 @@ Sayiir is under active development. Core is stable, some features are in progres
 
 | Component            | Status      |
 | -------------------- | ----------- |
-| workflow-core        | Stable      |
-| workflow-runtime     | Stable      |
-| workflow-persistence | Stable      |
+| sayiir-core          | Stable      |
+| sayiir-runtime       | Stable      |
+| sayiir-persistence   | Stable      |
+| Python bindings      | Beta        |
 | PostgreSQL backend   | In Progress |
 | Cloudflare Workers   | In Progress |
-| Python bindings      | In Progress |
 | Node.js bindings     | Planned     |
 | Enterprise server    | Planned     |
 

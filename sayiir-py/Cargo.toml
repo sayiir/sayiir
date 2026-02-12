@@ -1,0 +1,26 @@
+[package]
+name = "sayiir-py"
+description = "PyO3 bridge between Python and the Sayiir workflow runtime"
+version.workspace = true
+authors.workspace = true
+edition = "2021"
+license.workspace = true
+publish = false
+
+[lib]
+name = "_sayiir"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "anyhow"] }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
+sayiir-persistence = { version = "0.1.0", path = "../sayiir-persistence" }
+sayiir-runtime = { version = "0.1.0", path = "../sayiir-runtime" }
+
+[build-dependencies]
+pyo3-build-config = "0.28"

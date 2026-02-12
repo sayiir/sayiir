@@ -1,206 +1,235 @@
 # Roadmap
 
-This document outlines the planned development for Sayiir.
+This document outlines where Sayiir is, where it's going, and why — informed by what the durable execution space actually needs.
 
 ---
 
-## In Progress
+## Current State
+
+### What Works Today
+
+**Rust Core (Stable)**
+
+| Feature | Status |
+|---|---|
+| Durable task execution with automatic checkpointing | Stable |
+| Crash recovery and deterministic resume | Stable |
+| Fork/join parallelism with heterogeneous branch outputs | Stable |
+| Distributed worker pools with claim-based task distribution | Stable |
+| Pluggable storage backends (`PersistentBackend` trait) | Stable |
+| Pluggable codecs (rkyv zero-copy, JSON, custom) | Stable |
+| Task registry for serializable workflows | Stable |
+| Workflow serialization with definition hash validation | Stable |
+| Panic-safe execution | Stable |
+| `WorkflowContext` with task-local metadata access | Stable |
+| InMemory backend (development/testing) | Stable |
+
+**Python Bindings (Beta)**
+
+| Feature | Status |
+|---|---|
+| `@task` decorator with metadata (timeout, tags, description) | Done |
+| Fluent `Flow` builder API (`.then()`, `.fork()`, `.branch()`, `.join()`) | Done |
+| Simple execution (`run_workflow`) | Done |
+| Durable execution with checkpointing (`run_durable_workflow`) | Done |
+| Resume and cancel from Python | Done |
+| Fork/join with multi-step branches | Done |
+| Pydantic integration (automatic validation/serialization) | Done |
+| Type stubs (`.pyi`) and PEP 561 compliance | Done |
+| Async task support (via `asyncio.run()`) | Done |
+| `InMemoryBackend` exposed to Python | Done |
+| `WorkflowStatus` with error/cancellation details | Done |
+
+---
+
+## Phase 0 — Python Bindings Polish *(current focus)*
+
+The Python SDK is the first language binding and the template for all future bindings. Getting this right matters.
+
+**Documentation & Examples**
+
+- [ ] Python package README (PyPI landing page)
+- [ ] Quickstart guide with real-world examples
+- [ ] API reference with comprehensive docstrings
+- [ ] Error handling guide (what exceptions, when, why)
+- [ ] Fork/join patterns cookbook
+- [ ] Pydantic integration guide
+
+**API Refinements**
+
+- [ ] Native async/await execution path (no `asyncio.run()` workaround — works in Jupyter, existing event loops)
+- [ ] Better error messages for common mistakes (missing `@task`, wrong input types)
+- [ ] Workflow composition (reuse sub-flows as steps in larger flows)
+
+**Testing & Quality**
+
+- [ ] Expand test coverage for edge cases (timeout enforcement, concurrent instances)
+- [ ] CI pipeline for Python bindings (maturin build + pytest across Python 3.10-3.13)
+- [ ] Publish to PyPI via GitHub Actions
+
+---
+
+## Phase 1 — Production Readiness
+
+The features every team needs before they'll trust Sayiir with real workloads.
 
 ### PostgreSQL Backend
 
-Production-ready persistence with PostgreSQL.
+The #1 blocker for production adoption. Nobody ships with InMemory.
 
-- Schema design for workflows, snapshots, and claims
-- Connection pooling and retry logic
-- Migration tooling
+- [ ] Schema design (workflows, snapshots, claims, heartbeats)
+- [ ] Connection pooling (deadpool-postgres or sqlx)
+- [ ] Migration tooling (embedded migrations via refinery or sqlx)
+- [ ] Expose to Python bindings
 
-### Cloudflare Workers Support
+### Retry Policies
 
-Run Sayiir on the edge via Durable Objects.
+Every competitor has this. Table stakes.
 
-- Durable Object persistence backend
-- Stateless worker execution model
-- Cold start optimization
+- [ ] Configurable per-task: max attempts, initial delay, backoff multiplier, max delay
+- [ ] Exponential backoff with jitter
+- [ ] Retry-aware checkpointing (don't lose retry count on crash)
+- [ ] `RetryPolicy` already defined in Python — wire it through Rust runtime
 
----
+### Task Timeouts
 
-## In Progress
-
-### Python Bindings
-
-PyO3-based bindings — Rust orchestrates, Python provides task implementations.
-
-**Done:**
-- Core binding layer (workflow builder, engine, task metadata)
-- `@task` decorator with global registry
-- Fluent `Flow` builder API
-- Synchronous execution via `execute_continuation_sync`
-- JSON codec for Python object serialization
-- Type stubs (`.pyi`) and PEP 561 marker
-- Durable execution with checkpointing (`DurableEngine`, `InMemoryBackend`)
-- Resume and cancel support from Python
-- Shared execution logic — Python layer is thin, all decision logic lives in Rust
-- Fork/join codec — join task receives decoded `dict[str, value]` with automatic binary→JSON fallback
-- Pydantic integration — optional `BaseModel` validation for task inputs/outputs
-- Multi-step branches — `branch(step_a, step_b, ...)` chains tasks within a single fork branch
-
-**Planned:**
-- Native async/await support (currently coroutines are run synchronously)
+- [ ] Per-task timeout enforcement in runtime
+- [ ] Timeout cancellation with clear error propagation
+- [ ] `timeout_secs` already in `@task` metadata — wire it through
 
 ---
 
-## Planned
+## Phase 2 — Real-World Workflow Patterns
 
-### Language Bindings
+The features that unlock the remaining 80% of use cases: anything that waits for external input or time.
 
-#### Node.js / TypeScript
+### Durable Sleep / Timers
 
-- NAPI-RS bindings
-- Promise-based API
-- TypeScript type definitions
+Pause a workflow for minutes, hours, or days — surviving process restarts.
 
-### Runtime Improvements
+- [ ] `sleep(duration)` as a first-class workflow primitive
+- [ ] Timer persisted to backend, not held in memory
+- [ ] Resume after timer expiry on any worker
 
-#### Two-Phase Claiming
+### Signals / External Events
 
-Distinguish between "reserved" and "executing" states for faster failure detection.
+Pause a workflow until an external event arrives (payment confirmed, human approved, webhook received).
 
-```mermaid
-stateDiagram-v2
-    [*] --> Available
-    Available --> Reserved: worker reserves (short TTL)
-    Reserved --> Executing: worker starts execution
-    Reserved --> Available: TTL expires (worker failed before starting)
-    Executing --> Available: heartbeat stops
-    Executing --> [*]: completed
-```
+- [ ] `wait_for_signal(signal_name, timeout)` primitive
+- [ ] `send_signal(instance_id, signal_name, payload)` API
+- [ ] Enables: human-in-the-loop, payment callbacks, approval chains, webhook-driven flows
 
-**Proposed API:**
+### Child Workflows
 
-```rust
-pub enum TaskClaimState {
-    Reserved { expires_at: Timestamp },
-    Executing {
-        worker_id: String,
-        started_at: Timestamp,
-        last_heartbeat: Timestamp,
-    },
-}
-```
+Compose workflows from other workflows.
 
-**Benefits:**
+- [ ] `run_child_workflow(workflow, input)` primitive
+- [ ] Independent lifecycle (own instance ID, own checkpointing)
+- [ ] Parent can wait for child or fire-and-forget
 
-- Fast detection of workers that crash before starting
-- Flexible TTL based on task state
-- Clear visibility into task status
+---
 
-#### Task Priority Queues
+## Phase 3 — Ecosystem
 
-Execute high-priority tasks before lower-priority ones.
+### TypeScript / Node.js Bindings
 
-#### Worker Affinity / Task Routing
+Python + TypeScript covers ~90% of the developer market for this space.
 
-Route specific task types to specific worker pools.
-
-#### Workflow Cancellation and Pausing
-
-Gracefully stop or pause running workflows.
-
-#### Dead Letter Queue
-
-Capture and inspect permanently failed tasks.
+- [ ] NAPI-RS bindings (same architecture as Python: thin layer, Rust orchestrates)
+- [ ] Promise-based API
+- [ ] TypeScript type definitions
+- [ ] npm package
 
 ### Observability
 
-#### Metrics
+Teams need visibility into what's running, what's stuck, and what failed.
 
-- Prometheus/OpenMetrics export
-- Task latency histograms
-- Queue depth gauges
-- Worker utilization
+- [ ] OpenTelemetry integration (span-per-task)
+- [ ] Prometheus/OpenMetrics export (task latency, queue depth, worker utilization)
+- [ ] Structured logging with correlation IDs
 
-#### Tracing
+### Scheduling / Cron
 
-- OpenTelemetry integration
-- Distributed trace context propagation
-- Span-per-task granularity
+- [ ] Cron-style recurring workflow triggers
+- [ ] Backfill support
+- [ ] Timezone-aware scheduling
 
 ---
 
-## Design Patterns
+## Phase 4 — Advanced Runtime
 
-### Idempotent Tasks
+### Queuing Primitives
 
-> **Note:** This is a client-side design pattern, not a runtime feature.
+- [ ] Concurrency control (max N instances of workflow X)
+- [ ] Rate limiting (max N tasks/second)
+- [ ] Priority queues (urgent workflows first)
+- [ ] Dead letter queue for permanently failed tasks
 
-Instead of relying solely on claim coordination, users can design tasks to be safely re-executable. If a task runs twice with the same input, it produces the same result.
+### Two-Phase Claiming
 
-Recommended for tasks that are naturally idempotent or can be made so with minimal effort. This eliminates edge cases around duplicate execution.
+Distinguish "reserved" from "executing" for faster failure detection.
+
+```
+Available → Reserved (short TTL) → Executing (heartbeat) → Completed
+                ↓ (TTL expires)
+            Available (fast recovery)
+```
+
+### Worker Affinity / Task Routing
+
+Route specific task types to specific worker pools (GPU tasks to GPU workers, etc.).
+
+### Workflow Versioning
+
+The checkpoint model makes this fundamentally easier than replay-based systems. When the workflow definition changes:
+
+- [ ] Detect definition hash mismatch on resume
+- [ ] Migration strategies: complete-in-place, drain-and-restart, version routing
+- [ ] No replay storms (unlike Temporal) — just resume from last checkpoint
+
+---
+
+## Phase 5 — Edge & Serverless
+
+### Cloudflare Workers
+
+- [ ] Durable Objects as persistence backend
+- [ ] Stateless worker execution model
+- [ ] Cold start optimization
+- [ ] WASM compilation of core runtime
+
+### SQLite Backend
+
+Single-binary durable execution with zero infrastructure. For CLI tools, edge functions, embedded systems.
+
+- [ ] SQLite via rusqlite
+- [ ] WAL mode for concurrent reads
+- [ ] Expose to all language bindings
 
 ---
 
 ## Enterprise Features (Planned)
 
-These features will be available in the commercial offering:
+Commercial offering for teams that need more:
 
-### Managed Control Plane
-
-- Horizontally scalable gRPC server
-- Kubernetes-native deployment (Helm charts, operators)
-- Multi-region support
-
-### Web UI
-
-- Workflow visualization (DAG view)
-- Real-time execution monitoring
-- Manual retry/skip/cancel operations
-- Search and filtering
-
-### Audit and Compliance
-
-- Complete execution history
-- Immutable audit log
-- Data retention policies
-- Export capabilities
-
-### Time-Critical Tasks
-
-For workflows where timing matters:
-
-- Per-task and per-workflow deadline configuration
-- SLA-based execution guarantees
-- Automatic escalation on deadline breach (webhooks, alerts)
-- Deadline-aware scheduling and priority boosting
-- Latency-sensitive task routing to fastest workers
-
-### Multi-Tenancy
-
-- Isolated worker pools per tenant
-- Resource quotas and limits
-- Tenant-specific configuration
-
-### Security
-
-- mTLS between all components
-- Role-based access control (RBAC)
-- Secrets management integration (Vault, AWS Secrets Manager)
-- Encryption at rest
-
-### Auto-Scaling
-
-- Queue-depth-based worker scaling
-- Kubernetes HPA and Keda integration
-- Predictive scaling based on historical patterns
+- **Managed control plane** — Scalable gRPC server, Kubernetes-native
+- **Web UI** — Workflow visualization, real-time monitoring, manual interventions
+- **Audit logging** — Immutable execution history for compliance
+- **Time-critical tasks** — Hard deadline enforcement, SLA guarantees, automatic escalation
+- **Multi-tenancy** — Isolated worker pools, resource quotas, tenant-specific config
+- **Security** — mTLS, RBAC, secrets management (Vault, AWS Secrets Manager)
+- **Auto-scaling** — Queue-depth-based worker provisioning, Kubernetes HPA/KEDA
+- **Code sandboxing** — Secure execution of untrusted/tenant-provided code
 
 ---
 
 ## Contributing
 
-Want to help? Check out the issues labeled `good first issue` or join our [Discord](https://discord.gg/MWSzsHeg) to discuss.
+Want to help? Check out issues labeled `good first issue` or join our [Discord](https://discord.gg/MWSzsHeg).
 
 Areas where contributions are especially welcome:
 
-- Storage backend implementations
-- Documentation and examples
+- Storage backend implementations (PostgreSQL, SQLite, Redis)
+- Language binding prototypes (TypeScript, Go)
+- Documentation, examples, and tutorials
 - Testing and benchmarking
-- Language binding prototypes

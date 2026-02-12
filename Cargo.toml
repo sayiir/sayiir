@@ -1,9 +1,16 @@
 [workspace]
-members = ["workflow-core", "workflow-persistence", "workflow-runtime", "workflow-macros", "workflow-py"]
+members = ["sayiir-core", "sayiir-persistence", "sayiir-runtime", "sayiir-macros", "sayiir-py"]
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
+authors = ["Sayiir Contributors"]
+edition = "2024"
 license = "MIT"
+repository = "https://github.com/sayiir/sayiir"
+homepage = "https://github.com/sayiir/sayiir"
+categories = ["asynchronous", "concurrency"]
+keywords = ["workflow", "orchestration", "durable", "async", "distributed"]
 
 [workspace.dependencies]
 tracing = "0.1"
