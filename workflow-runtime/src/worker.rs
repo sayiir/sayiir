@@ -613,6 +613,9 @@ where
                 match current {
                     WorkflowContinuation::Task { id, func, next } => {
                         if id == task_id {
+                            let func = func.as_ref().ok_or_else(|| {
+                                anyhow::anyhow!("Task '{id}' has no implementation")
+                            })?;
                             return func.run(input).await;
                         } else if let Some(next_cont) = next {
                             current = next_cont;

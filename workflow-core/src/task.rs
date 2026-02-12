@@ -352,11 +352,7 @@ where
     Fut: Future<Output = Result<O>> + Send + 'static,
     C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
-    Box::new(UntypedTaskFnWrapper {
-        func: Arc::new(func),
-        codec,
-        _phantom: std::marker::PhantomData,
-    })
+    to_core_task_arc(Arc::new(func), codec)
 }
 
 /// Create a new untyped task from an Arc-wrapped function.
@@ -526,11 +522,7 @@ where
     Fut: Future<Output = Result<JoinOutput>> + Send + 'static,
     C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
 {
-    Box::new(HeterogeneousJoinTaskWrapper {
-        func: Arc::new(func),
-        codec,
-        _phantom: PhantomData,
-    })
+    to_heterogeneous_join_task_arc(Arc::new(func), codec)
 }
 
 /// Create a join task from an Arc-wrapped function.

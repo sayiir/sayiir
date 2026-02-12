@@ -24,6 +24,10 @@ use workflow_core::snapshot::{
 use workflow_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
 
+use crate::execution::{
+    continuation_id, finalize_execution, get_resume_input, serialize_branch_results,
+};
+
 /// A single-process workflow runner with checkpointing for crash recovery.
 ///
 /// `CheckpointingRunner` executes an entire workflow within one process,
@@ -173,7 +177,7 @@ where
             )
             .await;
 
-            Self::handle_execution_result(result, &mut snapshot, &backend).await
+            finalize_execution(result, &mut snapshot, backend.as_ref()).await
         })
         .await
     }
@@ -240,7 +244,7 @@ where
 
         with_context(context.clone(), || async move {
             // Get the last completed task's output or initial input
-            let input_bytes = Self::get_resume_input(&snapshot, continuation)?;
+            let input_bytes = get_resume_input(&snapshot)?;
 
             let result = Self::execute_with_checkpointing(
                 continuation,
@@ -251,52 +255,9 @@ where
             )
             .await;
 
-            Self::handle_execution_result(result, &mut snapshot, &backend).await
+            finalize_execution(result, &mut snapshot, backend.as_ref()).await
         })
         .await
-    }
-
-    /// Handle execution result, converting to `WorkflowStatus`.
-    ///
-    /// On success, marks the workflow as completed.
-    /// On cancellation error, returns Cancelled status with details from snapshot.
-    /// On other errors, marks the workflow as failed.
-    async fn handle_execution_result(
-        result: anyhow::Result<Bytes>,
-        snapshot: &mut WorkflowSnapshot,
-        backend: &Arc<B>,
-    ) -> anyhow::Result<WorkflowStatus> {
-        match result {
-            Ok(output) => {
-                snapshot.mark_completed(output);
-                backend.save_snapshot(snapshot.clone()).await?;
-                Ok(WorkflowStatus::Completed)
-            }
-            Err(e) => {
-                // Check if this was a cancellation using downcasting
-                if let Some(WorkflowError::Cancelled { .. }) = e.downcast_ref::<WorkflowError>() {
-                    // Reload snapshot to get cancellation details (set by check_and_cancel)
-                    if let Ok(cancelled_snapshot) =
-                        backend.load_snapshot(&snapshot.instance_id).await
-                        && let Some((reason, cancelled_by)) =
-                            cancelled_snapshot.state.cancellation_details()
-                    {
-                        return Ok(WorkflowStatus::Cancelled {
-                            reason,
-                            cancelled_by,
-                        });
-                    }
-                    // Fallback if we couldn't get details
-                    return Ok(WorkflowStatus::Cancelled {
-                        reason: None,
-                        cancelled_by: None,
-                    });
-                }
-                snapshot.mark_failed(e.to_string());
-                let _ = backend.save_snapshot(snapshot.clone()).await;
-                Ok(WorkflowStatus::Failed(e))
-            }
-        }
     }
 
     /// Execute continuation with checkpointing after each task (iterative, no boxing).
@@ -318,7 +279,11 @@ where
 
         loop {
             match current {
-                WorkflowContinuation::Task { id, func, next } => {
+                WorkflowContinuation::Task {
+                    id,
+                    func: Some(func),
+                    next,
+                } => {
                     // Check for cancellation before executing task
                     if backend
                         .check_and_cancel(&snapshot.instance_id, Some(id))
@@ -360,6 +325,9 @@ where
                         None => return Ok(output),
                     }
                 }
+                WorkflowContinuation::Task { func: None, id, .. } => {
+                    return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
+                }
                 WorkflowContinuation::Fork { branches, join } => {
                     // Check for cancellation before starting fork
                     if backend
@@ -374,10 +342,7 @@ where
                     let mut branch_results = Vec::new();
 
                     for branch in branches {
-                        let branch_id = match branch.as_ref() {
-                            WorkflowContinuation::Task { id, .. } => id.clone(),
-                            WorkflowContinuation::Fork { .. } => String::from("unnamed"),
-                        };
+                        let branch_id = continuation_id(branch);
 
                         if let Some(result) = snapshot.get_task_result(&branch_id) {
                             branch_results.push((branch_id, result.output.clone()));
@@ -391,13 +356,7 @@ where
                         // Execute branches in parallel
                         let branch_info: Vec<(String, Arc<WorkflowContinuation>)> = branches
                             .iter()
-                            .map(|branch| {
-                                let branch_id = match branch.as_ref() {
-                                    WorkflowContinuation::Task { id, .. } => id.clone(),
-                                    WorkflowContinuation::Fork { .. } => String::from("unnamed"),
-                                };
-                                (branch_id, Arc::clone(branch))
-                            })
+                            .map(|branch| (continuation_id(branch), Arc::clone(branch)))
                             .collect();
 
                         let instance_id = snapshot.instance_id.clone();
@@ -478,15 +437,14 @@ where
                     // Proceed to join or return
                     match join {
                         Some(join_continuation) => {
-                            let join_input = Self::serialize_named_branch_results(&branch_results)?;
+                            let join_input = serialize_branch_results(&branch_results)?;
                             current = join_continuation;
                             current_input = join_input;
                         }
                         None => {
-                            return Ok(branch_results
-                                .last()
-                                .map(|(_, b)| b.clone())
-                                .unwrap_or_default());
+                            return branch_results.last().map(|(_, b)| b.clone()).ok_or_else(
+                                || anyhow::anyhow!("Fork with no branches and no join task"),
+                            );
                         }
                     }
                 }
@@ -548,7 +506,11 @@ where
 
             loop {
                 match current {
-                    WorkflowContinuation::Task { id, func, next } => {
+                    WorkflowContinuation::Task {
+                        id,
+                        func: Some(func),
+                        next,
+                    } => {
                         let output = func.run(current_input).await?;
 
                         // Checkpoint: save task result directly to backend
@@ -564,15 +526,15 @@ where
                             None => return Ok(output),
                         }
                     }
+                    WorkflowContinuation::Task { func: None, id, .. } => {
+                        return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
+                    }
                     WorkflowContinuation::Fork { branches, join } => {
                         // Nested fork within a branch
                         let branch_handles: Vec<_> = branches
                             .iter()
                             .map(|branch| {
-                                let id = match branch.as_ref() {
-                                    WorkflowContinuation::Task { id, .. } => id.clone(),
-                                    WorkflowContinuation::Fork { .. } => String::from("unnamed"),
-                                };
+                                let id = continuation_id(branch);
                                 let branch = Arc::clone(branch);
                                 let branch_input = current_input.clone();
                                 let branch_backend = Arc::clone(&backend);
@@ -598,16 +560,14 @@ where
 
                         match join {
                             Some(join_continuation) => {
-                                let join_input =
-                                    Self::serialize_named_branch_results(&branch_results)?;
+                                let join_input = serialize_branch_results(&branch_results)?;
                                 current = join_continuation;
                                 current_input = join_input;
                             }
                             None => {
-                                return Ok(branch_results
-                                    .last()
-                                    .map(|(_, b)| b.clone())
-                                    .unwrap_or_default());
+                                return branch_results.last().map(|(_, b)| b.clone()).ok_or_else(
+                                    || anyhow::anyhow!("Fork with no branches and no join task"),
+                                );
                             }
                         }
                     }
@@ -645,57 +605,5 @@ where
             })
             .await
         }
-    }
-
-    /// Get the input for resuming execution.
-    ///
-    /// Uses the execution position to determine the correct input:
-    /// - If no tasks completed, use initial input
-    /// - Otherwise, use the output of the last completed task
-    fn get_resume_input(
-        snapshot: &WorkflowSnapshot,
-        _continuation: &WorkflowContinuation,
-    ) -> anyhow::Result<Bytes> {
-        match &snapshot.state {
-            WorkflowSnapshotState::InProgress {
-                completed_tasks, ..
-            } => {
-                if completed_tasks.is_empty() {
-                    // No tasks completed yet, use initial input
-                    snapshot.initial_input_bytes().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Cannot resume: no completed tasks and initial input not stored"
-                        )
-                    })
-                } else {
-                    // Use output of last completed task (deterministic via last_completed_task_id)
-                    snapshot
-                        .get_last_task_output()
-                        .ok_or_else(|| anyhow::anyhow!("Cannot resume: no task results available"))
-                }
-            }
-            _ => Err(anyhow::anyhow!("Cannot resume: workflow not in progress")),
-        }
-    }
-
-    /// Serialize named branch results for join task input.
-    #[allow(clippy::cast_possible_truncation)]
-    fn serialize_named_branch_results(branch_results: &[(String, Bytes)]) -> anyhow::Result<Bytes> {
-        use std::io::Write;
-
-        let mut buffer = Vec::new();
-
-        // Safe: we never have more than u32::MAX branches in practice
-        buffer.write_all(&(branch_results.len() as u32).to_le_bytes())?;
-
-        for (name, data) in branch_results {
-            let name_bytes = name.as_bytes();
-            buffer.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
-            buffer.write_all(name_bytes)?;
-            buffer.write_all(&(data.len() as u32).to_le_bytes())?;
-            buffer.write_all(data.as_ref())?;
-        }
-
-        Ok(Bytes::from(buffer))
     }
 }

@@ -13,6 +13,41 @@ use workflow_core::snapshot::{
 use workflow_core::workflow::{WorkflowContinuation, WorkflowStatus};
 use workflow_persistence::PersistentBackend;
 
+/// Outcome of resolving a fork's join.
+enum JoinResolution<'a> {
+    /// Continue with the join continuation and serialized input.
+    Continue {
+        next: &'a WorkflowContinuation,
+        input: Bytes,
+    },
+    /// No join — return the last branch result directly.
+    Done(Bytes),
+}
+
+/// Resolve the join after all fork branches complete.
+///
+/// Serializes branch results for the join task, or returns the last branch
+/// result when there is no join. Returns an error if there are no branch
+/// results and no join (A1: empty branches guard).
+fn resolve_join<'a>(
+    join: Option<&'a WorkflowContinuation>,
+    branch_results: &[(String, Bytes)],
+) -> anyhow::Result<JoinResolution<'a>> {
+    if let Some(join_cont) = join {
+        let input = serialize_branch_results(branch_results)?;
+        Ok(JoinResolution::Continue {
+            next: join_cont,
+            input,
+        })
+    } else {
+        let output = branch_results
+            .last()
+            .map(|(_, b)| b.clone())
+            .ok_or_else(|| anyhow::anyhow!("Fork with no branches and no join task"))?;
+        Ok(JoinResolution::Done(output))
+    }
+}
+
 /// Serialize named branch results into a format that can be passed to the join task.
 ///
 /// Uses a length-prefixed format with names:
@@ -101,75 +136,17 @@ where
 
                 for branch in branches {
                     let branch_id = continuation_id(branch);
-                    let output = execute_branch_sync(branch, current_input.clone(), execute_task)?;
+                    let output =
+                        execute_continuation_sync(branch, current_input.clone(), execute_task)?;
                     branch_results.push((branch_id, output));
                 }
 
-                match join {
-                    Some(join_cont) => {
-                        let join_input = serialize_branch_results(&branch_results)?;
-                        current = join_cont;
-                        current_input = join_input;
+                match resolve_join(join.as_deref(), &branch_results)? {
+                    JoinResolution::Continue { next, input } => {
+                        current = next;
+                        current_input = input;
                     }
-                    None => {
-                        return Ok(branch_results
-                            .last()
-                            .map(|(_, b)| b.clone())
-                            .unwrap_or_default());
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Execute a branch synchronously.
-fn execute_branch_sync<F>(
-    continuation: &WorkflowContinuation,
-    input: Bytes,
-    execute_task: &F,
-) -> anyhow::Result<Bytes>
-where
-    F: Fn(&str, Bytes) -> anyhow::Result<Bytes>,
-{
-    let mut current = continuation;
-    let mut current_input = input;
-
-    loop {
-        match current {
-            WorkflowContinuation::Task { id, next, .. } => {
-                let output = execute_task(id, current_input)?;
-
-                match next {
-                    Some(next_cont) => {
-                        current = next_cont;
-                        current_input = output;
-                    }
-                    None => return Ok(output),
-                }
-            }
-            WorkflowContinuation::Fork { branches, join } => {
-                // Nested forks: execute sequentially
-                let mut branch_results = Vec::new();
-
-                for branch in branches {
-                    let branch_id = continuation_id(branch);
-                    let output = execute_branch_sync(branch, current_input.clone(), execute_task)?;
-                    branch_results.push((branch_id, output));
-                }
-
-                match join {
-                    Some(join_cont) => {
-                        let join_input = serialize_branch_results(&branch_results)?;
-                        current = join_cont;
-                        current_input = join_input;
-                    }
-                    None => {
-                        return Ok(branch_results
-                            .last()
-                            .map(|(_, b)| b.clone())
-                            .unwrap_or_default());
-                    }
+                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
         }
@@ -196,7 +173,11 @@ pub async fn execute_continuation_async(
 
     loop {
         match current {
-            WorkflowContinuation::Task { func, next, .. } => {
+            WorkflowContinuation::Task {
+                func: Some(func),
+                next,
+                ..
+            } => {
                 let output = func.run(current_input).await?;
 
                 match next {
@@ -206,6 +187,9 @@ pub async fn execute_continuation_async(
                     }
                     None => return Ok(output),
                 }
+            }
+            WorkflowContinuation::Task { func: None, id, .. } => {
+                return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
             }
             WorkflowContinuation::Fork { branches, join } => {
                 let branch_handles: Vec<_> = branches
@@ -228,18 +212,12 @@ pub async fn execute_continuation_async(
                         .into_iter()
                         .collect::<anyhow::Result<Vec<_>>>()?;
 
-                match join {
-                    Some(join_cont) => {
-                        let join_input = serialize_branch_results(&branch_results)?;
-                        current = join_cont;
-                        current_input = join_input;
+                match resolve_join(join.as_deref(), &branch_results)? {
+                    JoinResolution::Continue { next, input } => {
+                        current = next;
+                        current_input = input;
                     }
-                    None => {
-                        return Ok(branch_results
-                            .last()
-                            .map(|(_, b)| b.clone())
-                            .unwrap_or_default());
-                    }
+                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
         }
@@ -256,7 +234,11 @@ async fn execute_branch_async(
 
     loop {
         match current {
-            WorkflowContinuation::Task { func, next, .. } => {
+            WorkflowContinuation::Task {
+                func: Some(func),
+                next,
+                ..
+            } => {
                 let output = func.run(current_input).await?;
 
                 match next {
@@ -266,6 +248,9 @@ async fn execute_branch_async(
                     }
                     None => return Ok(output),
                 }
+            }
+            WorkflowContinuation::Task { func: None, id, .. } => {
+                return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
             }
             WorkflowContinuation::Fork { branches, join } => {
                 // Nested forks in branches: execute sequentially to avoid unbounded spawning
@@ -278,18 +263,12 @@ async fn execute_branch_async(
                     branch_results.push((branch_id, output));
                 }
 
-                match join {
-                    Some(join_cont) => {
-                        let join_input = serialize_branch_results(&branch_results)?;
-                        current = join_cont;
-                        current_input = join_input;
+                match resolve_join(join.as_deref(), &branch_results)? {
+                    JoinResolution::Continue { next, input } => {
+                        current = next;
+                        current_input = input;
                     }
-                    None => {
-                        return Ok(branch_results
-                            .last()
-                            .map(|(_, b)| b.clone())
-                            .unwrap_or_default());
-                    }
+                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
         }
@@ -463,18 +442,12 @@ where
                 }
 
                 // Proceed to join or return
-                match join {
-                    Some(join_continuation) => {
-                        let join_input = serialize_branch_results(&branch_results)?;
-                        current = join_continuation;
-                        current_input = join_input;
+                match resolve_join(join.as_deref(), &branch_results)? {
+                    JoinResolution::Continue { next, input } => {
+                        current = next;
+                        current_input = input;
                     }
-                    None => {
-                        return Ok(branch_results
-                            .last()
-                            .map(|(_, b)| b.clone())
-                            .unwrap_or_default());
-                    }
+                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
         }
@@ -535,18 +508,12 @@ where
                     branch_results.push((branch_id, output));
                 }
 
-                match join {
-                    Some(join_continuation) => {
-                        let join_input = serialize_branch_results(&branch_results)?;
-                        current = join_continuation;
-                        current_input = join_input;
+                match resolve_join(join.as_deref(), &branch_results)? {
+                    JoinResolution::Continue { next, input } => {
+                        current = next;
+                        current_input = input;
                     }
-                    None => {
-                        return Ok(branch_results
-                            .last()
-                            .map(|(_, b)| b.clone())
-                            .unwrap_or_default());
-                    }
+                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
         }
@@ -656,7 +623,7 @@ pub enum ResumeOutcome {
 ///
 /// # Errors
 /// Returns an error if no resume input can be determined.
-fn get_resume_input(snapshot: &WorkflowSnapshot) -> anyhow::Result<Bytes> {
+pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> anyhow::Result<Bytes> {
     match &snapshot.state {
         WorkflowSnapshotState::InProgress {
             completed_tasks, ..

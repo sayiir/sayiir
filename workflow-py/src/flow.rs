@@ -2,13 +2,13 @@
 //!
 //! Provides `PyFlowBuilder` for constructing workflows. The builder creates
 //! `WorkflowContinuation` structures that the engine executes by calling
-//! Python tasks directly.
+//! Python tasks directly. Task nodes have `func: None` since execution is
+//! handled by looking up Python callables by task ID in a registry.
 
-use bytes::Bytes;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-use workflow_core::task::{BytesFuture, CoreTask, TaskMetadata};
+use workflow_core::task::TaskMetadata;
 use workflow_core::workflow::WorkflowContinuation;
 
 use crate::task::PyTaskMetadata;
@@ -133,14 +133,11 @@ impl PyFlowBuilder {
 
         for task in iter {
             current = Some(match task {
-                BuilderTask::Sequential { task_id, .. } => {
-                    let wrapper = PlaceholderTask(task_id.clone());
-                    WorkflowContinuation::Task {
-                        id: task_id.clone(),
-                        func: Box::new(wrapper),
-                        next: current.map(Box::new),
-                    }
-                }
+                BuilderTask::Sequential { task_id, .. } => WorkflowContinuation::Task {
+                    id: task_id.clone(),
+                    func: None,
+                    next: current.map(Box::new),
+                },
                 BuilderTask::Fork {
                     branches, join_id, ..
                 } => {
@@ -150,10 +147,9 @@ impl PyFlowBuilder {
                             // Build the chain in reverse to link tasks together
                             let mut branch_current: Option<WorkflowContinuation> = None;
                             for (id, _) in chain.iter().rev() {
-                                let wrapper = PlaceholderTask(id.clone());
                                 branch_current = Some(WorkflowContinuation::Task {
                                     id: id.clone(),
-                                    func: Box::new(wrapper),
+                                    func: None,
                                     next: branch_current.map(Box::new),
                                 });
                             }
@@ -161,10 +157,9 @@ impl PyFlowBuilder {
                         })
                         .collect();
 
-                    let join_wrapper = PlaceholderTask(join_id.clone());
                     let join_cont = WorkflowContinuation::Task {
                         id: join_id.clone(),
-                        func: Box::new(join_wrapper),
+                        func: None,
                         next: current.map(Box::new),
                     };
 
@@ -178,26 +173,6 @@ impl PyFlowBuilder {
 
         current.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to build workflow")
-        })
-    }
-}
-
-/// Placeholder task - not actually executed.
-/// The engine calls Python directly using the task ID from the continuation.
-#[allow(dead_code)]
-struct PlaceholderTask(String);
-
-impl CoreTask for PlaceholderTask {
-    type Input = Bytes;
-    type Output = Bytes;
-    type Future = BytesFuture;
-
-    fn run(&self, _input: Bytes) -> Self::Future {
-        // This is never called - engine uses direct Python calls
-        BytesFuture::new(async move {
-            Err(anyhow::anyhow!(
-                "PlaceholderTask should not be executed directly"
-            ))
         })
     }
 }

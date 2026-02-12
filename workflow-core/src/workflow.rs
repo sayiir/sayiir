@@ -11,11 +11,42 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Generate a `find_duplicate_id` method for continuation-like enums.
+///
+macro_rules! impl_find_duplicate_id {
+    ($name:ident, task_fields: { $($task_extra:tt)* }, deref_branch: $deref:expr) => {
+        impl $name {
+            fn find_duplicate_id(&self) -> Option<String> {
+                fn collect(cont: &$name, seen: &mut HashSet<String>) -> Option<String> {
+                    match cont {
+                        $name::Task { id, next, $($task_extra)* } => {
+                            if !seen.insert(id.clone()) {
+                                return Some(id.clone());
+                            }
+                            next.as_ref().and_then(|n| collect(n, seen))
+                        }
+                        $name::Fork { branches, join } => {
+                            let deref_fn: fn(&_) -> &$name = $deref;
+                            branches
+                                .iter()
+                                .find_map(|b| collect(deref_fn(b), seen))
+                                .or_else(|| join.as_ref().and_then(|j| collect(j, seen)))
+                        }
+                    }
+                }
+                collect(self, &mut HashSet::new())
+            }
+        }
+    };
+}
+
 /// A workflow structure representing the tasks to execute.
 pub enum WorkflowContinuation {
     Task {
         id: String,
-        func: UntypedCoreTask,
+        /// Task implementation. `None` for registry-based execution
+        /// where tasks are looked up by `id` at runtime.
+        func: Option<UntypedCoreTask>,
         next: Option<Box<WorkflowContinuation>>,
     },
     Fork {
@@ -23,6 +54,12 @@ pub enum WorkflowContinuation {
         join: Option<Box<WorkflowContinuation>>,
     },
 }
+
+impl_find_duplicate_id!(
+    WorkflowContinuation,
+    task_fields: { .. },
+    deref_branch: |b: &Arc<WorkflowContinuation>| -> &WorkflowContinuation { b }
+);
 
 impl WorkflowContinuation {
     /// Get the first task ID from this continuation.
@@ -41,25 +78,6 @@ impl WorkflowContinuation {
                 }
             }
         }
-    }
-
-    /// Find the first duplicate ID in this continuation tree, if any.
-    fn find_duplicate_id(&self) -> Option<String> {
-        fn collect(cont: &WorkflowContinuation, seen: &mut HashSet<String>) -> Option<String> {
-            match cont {
-                WorkflowContinuation::Task { id, next, .. } => {
-                    if !seen.insert(id.clone()) {
-                        return Some(id.clone());
-                    }
-                    next.as_ref().and_then(|n| collect(n, seen))
-                }
-                WorkflowContinuation::Fork { branches, join } => branches
-                    .iter()
-                    .find_map(|b| collect(b, seen))
-                    .or_else(|| join.as_ref().and_then(|j| collect(j, seen))),
-            }
-        }
-        collect(self, &mut HashSet::new())
     }
 
     /// Convert to a serializable representation (strips out task implementations).
@@ -106,6 +124,12 @@ pub enum SerializableContinuation {
     },
 }
 
+impl_find_duplicate_id!(
+    SerializableContinuation,
+    task_fields: {},
+    deref_branch: |b: &SerializableContinuation| -> &SerializableContinuation { b }
+);
+
 impl SerializableContinuation {
     /// Convert this serializable continuation into a runnable `WorkflowContinuation`.
     ///
@@ -141,7 +165,7 @@ impl SerializableContinuation {
                     .transpose()?;
                 Ok(WorkflowContinuation::Task {
                     id: id.clone(),
-                    func,
+                    func: Some(func),
                     next,
                 })
             }
@@ -186,27 +210,6 @@ impl SerializableContinuation {
         let mut ids = Vec::new();
         collect(self, &mut ids);
         ids
-    }
-
-    /// Find the first duplicate ID in this continuation, if any.
-    ///
-    /// Used to detect tampering in serialized workflow states.
-    fn find_duplicate_id(&self) -> Option<String> {
-        fn collect(cont: &SerializableContinuation, seen: &mut HashSet<String>) -> Option<String> {
-            match cont {
-                SerializableContinuation::Task { id, next } => {
-                    if !seen.insert(id.clone()) {
-                        return Some(id.clone());
-                    }
-                    next.as_ref().and_then(|n| collect(n, seen))
-                }
-                SerializableContinuation::Fork { branches, join } => branches
-                    .iter()
-                    .find_map(|b| collect(b, seen))
-                    .or_else(|| join.as_ref().and_then(|j| collect(j, seen))),
-            }
-        }
-        collect(self, &mut HashSet::new())
     }
 
     /// Compute a SHA256 hash of this continuation's structure.
@@ -520,7 +523,7 @@ where
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
-            func: task,
+            func: Some(task),
             next: None,
         };
 
@@ -586,7 +589,7 @@ where
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
-            func,
+            func: Some(func),
             next: None,
         };
 
@@ -891,7 +894,7 @@ where
             .map(|b| {
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
-                    func: b.task,
+                    func: Some(b.task),
                     next: None,
                 })
             })
@@ -899,7 +902,7 @@ where
 
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
-            func: join_task_fn,
+            func: Some(join_task_fn),
             next: None,
         };
 
@@ -973,7 +976,7 @@ where
             .map(|b| {
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
-                    func: b.task,
+                    func: Some(b.task),
                     next: None,
                 })
             })
@@ -981,7 +984,7 @@ where
 
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
-            func: join_task_fn,
+            func: Some(join_task_fn),
             next: None,
         };
 

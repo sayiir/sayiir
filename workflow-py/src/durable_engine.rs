@@ -17,8 +17,8 @@ use workflow_runtime::{
 };
 
 use crate::backend::PyInMemoryBackend;
-use crate::codec::{decode_to_pyobject, encode_pyobject};
-use crate::engine::PyWorkflowStatus;
+use crate::codec::encode_pyobject;
+use crate::engine::{execute_python_task, PyWorkflowStatus};
 use crate::flow::PyWorkflow;
 
 /// Durable workflow engine with checkpointing, cancellation, and resume.
@@ -74,21 +74,13 @@ impl PyDurableEngine {
                 )
                 .await?;
 
+                let executor = make_task_executor(&registry);
                 let result = execute_continuation_with_checkpointing(
                     &continuation,
                     input_bytes,
                     &mut snapshot,
                     backend.as_ref(),
-                    &|task_id, task_input| {
-                        let reg = Arc::clone(&registry);
-                        let task_id = task_id.to_string();
-                        async move {
-                            Python::try_attach(|py| {
-                                execute_task_from_registry(py, &task_id, &task_input, reg.bind(py))
-                            })
-                            .unwrap_or_else(|| Err(anyhow::anyhow!("Failed to acquire Python GIL")))
-                        }
-                    },
+                    &executor,
                 )
                 .await;
 
@@ -125,28 +117,13 @@ impl PyDurableEngine {
                         mut snapshot,
                         input_bytes,
                     } => {
+                        let executor = make_task_executor(&registry);
                         let result = execute_continuation_with_checkpointing(
                             &continuation,
                             input_bytes,
                             &mut snapshot,
                             backend.as_ref(),
-                            &|task_id, task_input| {
-                                let reg = Arc::clone(&registry);
-                                let task_id = task_id.to_string();
-                                async move {
-                                    Python::try_attach(|py| {
-                                        execute_task_from_registry(
-                                            py,
-                                            &task_id,
-                                            &task_input,
-                                            reg.bind(py),
-                                        )
-                                    })
-                                    .unwrap_or_else(|| {
-                                        Err(anyhow::anyhow!("Failed to acquire Python GIL"))
-                                    })
-                                }
-                            },
+                            &executor,
                         )
                         .await;
 
@@ -190,27 +167,27 @@ fn backend_err_to_py(e: workflow_persistence::BackendError) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
 }
 
-/// Execute a Python task by looking it up in the registry and calling it.
-fn execute_task_from_registry(
-    py: Python<'_>,
-    task_id: &str,
-    input: &Bytes,
-    registry: &Bound<'_, PyDict>,
-) -> anyhow::Result<Bytes> {
-    let callable = registry
-        .get_item(task_id)?
-        .ok_or_else(|| anyhow::anyhow!("Task '{task_id}' not found in registry"))?;
-
-    let input_obj = decode_to_pyobject(py, input)?;
-    let result = callable.call1((input_obj,))?;
-
-    // Handle async (coroutine) — run synchronously via asyncio.run()
-    let result = if result.getattr("__await__").is_ok() {
-        let asyncio = py.import("asyncio")?;
-        asyncio.call_method1("run", (result,))?
-    } else {
-        result
-    };
-
-    Ok(encode_pyobject(py, &result)?)
+/// Build the task executor callback for `execute_continuation_with_checkpointing`.
+///
+/// Returns a closure that acquires the GIL and delegates to `execute_python_task`.
+fn make_task_executor(
+    registry: &Arc<Py<PyDict>>,
+) -> impl Fn(
+    &str,
+    Bytes,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Bytes>> + Send>>
+       + Send
+       + Sync
+       + '_ {
+    move |task_id: &str, task_input: Bytes| {
+        let reg = Arc::clone(registry);
+        let task_id = task_id.to_string();
+        Box::pin(async move {
+            Python::try_attach(|py| {
+                execute_python_task(py, &task_id, &task_input, reg.bind(py))
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
+            .unwrap_or_else(|| Err(anyhow::anyhow!("Failed to acquire Python GIL")))
+        })
+    }
 }

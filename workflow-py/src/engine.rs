@@ -152,7 +152,7 @@ impl PyWorkflowEngine {
 }
 
 /// Execute a Python task by calling it from the registry.
-fn execute_python_task(
+pub(crate) fn execute_python_task(
     py: Python<'_>,
     task_id: &str,
     input: &Bytes,
