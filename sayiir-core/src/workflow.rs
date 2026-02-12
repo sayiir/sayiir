@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-/// Generate a `find_duplicate_id` method for continuation-like enums.
+/// Generate a `find_duplicate_id` method for continuation-like enums
 ///
 macro_rules! impl_find_duplicate_id {
     ($name:ident, task_fields: { $($task_extra:tt)* }, delay_extra: { $($delay_extra:tt)* }, deref_branch: $deref:expr) => {
