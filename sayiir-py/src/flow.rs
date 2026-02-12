@@ -80,11 +80,17 @@ impl PyFlowBuilder {
     }
 
     /// Add a durable delay.
-    fn delay(&mut self, delay_id: String, seconds: f64) {
+    fn delay(&mut self, delay_id: String, seconds: f64) -> PyResult<()> {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "delay duration must be a finite non-negative number",
+            ));
+        }
         self.tasks.push(BuilderTask::Delay {
             delay_id,
             duration_secs: seconds,
         });
+        Ok(())
     }
 
     /// Add a fork with branches (each branch is a chain of tasks) and a join.

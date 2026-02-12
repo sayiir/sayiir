@@ -19,11 +19,13 @@ pub enum ExecutionPosition {
     /// Execution is at the start of a task.
     /// The task ID indicates which task should be executed next.
     AtTask { task_id: String },
-    /// Execution is waiting for fork branches to complete.
-    /// The map tracks which branches have completed (by branch ID).
+    /// Execution is parked at a fork because one or more branches hit a delay.
+    /// Completed branches have their results cached; delayed branches will
+    /// re-execute (skipping cached sub-tasks) once `wake_at` passes.
     AtFork {
-        branch_id: String,
+        fork_id: String,
         completed_branches: HashMap<String, TaskResult>,
+        wake_at: DateTime<Utc>,
     },
     /// Execution is at a join task, waiting for all branches.
     AtJoin {

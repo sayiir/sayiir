@@ -15,6 +15,37 @@ use std::sync::Arc;
 
 use crate::error::RuntimeError;
 
+/// Park a workflow at a durable delay node.
+///
+/// Computes `wake_at`, updates the snapshot position to `AtDelay`, stores the
+/// pass-through value, saves the snapshot, and returns `WorkflowError::Waiting`.
+pub(crate) async fn park_at_delay<B: PersistentBackend>(
+    id: &str,
+    duration: &std::time::Duration,
+    next: Option<&WorkflowContinuation>,
+    current_input: Bytes,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+) -> RuntimeError {
+    let now = chrono::Utc::now();
+    let wake_at = match chrono::Duration::from_std(*duration) {
+        Ok(d) => now + d,
+        Err(e) => return WorkflowError::ResumeError(e.to_string()).into(),
+    };
+    let next_task_id = next.map(|n| n.first_task_id().to_string());
+    snapshot.update_position(ExecutionPosition::AtDelay {
+        delay_id: id.to_string(),
+        entered_at: now,
+        wake_at,
+        next_task_id,
+    });
+    snapshot.mark_task_completed(id.to_string(), current_input);
+    if let Err(e) = backend.save_snapshot(snapshot).await {
+        return RuntimeError::from(e);
+    }
+    WorkflowError::Waiting { wake_at }.into()
+}
+
 /// Outcome of resolving a fork's join.
 enum JoinResolution<'a> {
     /// Continue with the join continuation and serialized input.
@@ -373,22 +404,21 @@ where
                 }
 
                 tracing::info!(delay_id = %id, ?duration, "parking workflow at delay");
-                let now = chrono::Utc::now();
-                let wake_at = now
-                    + chrono::Duration::from_std(*duration)
-                        .map_err(|e| WorkflowError::ResumeError(e.to_string()))?;
-                let next_task_id = next.as_ref().map(|n| n.first_task_id().to_string());
-                snapshot.update_position(ExecutionPosition::AtDelay {
-                    delay_id: id.clone(),
-                    entered_at: now,
-                    wake_at,
-                    next_task_id,
-                });
-                snapshot.mark_task_completed(id.clone(), current_input.clone());
-                backend.save_snapshot(snapshot).await?;
-                return Err(WorkflowError::Waiting { wake_at }.into());
+                return Err(park_at_delay(
+                    id,
+                    duration,
+                    next.as_deref(),
+                    current_input,
+                    snapshot,
+                    backend,
+                )
+                .await);
             }
-            WorkflowContinuation::Fork { branches, join, .. } => {
+            WorkflowContinuation::Fork {
+                id: fork_id,
+                branches,
+                join,
+            } => {
                 // Check for cancellation before starting fork
                 if backend
                     .check_and_cancel(&snapshot.instance_id, None)
@@ -415,32 +445,86 @@ where
                 if !all_branches_completed {
                     // Execute branches sequentially (GIL-friendly)
                     branch_results.clear();
+                    let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
 
                     for branch in branches {
                         let branch_id = branch.id().to_string();
 
                         // Check if this specific branch was already completed
-                        let output = if let Some(result) = snapshot.get_task_result(&branch_id) {
-                            result.output.clone()
-                        } else {
-                            let output = execute_branch_with_checkpointing(
-                                branch,
-                                current_input.clone(),
-                                &snapshot.instance_id,
-                                backend,
-                                execute_task,
-                            )
-                            .await?;
+                        if let Some(result) = snapshot.get_task_result(&branch_id) {
+                            branch_results.push((branch_id, result.output.clone()));
+                            continue;
+                        }
 
-                            // Save branch result to snapshot
-                            snapshot.mark_task_completed(branch_id.clone(), output.clone());
+                        match execute_branch_with_checkpointing(
+                            branch,
+                            current_input.clone(),
+                            &snapshot.instance_id,
+                            backend,
+                            execute_task,
+                        )
+                        .await
+                        {
+                            Ok(output) => {
+                                // Save branch result to snapshot and backend
+                                snapshot.mark_task_completed(branch_id.clone(), output.clone());
+                                backend
+                                    .save_task_result(
+                                        &snapshot.instance_id,
+                                        &branch_id,
+                                        output.clone(),
+                                    )
+                                    .await?;
+                                branch_results.push((branch_id, output));
+                            }
+                            Err(RuntimeError::Workflow(WorkflowError::Waiting { wake_at })) => {
+                                max_wake_at = Some(match max_wake_at {
+                                    Some(existing) => existing.max(wake_at),
+                                    None => wake_at,
+                                });
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+
+                    // If any branch is waiting, park at fork
+                    if let Some(wake_at) = max_wake_at {
+                        // Save completed branch results to backend so they survive
+                        // the snapshot reload below
+                        for (branch_id, output) in &branch_results {
                             backend
-                                .save_task_result(&snapshot.instance_id, &branch_id, output.clone())
+                                .save_task_result(&snapshot.instance_id, branch_id, output.clone())
                                 .await?;
-                            output
-                        };
+                        }
 
-                        branch_results.push((branch_id, output));
+                        // Reload snapshot from backend to include sub-task results
+                        // saved by branch execution
+                        let mut updated_snapshot =
+                            backend.load_snapshot(&snapshot.instance_id).await?;
+
+                        let completed_branches: std::collections::HashMap<String, TaskResult> =
+                            branch_results
+                                .iter()
+                                .map(|(id, output)| {
+                                    (
+                                        id.clone(),
+                                        TaskResult {
+                                            task_id: id.clone(),
+                                            output: output.clone(),
+                                        },
+                                    )
+                                })
+                                .collect();
+
+                        updated_snapshot.update_position(ExecutionPosition::AtFork {
+                            fork_id: fork_id.clone(),
+                            completed_branches,
+                            wake_at,
+                        });
+                        backend.save_snapshot(&updated_snapshot).await?;
+                        *snapshot = updated_snapshot;
+
+                        return Err(WorkflowError::Waiting { wake_at }.into());
                     }
 
                     // Check for cancellation after fork
@@ -492,6 +576,10 @@ where
 ///
 /// Used internally by [`execute_continuation_with_checkpointing`] for fork branches.
 /// Saves each task result to the backend individually (like `CheckpointingRunner::execute_branch_with_checkpoint`).
+///
+/// On resume after `AtFork`, the backend snapshot contains sub-task results from
+/// the previous execution. This function loads the snapshot to skip cached tasks
+/// and parks at delays instead of sleeping through them.
 async fn execute_branch_with_checkpointing<F, Fut, B>(
     continuation: &WorkflowContinuation,
     input: Bytes,
@@ -504,18 +592,26 @@ where
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
 {
+    // Load snapshot for checking cached results (populated on resume after AtFork)
+    let snapshot = backend.load_snapshot(instance_id).await?;
+
     let mut current = continuation;
     let mut current_input = input;
 
     loop {
         match current {
             WorkflowContinuation::Task { id, next, .. } => {
-                let output = execute_task(id, current_input).await?;
-
-                // Checkpoint: save task result directly to backend
-                backend
-                    .save_task_result(instance_id, id, output.clone())
-                    .await?;
+                // Skip if already cached in snapshot (resume case)
+                let output = if let Some(result) = snapshot.get_task_result(id) {
+                    result.output.clone()
+                } else {
+                    let output = execute_task(id, current_input).await?;
+                    // Checkpoint: save task result directly to backend
+                    backend
+                        .save_task_result(instance_id, id, output.clone())
+                        .await?;
+                    output
+                };
 
                 match next {
                     Some(next_continuation) => {
@@ -526,14 +622,34 @@ where
                 }
             }
             WorkflowContinuation::Delay { id, duration, next } => {
-                tracing::debug!(delay_id = %id, ?duration, "sleeping through delay in branch");
-                tokio::time::sleep(*duration).await;
-                match next {
-                    Some(next_cont) => {
-                        current = next_cont;
+                // Skip if pass-through was already saved (resume case)
+                if let Some(result) = snapshot.get_task_result(id) {
+                    tracing::debug!(delay_id = %id, "delay already completed in branch, skipping");
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = result.output.clone();
+                            continue;
+                        }
+                        None => return Ok(result.output.clone()),
                     }
-                    None => return Ok(current_input),
                 }
+
+                // Park at delay: save pass-through and return Waiting
+                tracing::info!(delay_id = %id, ?duration, "parking branch at delay");
+                let now = chrono::Utc::now();
+                let wake_at = match chrono::Duration::from_std(*duration) {
+                    Ok(d) => now + d,
+                    Err(e) => {
+                        return Err(
+                            sayiir_core::error::WorkflowError::ResumeError(e.to_string()).into(),
+                        );
+                    }
+                };
+                backend
+                    .save_task_result(instance_id, id, current_input)
+                    .await?;
+                return Err(sayiir_core::error::WorkflowError::Waiting { wake_at }.into());
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
                 // Nested fork within a branch: execute sequentially
@@ -705,6 +821,10 @@ where
                     position: ExecutionPosition::AtDelay { delay_id, .. },
                     ..
                 } => delay_id.clone(),
+                WorkflowSnapshotState::InProgress {
+                    position: ExecutionPosition::AtFork { fork_id, .. },
+                    ..
+                } => fork_id.clone(),
                 _ => String::new(),
             };
             tracing::info!(
@@ -1773,5 +1893,331 @@ mod tests {
         // Snapshot should still be in-progress (not completed or failed)
         let loaded = backend.load_snapshot("inst-1").await.unwrap();
         assert!(loaded.state.is_in_progress());
+    }
+
+    // ========================================================================
+    // Fork with delay (durable delays inside branches)
+    // ========================================================================
+
+    /// Helper: build a fork with a delay inside one branch.
+    ///
+    /// Structure: Fork(branch_a: task, branch_b: task → delay → task) → join
+    fn fork_with_delay_in_branch() -> WorkflowContinuation {
+        let branch_a = Arc::new(stub_node("branch_a", None));
+
+        let after_delay = stub_node("after_delay", None);
+        let delay = WorkflowContinuation::Delay {
+            id: "branch_delay".into(),
+            duration: std::time::Duration::from_secs(3600),
+            next: Some(Box::new(after_delay)),
+        };
+        let branch_b = Arc::new(stub_node("before_delay", Some(Box::new(delay))));
+
+        let join_task = stub_node("join", None);
+
+        WorkflowContinuation::Fork {
+            id: "fork".into(),
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: Some(Box::new(join_task)),
+        }
+    }
+
+    fn make_fork_callback() -> impl Fn(
+        &str,
+        Bytes,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Bytes, BoxError>> + Send>,
+    > + Send
+    + Sync {
+        |id: &str, input: Bytes| {
+            let id = id.to_string();
+            Box::pin(async move {
+                let val: u32 = serde_json::from_slice(&input).unwrap_or(0);
+                match id.as_str() {
+                    "branch_a" => Ok(encode_u32(val * 2)),
+                    "before_delay" => Ok(encode_u32(val + 100)),
+                    "after_delay" => Ok(encode_u32(val + 1)),
+                    "join" => {
+                        let branches = sayiir_core::task::deserialize_named_branch_results(&input)?;
+                        let a: u32 = serde_json::from_slice(&branches["branch_a"])?;
+                        // branch_b's ID is "before_delay" (first task in the chain)
+                        let b: u32 = serde_json::from_slice(&branches["before_delay"])?;
+                        Ok(encode_u32(a + b))
+                    }
+                    other => Err(format!("Unknown task: {other}").into()),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fork_with_delay_parks_at_fork() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(10);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let fork = fork_with_delay_in_branch();
+        let callback = make_fork_callback();
+
+        let result = execute_continuation_with_checkpointing(
+            &fork,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await;
+
+        // Should return Waiting because branch_b hits a delay
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RuntimeError::Workflow(WorkflowError::Waiting { .. })
+        ));
+
+        // Snapshot should be at AtFork position
+        match &snapshot.state {
+            WorkflowSnapshotState::InProgress { position, .. } => match position {
+                ExecutionPosition::AtFork {
+                    fork_id,
+                    completed_branches,
+                    wake_at,
+                } => {
+                    assert_eq!(fork_id, "fork");
+                    // branch_a completed, branch_b is waiting
+                    assert_eq!(completed_branches.len(), 1);
+                    assert!(completed_branches.contains_key("branch_a"));
+                    assert!(*wake_at > chrono::Utc::now());
+                }
+                other => panic!("Expected AtFork, got {other:?}"),
+            },
+            other => panic!("Expected InProgress, got {other:?}"),
+        }
+
+        // branch_a result should be cached
+        assert!(snapshot.get_task_result("branch_a").is_some());
+        // before_delay task result should be cached (saved during branch execution)
+        assert!(snapshot.get_task_result("before_delay").is_some());
+        // delay pass-through should be cached
+        assert!(snapshot.get_task_result("branch_delay").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_fork_with_delay_resumes_after_expiry() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(10);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Use a very short delay so it expires immediately
+        let branch_a = Arc::new(stub_node("branch_a", None));
+        let after_delay = stub_node("after_delay", None);
+        let delay = WorkflowContinuation::Delay {
+            id: "branch_delay".into(),
+            duration: std::time::Duration::from_millis(1),
+            next: Some(Box::new(after_delay)),
+        };
+        let branch_b = Arc::new(stub_node("before_delay", Some(Box::new(delay))));
+        let join_task = stub_node("join", None);
+        let fork = WorkflowContinuation::Fork {
+            id: "fork".into(),
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: Some(Box::new(join_task)),
+        };
+
+        let callback = make_fork_callback();
+
+        // First execution — parks at fork
+        let result = execute_continuation_with_checkpointing(
+            &fork,
+            input.clone(),
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await;
+        assert!(matches!(
+            result.unwrap_err(),
+            RuntimeError::Workflow(WorkflowError::Waiting { .. })
+        ));
+
+        // Wait for delay to expire
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Reload snapshot from backend (simulates what resume() does)
+        snapshot = backend.load_snapshot("inst-1").await.unwrap();
+
+        // Re-execute — cached tasks and expired delay should be skipped
+        let result = execute_continuation_with_checkpointing(
+            &fork,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Expected Ok after delay expired, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fork_with_delays_in_multiple_branches() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(5);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Both branches have delays
+        let after_delay_a = stub_node("after_a", None);
+        let delay_a = WorkflowContinuation::Delay {
+            id: "delay_a".into(),
+            duration: std::time::Duration::from_secs(100),
+            next: Some(Box::new(after_delay_a)),
+        };
+        let branch_a = Arc::new(delay_a);
+
+        let after_delay_b = stub_node("after_b", None);
+        let delay_b = WorkflowContinuation::Delay {
+            id: "delay_b".into(),
+            duration: std::time::Duration::from_secs(200),
+            next: Some(Box::new(after_delay_b)),
+        };
+        let branch_b = Arc::new(delay_b);
+
+        let join_task = stub_node("join", None);
+        let fork = WorkflowContinuation::Fork {
+            id: "fork".into(),
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: Some(Box::new(join_task)),
+        };
+
+        let callback = |id: &str, input: Bytes| {
+            let id = id.to_string();
+            async move {
+                match id.as_str() {
+                    "after_a" | "after_b" => Ok(input),
+                    "join" => Ok(input),
+                    other => Err(format!("Unknown task: {other}").into()),
+                }
+            }
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &fork,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await;
+
+        // Should return Waiting
+        assert!(matches!(
+            result.unwrap_err(),
+            RuntimeError::Workflow(WorkflowError::Waiting { .. })
+        ));
+
+        // Should be at AtFork with NO completed branches (both waited)
+        match &snapshot.state {
+            WorkflowSnapshotState::InProgress { position, .. } => match position {
+                ExecutionPosition::AtFork {
+                    completed_branches,
+                    wake_at,
+                    ..
+                } => {
+                    assert!(
+                        completed_branches.is_empty(),
+                        "No branches completed, both hit delays"
+                    );
+                    // wake_at should be the max of the two delays (200s)
+                    let min_expected = chrono::Utc::now() + chrono::Duration::seconds(150);
+                    assert!(
+                        *wake_at > min_expected,
+                        "wake_at should be ~200s in the future, got {:?}",
+                        wake_at
+                    );
+                }
+                other => panic!("Expected AtFork, got {other:?}"),
+            },
+            other => panic!("Expected InProgress, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fork_normal_branch_completes_delayed_branch_parks() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(10);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // branch_a: normal task (completes immediately)
+        // branch_b: delay (parks)
+        let branch_a = Arc::new(stub_node("branch_a", None));
+        let delay = WorkflowContinuation::Delay {
+            id: "branch_delay".into(),
+            duration: std::time::Duration::from_secs(3600),
+            next: None,
+        };
+        let branch_b = Arc::new(delay);
+
+        let join_task = stub_node("join", None);
+        let fork = WorkflowContinuation::Fork {
+            id: "fork".into(),
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: Some(Box::new(join_task)),
+        };
+
+        let callback = |id: &str, input: Bytes| {
+            let id = id.to_string();
+            async move {
+                match id.as_str() {
+                    "branch_a" => Ok(encode_u32(decode_u32(&input) * 2)),
+                    "join" => Ok(input),
+                    other => Err(format!("Unknown task: {other}").into()),
+                }
+            }
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &fork,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            RuntimeError::Workflow(WorkflowError::Waiting { .. })
+        ));
+
+        // branch_a should have completed, branch_b is waiting
+        match &snapshot.state {
+            WorkflowSnapshotState::InProgress { position, .. } => match position {
+                ExecutionPosition::AtFork {
+                    completed_branches, ..
+                } => {
+                    assert_eq!(completed_branches.len(), 1);
+                    assert!(completed_branches.contains_key("branch_a"));
+                    let result = &completed_branches["branch_a"];
+                    assert_eq!(decode_u32(&result.output), 20); // 10 * 2
+                }
+                other => panic!("Expected AtFork, got {other:?}"),
+            },
+            other => panic!("Expected InProgress, got {other:?}"),
+        }
     }
 }

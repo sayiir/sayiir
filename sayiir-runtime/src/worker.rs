@@ -572,8 +572,8 @@ where
     /// from the continuation structure. This method returns the task ID if found.
     fn find_task_id_in_continuation(continuation: &WorkflowContinuation, task_id: &str) -> bool {
         match continuation {
-            WorkflowContinuation::Task { id, .. } => id == task_id,
-            WorkflowContinuation::Delay { id, next, .. } => {
+            WorkflowContinuation::Task { id, next, .. }
+            | WorkflowContinuation::Delay { id, next, .. } => {
                 if id == task_id {
                     return true;
                 }
