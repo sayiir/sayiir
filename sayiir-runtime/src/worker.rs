@@ -19,12 +19,10 @@ use sayiir_core::codec::sealed;
 use sayiir_core::context::with_context;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::registry::TaskRegistry;
-use sayiir_core::snapshot::{
-    CancellationRequest, ExecutionPosition, PauseRequest, WorkflowSnapshot,
-};
+use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use sayiir_persistence::PersistentBackend;
+use sayiir_persistence::{PersistentBackend, TaskClaimStore};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -40,7 +38,7 @@ struct ActiveTaskClaim<'a, B> {
     worker_id: String,
 }
 
-impl<B: PersistentBackend> ActiveTaskClaim<'_, B> {
+impl<B: TaskClaimStore> ActiveTaskClaim<'_, B> {
     /// Release the claim, propagating backend errors.
     async fn release(self) -> Result<(), crate::error::RuntimeError> {
         self.backend
@@ -99,7 +97,7 @@ pub struct PooledWorker<B> {
 
 impl<B> PooledWorker<B>
 where
-    B: PersistentBackend + 'static,
+    B: PersistentBackend + TaskClaimStore + 'static,
 {
     /// Create a new worker node.
     ///
@@ -165,7 +163,11 @@ where
         cancelled_by: Option<String>,
     ) -> Result<(), crate::error::RuntimeError> {
         self.backend
-            .request_cancellation(instance_id, CancellationRequest::new(reason, cancelled_by))
+            .store_signal(
+                instance_id,
+                SignalKind::Cancel,
+                SignalRequest::new(reason, cancelled_by),
+            )
             .await?;
 
         Ok(())
@@ -192,7 +194,11 @@ where
         paused_by: Option<String>,
     ) -> Result<(), crate::error::RuntimeError> {
         self.backend
-            .request_pause(instance_id, PauseRequest::new(reason, paused_by))
+            .store_signal(
+                instance_id,
+                SignalKind::Pause,
+                SignalRequest::new(reason, paused_by),
+            )
             .await?;
 
         Ok(())

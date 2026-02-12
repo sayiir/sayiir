@@ -16,7 +16,7 @@ use sayiir_core::codec::sealed;
 use sayiir_core::context::{WorkflowContext, with_context};
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{
-    CancellationRequest, ExecutionPosition, PauseRequest, WorkflowSnapshot, WorkflowSnapshotState,
+    ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot, WorkflowSnapshotState,
 };
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
@@ -101,7 +101,11 @@ where
         cancelled_by: Option<String>,
     ) -> Result<(), RuntimeError> {
         self.backend
-            .request_cancellation(instance_id, CancellationRequest::new(reason, cancelled_by))
+            .store_signal(
+                instance_id,
+                SignalKind::Cancel,
+                SignalRequest::new(reason, cancelled_by),
+            )
             .await?;
 
         Ok(())
@@ -121,7 +125,11 @@ where
         paused_by: Option<String>,
     ) -> Result<(), RuntimeError> {
         self.backend
-            .request_pause(instance_id, PauseRequest::new(reason, paused_by))
+            .store_signal(
+                instance_id,
+                SignalKind::Pause,
+                SignalRequest::new(reason, paused_by),
+            )
             .await?;
         Ok(())
     }
@@ -683,6 +691,7 @@ mod tests {
     use sayiir_core::task::BranchOutputs;
     use sayiir_core::workflow::WorkflowBuilder;
     use sayiir_persistence::InMemoryBackend;
+    use sayiir_persistence::{SignalStore, SnapshotStore};
 
     fn ctx() -> WorkflowContext<JsonCodec, ()> {
         WorkflowContext::new("test-workflow", Arc::new(JsonCodec), Arc::new(()))
@@ -939,7 +948,7 @@ mod tests {
         // Verify cancellation request was stored
         let req = runner
             .backend()
-            .get_cancellation_request("inst-cancel")
+            .get_signal("inst-cancel", SignalKind::Cancel)
             .await
             .unwrap();
         assert!(req.is_some());

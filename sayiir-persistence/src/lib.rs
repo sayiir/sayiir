@@ -4,18 +4,24 @@
 //! execution state, enabling distributed execution with checkpoint/restore
 //! capabilities.
 //!
-//! # Architecture
+//! # Trait Hierarchy
 //!
-//! The persistence layer is built around two core concepts:
+//! The persistence layer is built around focused sub-traits:
 //!
-//! - **PersistentBackend**: A trait that abstracts the storage mechanism
-//!   for workflow snapshots.
-//! - **InMemoryBackend**: A reference implementation using an in-memory HashMap.
+//! - **[`SnapshotStore`]**: Core CRUD for workflow snapshots (5 methods).
+//! - **[`SignalStore`]**: Cancel + pause signal primitives with default composite
+//!   implementations (3 required + 3 default methods).
+//! - **[`TaskClaimStore`]**: Distributed task claiming (4 methods, opt-in).
+//! - **[`PersistentBackend`]**: Supertrait = `SnapshotStore + SignalStore`,
+//!   blanket-implemented so backends never need to impl it directly.
+//!
+//! A minimal backend only needs **8 methods** (`SnapshotStore` + 3 `SignalStore`
+//! primitives) to satisfy `PersistentBackend`.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use sayiir_persistence::{InMemoryBackend, PersistentBackend};
+//! use sayiir_persistence::{InMemoryBackend, PersistentBackend, SnapshotStore};
 //! use sayiir_core::snapshot::WorkflowSnapshot;
 //!
 //! // Create a backend (could be Redis, PostgreSQL, etc.)
@@ -28,36 +34,9 @@
 //! // Load it back
 //! let loaded = backend.load_snapshot("instance-123").await?;
 //! ```
-//!
-//! # Implementing Custom Backends
-//!
-//! To implement a custom persistence backend (e.g., Redis, PostgreSQL):
-//!
-//! 1. Add `sayiir-persistence` as a dependency
-//! 2. Implement the `PersistentBackend` trait
-//! 3. Handle snapshot serialization/deserialization
-//! 4. Implement atomic task claiming for distributed execution
-//!
-//! ```rust,ignore
-//! use sayiir_persistence::{PersistentBackend, BackendError};
-//! use sayiir_core::snapshot::WorkflowSnapshot;
-//! use async_trait::async_trait;
-//!
-//! pub struct RedisBackend {
-//!     // your Redis client
-//! }
-//!
-//! #[async_trait]
-//! impl PersistentBackend for RedisBackend {
-//!     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
-//!         // serialize and save to Redis
-//!     }
-//!     // ... implement other methods
-//! }
-//! ```
 
 mod backend;
 mod in_memory;
 
-pub use backend::{BackendError, PersistentBackend};
+pub use backend::{BackendError, PersistentBackend, SignalStore, SnapshotStore, TaskClaimStore};
 pub use in_memory::InMemoryBackend;

@@ -103,6 +103,81 @@ impl PauseRequest {
     }
 }
 
+/// Kind of signal that can be sent to a running workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SignalKind {
+    /// Request cancellation.
+    Cancel,
+    /// Request pause.
+    Pause,
+}
+
+/// A unified signal request that covers both cancel and pause.
+///
+/// Old `CancellationRequest`/`PauseRequest` types remain for snapshot state
+/// serialization. `SignalRequest` is the type used by the `SignalStore` trait.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalRequest {
+    /// Optional reason for the signal.
+    pub reason: Option<String>,
+    /// Optional identifier of who sent the signal.
+    pub requested_by: Option<String>,
+    /// Timestamp when the signal was sent.
+    pub requested_at: DateTime<Utc>,
+}
+
+impl SignalRequest {
+    /// Create a new signal request with the current timestamp.
+    #[must_use]
+    pub fn new(reason: Option<String>, requested_by: Option<String>) -> Self {
+        Self {
+            reason,
+            requested_by,
+            requested_at: Utc::now(),
+        }
+    }
+}
+
+impl From<CancellationRequest> for SignalRequest {
+    fn from(r: CancellationRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
+impl From<PauseRequest> for SignalRequest {
+    fn from(r: PauseRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
+impl From<SignalRequest> for CancellationRequest {
+    fn from(r: SignalRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
+impl From<SignalRequest> for PauseRequest {
+    fn from(r: SignalRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
 /// State of a workflow snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSnapshotState {

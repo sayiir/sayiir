@@ -1012,7 +1012,7 @@ mod tests {
     use crate::serialization::JsonCodec;
     use sayiir_core::branch_results::NamedBranchResults;
     use sayiir_core::task::to_core_task;
-    use sayiir_persistence::InMemoryBackend;
+    use sayiir_persistence::{InMemoryBackend, SignalStore, SnapshotStore};
     use std::sync::Arc;
 
     fn codec() -> Arc<JsonCodec> {
@@ -1683,9 +1683,10 @@ mod tests {
 
         // Request cancellation before execution
         backend
-            .request_cancellation(
+            .store_signal(
                 "inst-1",
-                sayiir_core::snapshot::CancellationRequest::new(
+                sayiir_core::snapshot::SignalKind::Cancel,
+                sayiir_core::snapshot::SignalRequest::new(
                     Some("test cancel".into()),
                     Some("tester".into()),
                 ),
@@ -1956,9 +1957,10 @@ mod tests {
 
         // Request cancellation
         backend
-            .request_cancellation(
+            .store_signal(
                 "inst-1",
-                sayiir_core::snapshot::CancellationRequest::new(
+                sayiir_core::snapshot::SignalKind::Cancel,
+                sayiir_core::snapshot::SignalRequest::new(
                     Some("test cancel".into()),
                     Some("tester".into()),
                 ),
