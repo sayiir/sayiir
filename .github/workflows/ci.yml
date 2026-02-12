@@ -58,7 +58,7 @@ jobs:
         run: uvx ruff format --check sayiir-python/
 
       - name: Run pyright
-        run: uvx pyright sayiir-python/
+        run: uvx pyright --project sayiir-python/
 
   python:
     name: Python Binding
