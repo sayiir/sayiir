@@ -185,4 +185,35 @@ mod tests {
         let status = runner.run(&workflow, 1u32).await.unwrap();
         assert!(matches!(status, WorkflowStatus::Completed));
     }
+
+    // ========================================================================
+    // Delay tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delay_short_completes() {
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("short_wait", std::time::Duration::from_millis(1))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        let runner = InProcessRunner;
+        let status = runner.run(&workflow, 10u32).await.unwrap();
+        // 10 + 1 = 11, delay (passthrough 11), 11 * 2 = 22
+        assert!(matches!(status, WorkflowStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn test_delay_only_completes() {
+        let workflow = WorkflowBuilder::new(ctx())
+            .delay("only_wait", std::time::Duration::from_millis(1))
+            .build()
+            .unwrap();
+
+        let runner = InProcessRunner;
+        let status = runner.run(&workflow, 42u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+    }
 }

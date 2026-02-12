@@ -56,6 +56,13 @@ pub enum WorkflowError {
     /// A named branch was not found in the outputs.
     #[error("Branch '{0}' not found")]
     BranchNotFound(String),
+
+    /// The workflow is waiting for a delay to expire.
+    #[error("Workflow waiting until {wake_at}")]
+    Waiting {
+        /// When the delay expires.
+        wake_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 impl WorkflowError {

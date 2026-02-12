@@ -20,11 +20,12 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | Pluggable codecs (rkyv zero-copy, JSON, custom) | Stable |
 | Task registry for serializable workflows | Stable |
 | Workflow serialization with definition hash validation | Stable |
+| Durable delay/timer primitives (`sleep` between steps) | Stable |
 | Panic-safe execution | Stable |
 | `WorkflowContext` with task-local metadata access | Stable |
 | InMemory backend (development/testing) | Stable |
 
-**Python Bindings (Beta)**
+**Python Bindings (Stable)**
 
 | Feature | Status |
 |---|---|
@@ -37,12 +38,13 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | Pydantic integration (automatic validation/serialization) | Done |
 | Type stubs (`.pyi`) and PEP 561 compliance | Done |
 | Async task support (via `asyncio.run()`) | Done |
+| Durable delays (`.delay()` with `timedelta` support) | Done |
 | `InMemoryBackend` exposed to Python | Done |
 | `WorkflowStatus` with error/cancellation details | Done |
 
 ---
 
-## Phase 0 — Python Bindings Polish *(current focus)*
+## Phase 0 — Python Bindings Polish
 
 The Python SDK is the first language binding and the template for all future bindings. Getting this right matters.
 
@@ -112,13 +114,13 @@ Every competitor has this. Table stakes.
 
 The features that unlock the remaining 80% of use cases: anything that waits for external input or time.
 
-### Durable Sleep / Timers
+### Durable Sleep / Timers ✅
 
 Pause a workflow for minutes, hours, or days — surviving process restarts.
 
-- [ ] `sleep(duration)` as a first-class workflow primitive
-- [ ] Timer persisted to backend, not held in memory
-- [ ] Resume after timer expiry on any worker
+- [x] `delay(duration)` as a first-class workflow primitive (Rust + Python)
+- [x] Timer persisted to backend, not held in memory
+- [x] Resume after timer expiry on any worker
 
 ### Signals / External Events
 
@@ -187,6 +189,24 @@ Available → Reserved (short TTL) → Executing (heartbeat) → Completed
 ### Worker Affinity / Task Routing
 
 Route specific task types to specific worker pools (GPU tasks to GPU workers, etc.).
+
+### Eternal Workflows (ContinueAsNew)
+
+Long-running workflows that loop indefinitely (monitoring, polling, recurring processing) without unbounded state growth.
+
+- [ ] `continue_as_new(input)` primitive — restart the workflow with fresh state
+- [ ] Completed tasks from previous iteration are discarded, keeping snapshot size constant
+- [ ] Iteration count and metadata carried forward
+- [ ] Note: less critical than in replay-based engines (Sayiir has no growing history), but still needed for workflows that accumulate task results over thousands of iterations
+
+### Durable Entities (Actor Model)
+
+Stateful, addressable entities with durable state — virtual actor pattern (comparable to Azure Durable Entities, Orleans grains).
+
+- [ ] `Entity` trait with typed state and operations
+- [ ] Addressable by entity ID — send operations from workflows or external callers
+- [ ] State persisted via `PersistentBackend` (same pluggable storage)
+- [ ] Enables: shopping carts, counters, aggregators, device twins, session state
 
 ### Workflow Versioning
 

@@ -16,14 +16,16 @@ use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
 use sayiir_core::context::{WorkflowContext, with_context};
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
+use sayiir_core::snapshot::{
+    CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
+};
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
 use crate::execution::{
-    continuation_id, finalize_execution, get_resume_input, serialize_branch_results,
+    finalize_execution, get_resume_input, park_at_delay, serialize_branch_results,
 };
 
 /// A single-process workflow runner with checkpointing for crash recovery.
@@ -187,7 +189,7 @@ where
     /// - The snapshot is not found
     /// - The workflow definition hash doesn't match (workflow definition changed)
     /// - The workflow cannot be resumed
-    #[allow(clippy::needless_lifetimes)]
+    #[allow(clippy::needless_lifetimes, clippy::too_many_lines)]
     pub async fn resume<'w, C, Input, M>(
         &self,
         workflow: &'w Workflow<C, Input, M>,
@@ -213,6 +215,104 @@ where
         // Check if already in terminal state
         if let Some(status) = snapshot.state.as_terminal_status() {
             return Ok(status);
+        }
+
+        // Extract delay/fork fields into owned locals before any mutation.
+        let delay_info = if let WorkflowSnapshotState::InProgress {
+            position:
+                ExecutionPosition::AtDelay {
+                    wake_at,
+                    delay_id,
+                    next_task_id,
+                    ..
+                },
+            ..
+        } = &snapshot.state
+        {
+            Some((*wake_at, delay_id.clone(), next_task_id.clone()))
+        } else {
+            None
+        };
+
+        if let Some((wake_at, delay_id, next_task_id)) = delay_info {
+            tracing::debug!(instance_id, %delay_id, "checking cancellation at delay on resume");
+            if self
+                .backend
+                .check_and_cancel(&snapshot.instance_id, Some(&delay_id))
+                .await?
+            {
+                let snapshot = self.backend.load_snapshot(instance_id).await?;
+                let (reason, cancelled_by) = snapshot
+                    .state
+                    .cancellation_details()
+                    .unwrap_or((None, None));
+                return Ok(WorkflowStatus::Cancelled {
+                    reason,
+                    cancelled_by,
+                });
+            }
+
+            if chrono::Utc::now() < wake_at {
+                tracing::debug!(instance_id, %delay_id, %wake_at, "delay not yet expired");
+                return Ok(WorkflowStatus::Waiting { wake_at, delay_id });
+            }
+            tracing::info!(instance_id, %delay_id, "delay expired, advancing execution");
+            if let Some(next_id) = next_task_id {
+                snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
+            } else {
+                tracing::info!(instance_id, %delay_id, "delay was last node, completing workflow");
+                let output = snapshot
+                    .get_task_result_bytes(&delay_id)
+                    .unwrap_or_default();
+                snapshot.mark_completed(output);
+                self.backend.save_snapshot(&snapshot).await?;
+                return Ok(WorkflowStatus::Completed);
+            }
+            self.backend.save_snapshot(&snapshot).await?;
+        }
+
+        // Handle AtFork: branches hit delays and the fork was parked.
+        let fork_info = if let WorkflowSnapshotState::InProgress {
+            position: ExecutionPosition::AtFork {
+                fork_id, wake_at, ..
+            },
+            ..
+        } = &snapshot.state
+        {
+            Some((*wake_at, fork_id.clone()))
+        } else {
+            None
+        };
+
+        if let Some((wake_at, fork_id)) = fork_info {
+            tracing::debug!(instance_id, %fork_id, "checking cancellation at fork on resume");
+            if self
+                .backend
+                .check_and_cancel(&snapshot.instance_id, Some(&fork_id))
+                .await?
+            {
+                let snapshot = self.backend.load_snapshot(instance_id).await?;
+                let (reason, cancelled_by) = snapshot
+                    .state
+                    .cancellation_details()
+                    .unwrap_or((None, None));
+                return Ok(WorkflowStatus::Cancelled {
+                    reason,
+                    cancelled_by,
+                });
+            }
+
+            if chrono::Utc::now() < wake_at {
+                tracing::debug!(instance_id, %fork_id, %wake_at, "fork delays not yet expired");
+                return Ok(WorkflowStatus::Waiting {
+                    wake_at,
+                    delay_id: fork_id,
+                });
+            }
+            tracing::info!(instance_id, %fork_id, "fork delays expired, resuming execution");
+            // Fall through to general resume code — the fork handler in
+            // execute_with_checkpointing will re-execute branches, skipping
+            // cached sub-tasks and expired delays.
         }
 
         // Resume execution
@@ -308,7 +408,42 @@ where
                 WorkflowContinuation::Task { func: None, id, .. } => {
                     return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                 }
-                WorkflowContinuation::Fork { branches, join } => {
+                WorkflowContinuation::Delay { id, duration, next } => {
+                    tracing::debug!(delay_id = %id, "checking cancellation before delay");
+                    if backend
+                        .check_and_cancel(&snapshot.instance_id, Some(id))
+                        .await?
+                    {
+                        return Err(WorkflowError::cancelled().into());
+                    }
+
+                    if snapshot.get_task_result(id).is_some() {
+                        tracing::debug!(delay_id = %id, "delay already completed, skipping");
+                        match next {
+                            Some(n) => {
+                                current = n;
+                                continue;
+                            }
+                            None => return Ok(current_input),
+                        }
+                    }
+
+                    tracing::info!(delay_id = %id, ?duration, "parking workflow at delay");
+                    return Err(park_at_delay(
+                        id,
+                        duration,
+                        next.as_deref(),
+                        current_input,
+                        snapshot,
+                        backend.as_ref(),
+                    )
+                    .await);
+                }
+                WorkflowContinuation::Fork {
+                    id: fork_id,
+                    branches,
+                    join,
+                } => {
                     // Check for cancellation before starting fork
                     if backend
                         .check_and_cancel(&snapshot.instance_id, None)
@@ -322,7 +457,7 @@ where
                     let mut branch_results = Vec::with_capacity(branches.len());
 
                     for branch in branches {
-                        let branch_id = continuation_id(branch).to_string();
+                        let branch_id = branch.id().to_string();
 
                         if let Some(result) = snapshot.get_task_result(&branch_id) {
                             branch_results.push((branch_id, result.output.clone()));
@@ -340,7 +475,7 @@ where
                         let instance_id = snapshot.instance_id.clone();
 
                         for branch in branches {
-                            let branch_id = continuation_id(branch).to_string();
+                            let branch_id = branch.id().to_string();
 
                             if let Some(result) = snapshot.get_task_result(&branch_id) {
                                 // Already completed — collect directly, no spawn needed
@@ -363,12 +498,75 @@ where
                         }
 
                         if !branch_handles.is_empty() {
-                            let new_results: Vec<(String, Bytes)> =
-                                future::try_join_all(branch_handles)
-                                    .await?
-                                    .into_iter()
-                                    .collect::<Result<Vec<_>, RuntimeError>>()?;
-                            branch_results.extend(new_results);
+                            // Use join_all to wait for all branches (not try_join_all)
+                            // so we can collect completed results even when some
+                            // branches return Waiting.
+                            let all_results = future::join_all(branch_handles).await;
+
+                            let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
+
+                            for result in all_results {
+                                match result {
+                                    Ok(Ok((branch_id, output))) => {
+                                        branch_results.push((branch_id, output));
+                                    }
+                                    Ok(Err(RuntimeError::Workflow(WorkflowError::Waiting {
+                                        wake_at,
+                                    }))) => {
+                                        max_wake_at = Some(match max_wake_at {
+                                            Some(existing) => existing.max(wake_at),
+                                            None => wake_at,
+                                        });
+                                    }
+                                    Ok(Err(e)) => return Err(e),
+                                    Err(join_err) => return Err(RuntimeError::from(join_err)),
+                                }
+                            }
+
+                            // If any branch is waiting, park at fork
+                            if let Some(wake_at) = max_wake_at {
+                                // Save completed branch results to backend
+                                for (branch_id, output) in &branch_results {
+                                    backend
+                                        .save_task_result(
+                                            &snapshot.instance_id,
+                                            branch_id,
+                                            output.clone(),
+                                        )
+                                        .await?;
+                                }
+
+                                // Reload snapshot from backend to include sub-task
+                                // results saved by branch execution
+                                let mut updated_snapshot =
+                                    backend.load_snapshot(&snapshot.instance_id).await?;
+
+                                let completed_branches: std::collections::HashMap<
+                                    String,
+                                    sayiir_core::snapshot::TaskResult,
+                                > = branch_results
+                                    .iter()
+                                    .map(|(id, output)| {
+                                        (
+                                            id.clone(),
+                                            sayiir_core::snapshot::TaskResult {
+                                                task_id: id.clone(),
+                                                output: output.clone(),
+                                            },
+                                        )
+                                    })
+                                    .collect();
+
+                                updated_snapshot.update_position(ExecutionPosition::AtFork {
+                                    fork_id: fork_id.clone(),
+                                    completed_branches,
+                                    wake_at,
+                                });
+                                backend.save_snapshot(&updated_snapshot).await?;
+                                *snapshot = updated_snapshot;
+
+                                return Err(WorkflowError::Waiting { wake_at }.into());
+                            }
                         }
 
                         // Check for cancellation after fork
@@ -464,6 +662,10 @@ where
     ///
     /// Unlike `execute_with_checkpointing`, this doesn't update position tracking
     /// (branches run independently). It saves each task result directly to the backend.
+    ///
+    /// On resume after `AtFork`, the backend snapshot contains sub-task results from
+    /// the previous execution. This function loads the snapshot to skip cached tasks
+    /// and parks at delays instead of sleeping through them.
     #[allow(clippy::manual_async_fn)]
     fn execute_branch_with_checkpoint<C, M>(
         continuation: &WorkflowContinuation,
@@ -478,22 +680,29 @@ where
         M: Send + Sync + 'static,
     {
         async move {
+            // Load snapshot for checking cached results (populated on resume after AtFork)
+            let snapshot = backend.load_snapshot(&instance_id).await?;
+
             let mut current = continuation;
             let mut current_input = input;
 
             loop {
                 match current {
-                    WorkflowContinuation::Task {
-                        id,
-                        func: Some(func),
-                        next,
-                    } => {
-                        let output = func.run(current_input).await?;
-
-                        // Checkpoint: save task result directly to backend
-                        backend
-                            .save_task_result(&instance_id, id, output.clone())
-                            .await?;
+                    WorkflowContinuation::Task { id, func, next } => {
+                        // Skip if already cached in snapshot (resume case)
+                        let output = if let Some(result) = snapshot.get_task_result(id) {
+                            result.output.clone()
+                        } else {
+                            let func = func
+                                .as_ref()
+                                .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
+                            let output = func.run(current_input).await?;
+                            // Checkpoint: save task result directly to backend
+                            backend
+                                .save_task_result(&instance_id, id, output.clone())
+                                .await?;
+                            output
+                        };
 
                         match next {
                             Some(next_continuation) => {
@@ -503,15 +712,38 @@ where
                             None => return Ok(output),
                         }
                     }
-                    WorkflowContinuation::Task { func: None, id, .. } => {
-                        return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
+                    WorkflowContinuation::Delay { id, duration, next } => {
+                        // Skip if pass-through was already saved (resume case)
+                        if let Some(result) = snapshot.get_task_result(id) {
+                            tracing::debug!(delay_id = %id, "delay already completed in branch, skipping");
+                            match next {
+                                Some(next_cont) => {
+                                    current = next_cont;
+                                    current_input = result.output.clone();
+                                    continue;
+                                }
+                                None => return Ok(result.output.clone()),
+                            }
+                        }
+
+                        // Park at delay: save pass-through and return Waiting
+                        tracing::info!(delay_id = %id, ?duration, "parking branch at delay");
+                        let now = chrono::Utc::now();
+                        let wake_at = match chrono::Duration::from_std(*duration) {
+                            Ok(d) => now + d,
+                            Err(e) => return Err(WorkflowError::ResumeError(e.to_string()).into()),
+                        };
+                        backend
+                            .save_task_result(&instance_id, id, current_input)
+                            .await?;
+                        return Err(WorkflowError::Waiting { wake_at }.into());
                     }
-                    WorkflowContinuation::Fork { branches, join } => {
+                    WorkflowContinuation::Fork { branches, join, .. } => {
                         // Nested fork within a branch
                         let branch_handles: Vec<_> = branches
                             .iter()
                             .map(|branch| {
-                                let id = continuation_id(branch).to_string();
+                                let id = branch.id().to_string();
                                 let branch = Arc::clone(branch);
                                 let branch_input = current_input.clone();
                                 let branch_backend = Arc::clone(&backend);
@@ -947,5 +1179,205 @@ mod tests {
         // Snapshot should be saved as failed
         let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
         assert!(snapshot.state.is_failed());
+    }
+
+    // ========================================================================
+    // Delay tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_run_workflow_with_delay_returns_waiting() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+
+        // Should return Waiting (delay is 1 hour in the future)
+        match &status {
+            WorkflowStatus::Waiting { delay_id, .. } => {
+                assert_eq!(delay_id, "wait_1h");
+            }
+            _ => panic!("Expected Waiting status, got {status:?}"),
+        }
+
+        // Snapshot should be in-progress at AtDelay position
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_in_progress());
+        match &snapshot.state {
+            WorkflowSnapshotState::InProgress { position, .. } => match position {
+                ExecutionPosition::AtDelay {
+                    delay_id,
+                    next_task_id,
+                    ..
+                } => {
+                    assert_eq!(delay_id, "wait_1h");
+                    assert_eq!(next_task_id.as_deref(), Some("step2"));
+                }
+                other => panic!("Expected AtDelay, got {other:?}"),
+            },
+            _ => panic!("Expected InProgress"),
+        }
+
+        // step1 should have been completed
+        assert!(snapshot.get_task_result("step1").is_some());
+        // delay pass-through should be stored
+        assert!(snapshot.get_task_result("wait_1h").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_resume_before_delay_expires_returns_waiting() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Run to delay
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Waiting { .. }));
+
+        // Resume immediately (delay hasn't expired)
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        match &status {
+            WorkflowStatus::Waiting { delay_id, .. } => {
+                assert_eq!(delay_id, "wait_1h");
+            }
+            _ => panic!("Expected Waiting on resume, got {status:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_after_delay_expires_completes() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        // Use a very short delay so it expires immediately
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait_short", std::time::Duration::from_millis(1))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Run — delay is so short it should still park (snapshot is saved before checking time)
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Waiting { .. }));
+
+        // Wait a bit for the delay to definitely expire
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Resume — delay should have expired, execution continues
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        assert!(
+            matches!(status, WorkflowStatus::Completed),
+            "Expected Completed after delay expired, got {status:?}"
+        );
+
+        // Verify final state
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_completed());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_during_delay() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait_1h", std::time::Duration::from_secs(3600))
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Run to delay
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Waiting { .. }));
+
+        // Cancel during delay
+        runner
+            .cancel(
+                "inst-1",
+                Some("no longer needed".into()),
+                Some("admin".into()),
+            )
+            .await
+            .unwrap();
+
+        // Resume should detect cancellation
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        match status {
+            WorkflowStatus::Cancelled {
+                reason,
+                cancelled_by,
+            } => {
+                assert_eq!(reason, Some("no longer needed".into()));
+                assert_eq!(cancelled_by, Some("admin".into()));
+            }
+            _ => panic!("Expected Cancelled status, got {status:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delay_as_last_node() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("final_wait", std::time::Duration::from_millis(1))
+            .build()
+            .unwrap();
+
+        // Run to delay
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Waiting { .. }));
+
+        // Wait for delay to expire
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Resume — delay was the last node, should complete
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        assert!(
+            matches!(status, WorkflowStatus::Completed),
+            "Expected Completed when delay is last node, got {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delay_data_passthrough() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        // step1 produces 11, delay passes it through, step2 receives 11 and doubles
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .delay("wait", std::time::Duration::from_millis(1))
+            .then("step2", |i: u32| async move {
+                // Verify input is the passthrough value from step1
+                assert_eq!(i, 11);
+                Ok(i * 2)
+            })
+            .build()
+            .unwrap();
+
+        // Run to delay
+        runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+
+        // Wait and resume
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
     }
 }

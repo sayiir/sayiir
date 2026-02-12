@@ -2,6 +2,7 @@
 
 import functools
 from collections.abc import Callable
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from ._sayiir import PyFlowBuilder, PyTaskMetadata
@@ -155,6 +156,13 @@ class Flow:
         """Add a sequential task."""
         task_id, metadata = _register_task(task_func, self._task_registry)
         self._builder.then(task_id, metadata)
+        return self
+
+    def delay(self, name: str, duration: "float | timedelta") -> "Flow":
+        """Add a durable delay. No workers held during the delay."""
+        if isinstance(duration, timedelta):
+            duration = duration.total_seconds()
+        self._builder.delay(name, duration)
         return self
 
     def fork(self) -> "ForkBuilder":

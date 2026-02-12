@@ -99,6 +99,13 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 cancelled_by,
                 output: None,
             },
+            WorkflowStatus::Waiting { wake_at, delay_id } => PyWorkflowStatus {
+                status: "waiting".to_string(),
+                error: None,
+                reason: Some(format!("Delay '{delay_id}' until {wake_at}")),
+                cancelled_by: None,
+                output: None,
+            },
         }
     }
 }
