@@ -65,3 +65,44 @@ def run_durable_workflow(
         backend = PyInMemoryBackend()
     engine = PyDurableEngine(backend)
     return engine.run(workflow._inner, instance_id, input_data, workflow._task_registry)
+
+
+def resume_workflow(
+    workflow: Workflow,
+    instance_id: str,
+    backend: Any,
+) -> Any:
+    """Resume a durable workflow from a saved checkpoint.
+
+    Args:
+        workflow: The workflow definition (produced by Flow.build())
+        instance_id: The instance ID used when the workflow was started
+        backend: Persistence backend (must be the same one used for run)
+
+    Returns:
+        WorkflowStatus indicating the outcome
+    """
+    from ._sayiir import PyDurableEngine
+
+    engine = PyDurableEngine(backend)
+    return engine.resume(workflow._inner, instance_id, workflow._task_registry)
+
+
+def cancel_workflow(
+    instance_id: str,
+    backend: Any,
+    reason: str | None = None,
+    cancelled_by: str | None = None,
+) -> None:
+    """Request cancellation of a running durable workflow.
+
+    Args:
+        instance_id: The instance ID of the workflow to cancel
+        backend: Persistence backend (must be the same one used for run)
+        reason: Optional reason for the cancellation
+        cancelled_by: Optional identifier of who requested the cancellation
+    """
+    from ._sayiir import PyDurableEngine
+
+    engine = PyDurableEngine(backend)
+    engine.cancel(instance_id, reason, cancelled_by)

@@ -6,13 +6,13 @@
 use crate::backend::{BackendError, PersistentBackend};
 use async_trait::async_trait;
 use chrono::Duration;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use sayiir_core::snapshot::{
     CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::task_claim::TaskClaim;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 /// In-memory backend that stores snapshots in a HashMap.
 ///

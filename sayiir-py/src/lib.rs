@@ -18,6 +18,7 @@ mod backend;
 mod codec;
 mod durable_engine;
 mod engine;
+pub mod exceptions;
 mod flow;
 mod task;
 
@@ -32,5 +33,16 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engine::PyWorkflowStatus>()?;
     m.add_class::<backend::PyInMemoryBackend>()?;
     m.add_class::<durable_engine::PyDurableEngine>()?;
+
+    // Register exception types
+    m.add(
+        "WorkflowError",
+        m.py().get_type::<exceptions::WorkflowError>(),
+    )?;
+    m.add("TaskError", m.py().get_type::<exceptions::TaskError>())?;
+    m.add(
+        "BackendError",
+        m.py().get_type::<exceptions::BackendError>(),
+    )?;
     Ok(())
 }

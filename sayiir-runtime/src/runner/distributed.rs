@@ -12,7 +12,6 @@
 
 use bytes::Bytes;
 use futures::future;
-use std::sync::Arc;
 use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
 use sayiir_core::context::{WorkflowContext, with_context};
@@ -20,6 +19,7 @@ use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
+use std::sync::Arc;
 
 use crate::execution::{
     continuation_id, finalize_execution, get_resume_input, serialize_branch_results,
@@ -168,7 +168,9 @@ where
             )
             .await;
 
-            finalize_execution(result, &mut snapshot, backend.as_ref()).await
+            let (status, _output) =
+                finalize_execution(result, &mut snapshot, backend.as_ref()).await?;
+            Ok(status)
         })
         .await
     }
@@ -230,7 +232,9 @@ where
             )
             .await;
 
-            finalize_execution(result, &mut snapshot, backend.as_ref()).await
+            let (status, _output) =
+                finalize_execution(result, &mut snapshot, backend.as_ref()).await?;
+            Ok(status)
         })
         .await
     }

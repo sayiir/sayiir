@@ -15,8 +15,8 @@ use crate::codec::{decode_to_pyobject, encode_pyobject};
 use crate::flow::PyWorkflow;
 
 /// Python-exposed workflow status.
-#[pyclass(from_py_object)]
-#[derive(Clone, Debug)]
+#[pyclass]
+#[derive(Debug)]
 pub struct PyWorkflowStatus {
     #[pyo3(get)]
     pub status: String,
@@ -26,6 +26,8 @@ pub struct PyWorkflowStatus {
     pub reason: Option<String>,
     #[pyo3(get)]
     pub cancelled_by: Option<String>,
+    #[pyo3(get)]
+    pub output: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -40,6 +42,10 @@ impl PyWorkflowStatus {
 
     fn is_cancelled(&self) -> bool {
         self.status == "cancelled"
+    }
+
+    fn is_in_progress(&self) -> bool {
+        self.status == "in_progress"
     }
 
     fn __repr__(&self) -> String {
@@ -66,18 +72,21 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 error: None,
                 reason: None,
                 cancelled_by: None,
+                output: None,
             },
             WorkflowStatus::InProgress => PyWorkflowStatus {
                 status: "in_progress".to_string(),
                 error: None,
                 reason: None,
                 cancelled_by: None,
+                output: None,
             },
             WorkflowStatus::Failed(e) => PyWorkflowStatus {
                 status: "failed".to_string(),
                 error: Some(e.to_string()),
                 reason: None,
                 cancelled_by: None,
+                output: None,
             },
             WorkflowStatus::Cancelled {
                 reason,
@@ -87,6 +96,7 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 error: None,
                 reason,
                 cancelled_by,
+                output: None,
             },
         }
     }
@@ -141,7 +151,7 @@ impl PyWorkflowEngine {
                 }
             })
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        .map_err(|e| PyErr::new::<crate::exceptions::TaskError, _>(e.to_string()))?;
 
         decode_to_pyobject(py, &result)
     }

@@ -160,6 +160,16 @@ impl WorkflowSnapshotState {
         }
     }
 
+    /// Extract the final output if in `Completed` state.
+    #[must_use]
+    pub fn completed_output(&self) -> Option<&Bytes> {
+        if let WorkflowSnapshotState::Completed { final_output } = self {
+            Some(final_output)
+        } else {
+            None
+        }
+    }
+
     /// Extract cancellation details if in `Cancelled` state.
     ///
     /// Returns `Some((reason, cancelled_by))` if cancelled, `None` otherwise.

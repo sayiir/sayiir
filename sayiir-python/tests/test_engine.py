@@ -1,10 +1,17 @@
 """Tests for workflow execution — both simple engine and durable engine."""
 
+import pytest
+
 from sayiir import (
+    BackendError,
     DurableEngine,
     Flow,
     InMemoryBackend,
+    TaskError,
     WorkflowEngine,
+    WorkflowError,
+    cancel_workflow,
+    resume_workflow,
     run_durable_workflow,
     run_workflow,
     task,
@@ -166,6 +173,12 @@ class TestSimpleEngine:
         except RuntimeError as e:
             assert "intentional failure" in str(e)
 
+    def test_task_error_is_task_error(self):
+        """TaskError is raised and is a subclass of RuntimeError."""
+        wf = Flow("fail-type").then(failing_task).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+
 
 # ── Durable engine (with checkpointing) ─────────────────────────
 
@@ -280,18 +293,119 @@ class TestDurableEngine:
         assert status.cancelled_by is None
 
 
+# ── Output value tests ───────────────────────────────────────────
+
+
+class TestDurableOutput:
+    def test_durable_output_value(self):
+        """status.output carries the workflow result."""
+        wf = Flow("output").then(double).build()
+        status = run_durable_workflow(wf, "inst-out", 21)
+        assert status.is_completed()
+        assert status.output == 42
+
+    def test_durable_output_chained(self):
+        """Output reflects the last task in the chain."""
+        wf = Flow("output-chain").then(double).then(add_one).build()
+        status = run_durable_workflow(wf, "inst-out-chain", 10)
+        assert status.is_completed()
+        assert status.output == 21  # (10 * 2) + 1
+
+    def test_durable_output_none_on_failure(self):
+        """Failed workflows have output=None."""
+        wf = Flow("output-fail").then(failing_task).build()
+        status = run_durable_workflow(wf, "inst-out-fail", 0)
+        assert status.is_failed()
+        assert status.output is None
+
+    def test_durable_output_on_resume(self):
+        """Resume of completed workflow still has output."""
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        wf = Flow("output-resume").then(double).build()
+
+        status = engine.run(wf._inner, "inst-out-resume", 21, wf._task_registry)
+        assert status.output == 42
+
+        # Resume should also carry the output
+        status = engine.resume(wf._inner, "inst-out-resume", wf._task_registry)
+        assert status.is_completed()
+        assert status.output == 42
+
+
+# ── Helper function tests ────────────────────────────────────────
+
+
+class TestHelpers:
+    def test_resume_helper(self):
+        backend = InMemoryBackend()
+        wf = Flow("resume-helper").then(double).build()
+
+        # Run first
+        status = run_durable_workflow(wf, "inst-rh", 10, backend=backend)
+        assert status.is_completed()
+        assert status.output == 20
+
+        # Resume via helper
+        status = resume_workflow(wf, "inst-rh", backend)
+        assert status.is_completed()
+        assert status.output == 20
+
+    def test_cancel_helper(self):
+        backend = InMemoryBackend()
+        wf = Flow("cancel-helper").then(double).build()
+
+        # Run first to create a snapshot
+        run_durable_workflow(wf, "inst-ch", 10, backend=backend)
+
+        # Cancel should not raise for a completed workflow... but cancel of
+        # nonexistent should raise BackendError
+        with pytest.raises(RuntimeError):
+            cancel_workflow("nonexistent", backend)
+
+
+# ── Exception hierarchy tests ────────────────────────────────────
+
+
+class TestExceptions:
+    def test_workflow_error_is_runtime_error(self):
+        assert issubclass(WorkflowError, RuntimeError)
+
+    def test_task_error_is_workflow_error(self):
+        assert issubclass(TaskError, WorkflowError)
+        assert issubclass(TaskError, RuntimeError)
+
+    def test_backend_error_is_workflow_error(self):
+        assert issubclass(BackendError, WorkflowError)
+        assert issubclass(BackendError, RuntimeError)
+
+    def test_simple_engine_raises_task_error(self):
+        wf = Flow("exc-task").then(failing_task).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+
+    def test_cancel_nonexistent_raises_backend_error(self):
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        with pytest.raises(BackendError):
+            engine.cancel("nonexistent")
+
+    def test_resume_nonexistent_raises_workflow_error(self):
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        wf = Flow("exc-resume").then(double).build()
+        with pytest.raises(WorkflowError):
+            engine.resume(wf._inner, "nonexistent", wf._task_registry)
+
+
 # ── Edge-case / validation tests ─────────────────────────────────
 
 
 class TestValidation:
     def test_branch_with_no_tasks_raises(self):
-        import pytest
-
         with pytest.raises(ValueError, match="at least one task"):
             Flow("bad").fork().branch()
 
     def test_fork_with_no_branches_raises(self):
-        import pytest
-
         with pytest.raises(ValueError, match="at least one branch"):
             Flow("bad").fork().join(join_branches).build()

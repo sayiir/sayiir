@@ -56,10 +56,13 @@ class PyWorkflowStatus:
     error: str | None
     reason: str | None
     cancelled_by: str | None
+    output: Any | None
 
     def is_completed(self) -> bool: ...
     def is_failed(self) -> bool: ...
     def is_cancelled(self) -> bool: ...
+    def is_in_progress(self) -> bool: ...
+    def __repr__(self) -> str: ...
 
 class PyWorkflowEngine:
     """Workflow engine — Rust orchestrates, Python provides task implementations."""
@@ -71,6 +74,7 @@ class PyWorkflowEngine:
         input: Any,
         task_registry: dict[str, Any],
     ) -> Any: ...
+    def __repr__(self) -> str: ...
 
 class PyInMemoryBackend:
     """In-memory persistence backend for workflow snapshots."""
@@ -100,3 +104,20 @@ class PyDurableEngine:
         reason: str | None = None,
         cancelled_by: str | None = None,
     ) -> None: ...
+    def __repr__(self) -> str: ...
+
+# Exception hierarchy
+class WorkflowError(RuntimeError):
+    """Base exception for Sayiir workflow errors."""
+
+    ...
+
+class TaskError(WorkflowError):
+    """A task failed during execution."""
+
+    ...
+
+class BackendError(WorkflowError):
+    """A persistence backend operation failed."""
+
+    ...

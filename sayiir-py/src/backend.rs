@@ -1,8 +1,8 @@
 //! Python-exposed in-memory persistence backend.
 
 use pyo3::prelude::*;
-use std::sync::Arc;
 use sayiir_persistence::InMemoryBackend;
+use std::sync::Arc;
 
 /// Python-exposed in-memory persistence backend.
 ///

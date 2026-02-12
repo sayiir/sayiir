@@ -4,14 +4,14 @@
 //! (in-process, Python bindings, etc.) by supplying task execution callbacks.
 
 use bytes::Bytes;
-use std::future::Future;
-use std::sync::Arc;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{
     ExecutionPosition, TaskResult, WorkflowSnapshot, WorkflowSnapshotState,
 };
 use sayiir_core::workflow::{WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
+use std::future::Future;
+use std::sync::Arc;
 
 /// Outcome of resolving a fork's join.
 enum JoinResolution<'a> {
@@ -608,7 +608,8 @@ pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> anyhow::Result<Bytes> {
 
 /// Finalize a workflow execution, converting the result to a [`WorkflowStatus`].
 ///
-/// On success, marks the workflow as completed in the snapshot.
+/// On success, marks the workflow as completed in the snapshot and returns the
+/// output bytes alongside the status.
 /// On cancellation error, returns `Cancelled` status with details from the backend.
 /// On other errors, marks the workflow as failed.
 ///
@@ -620,15 +621,15 @@ pub async fn finalize_execution<B>(
     result: anyhow::Result<Bytes>,
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
-) -> anyhow::Result<WorkflowStatus>
+) -> anyhow::Result<(WorkflowStatus, Option<Bytes>)>
 where
     B: PersistentBackend,
 {
     match result {
         Ok(output) => {
-            snapshot.mark_completed(output);
+            snapshot.mark_completed(output.clone());
             backend.save_snapshot(snapshot.clone()).await?;
-            Ok(WorkflowStatus::Completed)
+            Ok((WorkflowStatus::Completed, Some(output)))
         }
         Err(e) => {
             // Check if this was a cancellation using downcasting
@@ -638,20 +639,26 @@ where
                     && let Some((reason, cancelled_by)) =
                         cancelled_snapshot.state.cancellation_details()
                 {
-                    return Ok(WorkflowStatus::Cancelled {
-                        reason,
-                        cancelled_by,
-                    });
+                    return Ok((
+                        WorkflowStatus::Cancelled {
+                            reason,
+                            cancelled_by,
+                        },
+                        None,
+                    ));
                 }
                 // Fallback if we couldn't get details
-                return Ok(WorkflowStatus::Cancelled {
-                    reason: None,
-                    cancelled_by: None,
-                });
+                return Ok((
+                    WorkflowStatus::Cancelled {
+                        reason: None,
+                        cancelled_by: None,
+                    },
+                    None,
+                ));
             }
             snapshot.mark_failed(e.to_string());
             let _ = backend.save_snapshot(snapshot.clone()).await;
-            Ok(WorkflowStatus::Failed(e))
+            Ok((WorkflowStatus::Failed(e), None))
         }
     }
 }
@@ -667,9 +674,9 @@ where
 mod tests {
     use super::*;
     use crate::serialization::JsonCodec;
-    use std::sync::Arc;
     use sayiir_core::task::{deserialize_named_branch_results, to_core_task};
     use sayiir_persistence::InMemoryBackend;
+    use std::sync::Arc;
 
     fn codec() -> Arc<JsonCodec> {
         Arc::new(JsonCodec)
@@ -1092,14 +1099,16 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         backend.save_snapshot(snapshot.clone()).await.unwrap();
 
-        let status = finalize_execution(Ok(Bytes::from("output")), &mut snapshot, &backend)
-            .await
-            .unwrap();
+        let (status, output) =
+            finalize_execution(Ok(Bytes::from("output")), &mut snapshot, &backend)
+                .await
+                .unwrap();
 
         match status {
             WorkflowStatus::Completed => {}
             _ => panic!("Expected Completed"),
         }
+        assert_eq!(output, Some(Bytes::from("output")));
 
         let saved = backend.load_snapshot("inst-1").await.unwrap();
         assert!(saved.state.is_completed());
@@ -1111,7 +1120,7 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         backend.save_snapshot(snapshot.clone()).await.unwrap();
 
-        let status =
+        let (status, output) =
             finalize_execution(Err(anyhow::anyhow!("task failed")), &mut snapshot, &backend)
                 .await
                 .unwrap();
@@ -1122,6 +1131,7 @@ mod tests {
             }
             _ => panic!("Expected Failed"),
         }
+        assert!(output.is_none());
 
         let saved = backend.load_snapshot("inst-1").await.unwrap();
         assert!(saved.state.is_failed());
@@ -1138,7 +1148,7 @@ mod tests {
         // Reset local snapshot to in-progress for finalize logic
         let mut local_snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
 
-        let status = finalize_execution(
+        let (status, output) = finalize_execution(
             Err(WorkflowError::cancelled().into()),
             &mut local_snapshot,
             &backend,
@@ -1156,6 +1166,7 @@ mod tests {
             }
             _ => panic!("Expected Cancelled"),
         }
+        assert!(output.is_none());
     }
 
     // ========================================================================

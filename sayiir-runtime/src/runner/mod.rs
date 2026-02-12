@@ -5,10 +5,10 @@
 //! such as in-process execution, distributed execution, or execution with
 //! persistence and recovery.
 
-use std::future::Future;
 use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
 use sayiir_core::workflow::{Workflow, WorkflowStatus};
+use std::future::Future;
 
 /// A trait for executing workflows.
 ///

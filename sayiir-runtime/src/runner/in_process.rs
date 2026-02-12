@@ -68,10 +68,10 @@ impl WorkflowRunner for InProcessRunner {
 mod tests {
     use super::*;
     use crate::serialization::JsonCodec;
-    use std::sync::Arc;
     use sayiir_core::context::WorkflowContext;
     use sayiir_core::task::BranchOutputs;
     use sayiir_core::workflow::WorkflowBuilder;
+    use std::sync::Arc;
 
     fn ctx() -> WorkflowContext<JsonCodec, ()> {
         WorkflowContext::new("test-workflow", Arc::new(JsonCodec), Arc::new(()))

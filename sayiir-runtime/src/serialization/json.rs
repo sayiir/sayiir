@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use sayiir_core::codec::{Decoder, Encoder, sealed};
+use serde::{Deserialize, Serialize};
 
 /// A codec that can serialize and deserialize values using `serde_json`.
 ///

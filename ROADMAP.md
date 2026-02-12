@@ -46,6 +46,15 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 
 The Python SDK is the first language binding and the template for all future bindings. Getting this right matters.
 
+**API Completeness**
+
+- [x] `WorkflowStatus.output` — carry workflow result through durable engine
+- [x] `is_in_progress()` method on `WorkflowStatus`
+- [x] `resume_workflow` / `cancel_workflow` module-level helpers
+- [x] Custom exception hierarchy (`WorkflowError`, `TaskError`, `BackendError`)
+- [x] Updated type stubs (`.pyi`) with output, exceptions, `is_in_progress`
+- [x] Resume returns decoded output for `AlreadyTerminal(Completed)`
+
 **Documentation & Examples**
 
 - [ ] Python package README (PyPI landing page)

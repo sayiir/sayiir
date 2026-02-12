@@ -9,6 +9,7 @@ use pyo3::types::PyDict;
 use std::sync::Arc;
 
 use sayiir_core::snapshot::CancellationRequest;
+use sayiir_core::workflow::WorkflowStatus;
 use sayiir_persistence::{InMemoryBackend, PersistentBackend};
 use sayiir_runtime::{
     execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
@@ -16,8 +17,9 @@ use sayiir_runtime::{
 };
 
 use crate::backend::PyInMemoryBackend;
-use crate::codec::encode_pyobject;
+use crate::codec::{decode_to_pyobject, encode_pyobject};
 use crate::engine::{execute_python_task, PyWorkflowStatus};
+use crate::exceptions;
 use crate::flow::PyWorkflow;
 
 /// Durable workflow engine with checkpointing, cancellation, and resume.
@@ -61,7 +63,7 @@ impl PyDurableEngine {
         let first_task_id = continuation.first_task_id();
         let registry = Arc::new(task_registry);
 
-        let status = py
+        let (status, output_bytes) = py
             .detach(|| {
                 self.runtime.block_on(async {
                     let mut snapshot = prepare_run(
@@ -87,10 +89,14 @@ impl PyDurableEngine {
                 })
             })
             .map_err(|e: anyhow::Error| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
+                PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
             })?;
 
-        Ok(status.into())
+        let mut py_status: PyWorkflowStatus = status.into();
+        if let Some(bytes) = output_bytes {
+            py_status.output = Some(decode_to_pyobject(py, &bytes)?);
+        }
+        Ok(py_status)
     }
 
     /// Resume a workflow from a saved checkpoint.
@@ -105,13 +111,22 @@ impl PyDurableEngine {
         let backend = Arc::clone(&self.backend);
         let registry = Arc::new(task_registry);
 
-        let status = py
+        let (status, output_bytes) = py
             .detach(|| {
                 self.runtime.block_on(async {
                     match prepare_resume(&instance_id, &workflow.definition_hash, backend.as_ref())
                         .await?
                     {
-                        ResumeOutcome::AlreadyTerminal(status) => Ok(status),
+                        ResumeOutcome::AlreadyTerminal(status) => {
+                            // For completed workflows, load the output from the snapshot
+                            let output = if matches!(status, WorkflowStatus::Completed) {
+                                let snapshot = backend.load_snapshot(&instance_id).await.ok();
+                                snapshot.and_then(|s| s.state.completed_output().cloned())
+                            } else {
+                                None
+                            };
+                            Ok((status, output))
+                        }
                         ResumeOutcome::Ready {
                             mut snapshot,
                             input_bytes,
@@ -132,10 +147,14 @@ impl PyDurableEngine {
                 })
             })
             .map_err(|e: anyhow::Error| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
+                PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
             })?;
 
-        Ok(status.into())
+        let mut py_status: PyWorkflowStatus = status.into();
+        if let Some(bytes) = output_bytes {
+            py_status.output = Some(decode_to_pyobject(py, &bytes)?);
+        }
+        Ok(py_status)
     }
 
     /// Request cancellation of a running workflow.
@@ -163,7 +182,7 @@ impl PyDurableEngine {
 
 /// Convert a `BackendError` to a Python exception.
 fn backend_err_to_py(e: sayiir_persistence::BackendError) -> PyErr {
-    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
+    PyErr::new::<exceptions::BackendError, _>(e.to_string())
 }
 
 /// Build the task executor callback for `execute_continuation_with_checkpointing`.
