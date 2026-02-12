@@ -25,7 +25,7 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | `WorkflowContext` with task-local metadata access | Stable |
 | InMemory backend (development/testing) | Stable |
 
-**Python Bindings (Beta)**
+**Python Bindings (Stable)**
 
 | Feature | Status |
 |---|---|
@@ -44,7 +44,7 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 
 ---
 
-## Phase 0 — Python Bindings Polish *(current focus)*
+## Phase 0 — Python Bindings Polish
 
 The Python SDK is the first language binding and the template for all future bindings. Getting this right matters.
 

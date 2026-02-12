@@ -236,7 +236,7 @@ After studying these solutions, the pattern is clear:
 | Claim-based task distribution  | Stable |
 | Zero-copy serialization (rkyv) | Stable |
 
-### Python Bindings (Beta)
+### Python Bindings
 
 | Feature | Status |
 |---|---|
@@ -641,7 +641,7 @@ Sayiir is under active development. Core is stable, some features are in progres
 | sayiir-core          | Stable      |
 | sayiir-runtime       | Stable      |
 | sayiir-persistence   | Stable      |
-| Python bindings      | Beta        |
+| Python bindings      | Stable      |
 | PostgreSQL backend   | In Progress |
 | Cloudflare Workers   | In Progress |
 | Node.js bindings     | Planned     |

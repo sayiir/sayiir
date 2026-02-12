@@ -200,7 +200,7 @@ impl PersistentBackend for InMemoryBackend {
         }
 
         // Collect delay-expired workflows that need position advancement
-        let mut delay_advances: Vec<(String, String, bytes::Bytes)> = Vec::new();
+        let mut delay_advances: Vec<(String, String)> = Vec::new();
         let mut delay_completions: Vec<(String, String)> = Vec::new();
 
         {
@@ -231,8 +231,7 @@ impl PersistentBackend for InMemoryBackend {
                 {
                     if let Some(next_id) = next_task_id {
                         // Delay expired, need to advance to next task
-                        let input = snapshot.get_task_result_bytes(delay_id).unwrap_or_default();
-                        delay_advances.push((instance_id.clone(), next_id.clone(), input));
+                        delay_advances.push((instance_id.clone(), next_id.clone()));
                     } else {
                         // Delay was the last node — mark workflow completed
                         delay_completions.push((instance_id.clone(), delay_id.clone()));
@@ -244,7 +243,7 @@ impl PersistentBackend for InMemoryBackend {
         // Apply delay advancements with write lock
         if !delay_advances.is_empty() || !delay_completions.is_empty() {
             let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
-            for (instance_id, next_task_id, _) in &delay_advances {
+            for (instance_id, next_task_id) in &delay_advances {
                 if let Some(snapshot) = snapshots.get_mut(instance_id) {
                     snapshot.update_position(ExecutionPosition::AtTask {
                         task_id: next_task_id.clone(),
