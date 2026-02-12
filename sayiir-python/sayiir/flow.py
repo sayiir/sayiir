@@ -21,7 +21,7 @@ def _maybe_wrap_pydantic(task_func: Callable[..., Any]) -> Callable[..., Any]:
       returns the task unchanged.
     """
     try:
-        from pydantic import BaseModel
+        from pydantic import BaseModel  # pyright: ignore[reportMissingImports]
     except ImportError:
         return task_func
 
