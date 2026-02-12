@@ -67,14 +67,14 @@ impl WorkflowContinuation {
     /// For a `Task`, returns its ID. For a `Fork`, returns the first task ID
     /// from the first branch.
     #[must_use]
-    pub fn first_task_id(&self) -> String {
+    pub fn first_task_id(&self) -> &str {
         match self {
-            WorkflowContinuation::Task { id, .. } => id.clone(),
+            WorkflowContinuation::Task { id, .. } => id,
             WorkflowContinuation::Fork { branches, .. } => {
                 if let Some(first_branch) = branches.first() {
                     first_branch.first_task_id()
                 } else {
-                    String::from("unknown")
+                    "unknown"
                 }
             }
         }
@@ -279,7 +279,7 @@ pub enum WorkflowStatus {
     /// The workflow completed successfully.
     Completed,
     /// The workflow failed with an error.
-    Failed(anyhow::Error),
+    Failed(String),
     /// The workflow was cancelled.
     Cancelled {
         /// Optional reason for the cancellation.
@@ -324,7 +324,7 @@ pub trait RegistryBehavior {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
 
     /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
@@ -332,7 +332,7 @@ pub trait RegistryBehavior {
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static;
 }
 
@@ -342,7 +342,7 @@ impl RegistryBehavior for NoRegistry {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         // No-op for non-serializable workflows
@@ -352,7 +352,7 @@ impl RegistryBehavior for NoRegistry {
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         // No-op for non-serializable workflows
@@ -365,7 +365,7 @@ impl RegistryBehavior for TaskRegistry {
         F: Fn(I) -> Fut + Send + Sync + 'static,
         I: Send + 'static,
         O: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         use crate::task::TaskMetadata;
@@ -376,7 +376,7 @@ impl RegistryBehavior for TaskRegistry {
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         O: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<O>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
     {
         use crate::task::TaskMetadata;
@@ -509,7 +509,9 @@ where
         F: Fn(Output) -> Fut + Send + Sync + 'static,
         Output: Send + 'static,
         NewOutput: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<NewOutput>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<NewOutput, crate::error::BoxError>>
+            + Send
+            + 'static,
         C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         let codec = Arc::clone(&self.context.codec);
@@ -812,7 +814,9 @@ impl<C, Input> BranchCollector<C, Input> {
         F: Fn(Input) -> Fut + Send + Sync + 'static,
         Input: Send + 'static,
         BranchOutput: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<BranchOutput>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<BranchOutput, crate::error::BoxError>>
+            + Send
+            + 'static,
         C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<BranchOutput>,
     {
         let erased = branch(id, func).erase(Arc::clone(&self.codec));
@@ -850,7 +854,9 @@ where
         F: Fn(Output) -> Fut + Send + Sync + 'static,
         Output: Send + 'static,
         BranchOutput: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<BranchOutput>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<BranchOutput, crate::error::BoxError>>
+            + Send
+            + 'static,
         C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<BranchOutput> + 'static,
     {
         let codec = Arc::clone(&self.context.codec);
@@ -876,7 +882,9 @@ where
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
         JoinOutput: Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<JoinOutput>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<JoinOutput, crate::error::BoxError>>
+            + Send
+            + 'static,
         C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
     {
         let codec = Arc::clone(&self.context.codec);
@@ -1169,8 +1177,8 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
 #[cfg(test)]
 mod tests {
     use crate::codec::{Decoder, Encoder, sealed};
+    use crate::error::BoxError;
     use crate::workflow::WorkflowBuilder;
-    use anyhow::Result;
     use bytes::Bytes;
 
     struct DummyCodec;
@@ -1179,13 +1187,13 @@ mod tests {
     impl Decoder for DummyCodec {}
 
     impl<Input> sealed::EncodeValue<Input> for DummyCodec {
-        fn encode_value(&self, _value: &Input) -> Result<Bytes> {
+        fn encode_value(&self, _value: &Input) -> Result<Bytes, BoxError> {
             Ok(Bytes::new())
         }
     }
     impl<Output> sealed::DecodeValue<Output> for DummyCodec {
-        fn decode_value(&self, _bytes: Bytes) -> Result<Output> {
-            Err(anyhow::anyhow!("Not implemented"))
+        fn decode_value(&self, _bytes: Bytes) -> Result<Output, BoxError> {
+            Err("Not implemented".into())
         }
     }
 

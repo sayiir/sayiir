@@ -60,3 +60,10 @@ manifest-path = "../sayiir-py/Cargo.toml"
 module-name = "sayiir._sayiir"
 python-source = "."
 features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.11.5",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]

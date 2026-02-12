@@ -153,7 +153,7 @@ where
         instance_id: &str,
         reason: Option<String>,
         cancelled_by: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), crate::error::RuntimeError> {
         self.backend
             .request_cancellation(instance_id, CancellationRequest::new(reason, cancelled_by))
             .await?;
@@ -202,7 +202,7 @@ where
         &self,
         workflow: &Workflow<C, Input, M>,
         available_task: AvailableTask,
-    ) -> anyhow::Result<WorkflowStatus>
+    ) -> Result<WorkflowStatus, crate::error::RuntimeError>
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
@@ -450,7 +450,7 @@ where
                     &mut snapshot,
                 );
 
-                self.backend.save_snapshot(snapshot.clone()).await?;
+                self.backend.save_snapshot(&snapshot).await?;
 
                 self.backend
                     .release_task_claim(
@@ -483,7 +483,7 @@ where
                         "Workflow complete"
                     );
                     snapshot.mark_completed(output);
-                    self.backend.save_snapshot(snapshot).await?;
+                    self.backend.save_snapshot(&snapshot).await?;
                     Ok(WorkflowStatus::Completed)
                 } else {
                     tracing::debug!(
@@ -525,7 +525,7 @@ where
         &self,
         poll_interval: Duration,
         workflows: Vec<(String, Arc<Workflow<C, Input, M>>)>,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), crate::error::RuntimeError>
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
@@ -596,7 +596,8 @@ where
         continuation: &'a WorkflowContinuation,
         task_id: &'a str,
         input: Bytes,
-    ) -> impl std::future::Future<Output = anyhow::Result<Bytes>> + Send + 'a {
+    ) -> impl std::future::Future<Output = Result<Bytes, crate::error::RuntimeError>> + Send + 'a
+    {
         async move {
             let mut current = continuation;
 
@@ -607,7 +608,7 @@ where
                             let func = func
                                 .as_ref()
                                 .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
-                            return func.run(input).await;
+                            return Ok(func.run(input).await?);
                         } else if let Some(next_cont) = next {
                             current = next_cont;
                         } else {
@@ -650,7 +651,7 @@ where
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id(),
+                            task_id: next_cont.first_task_id().to_string(),
                         });
                     }
                 } else if let Some(next_cont) = next {

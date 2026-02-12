@@ -10,6 +10,8 @@ use sayiir_core::codec::sealed;
 use sayiir_core::workflow::{Workflow, WorkflowStatus};
 use std::future::Future;
 
+use crate::error::RuntimeError;
+
 /// A trait for executing workflows.
 ///
 /// Different implementations can provide different execution strategies,
@@ -27,7 +29,7 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow: &'w Workflow<C, Input, M>,
         input: Input,
-    ) -> impl Future<Output = anyhow::Result<WorkflowStatus>> + Send + 'w
+    ) -> impl Future<Output = Result<WorkflowStatus, RuntimeError>> + Send + 'w
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,

@@ -9,7 +9,7 @@ use tokio::task_local;
 ///
 pub struct WorkflowContext<C, M> {
     /// The unique workflow identifier.
-    pub workflow_id: String,
+    pub workflow_id: Arc<str>,
     /// The codec used for serialization/deserialization.
     pub codec: Arc<C>,
     /// Immutable metadata attached to the workflow.
@@ -19,7 +19,7 @@ pub struct WorkflowContext<C, M> {
 impl<C, M> Clone for WorkflowContext<C, M> {
     fn clone(&self) -> Self {
         Self {
-            workflow_id: self.workflow_id.clone(),
+            workflow_id: Arc::clone(&self.workflow_id),
             codec: Arc::clone(&self.codec),
             metadata: Arc::clone(&self.metadata),
         }
@@ -28,7 +28,7 @@ impl<C, M> Clone for WorkflowContext<C, M> {
 
 impl<C, M> WorkflowContext<C, M> {
     /// Create a new workflow context.
-    pub fn new(workflow_id: impl Into<String>, codec: Arc<C>, metadata: Arc<M>) -> Self {
+    pub fn new(workflow_id: impl Into<Arc<str>>, codec: Arc<C>, metadata: Arc<M>) -> Self {
         Self {
             workflow_id: workflow_id.into(),
             codec,
@@ -79,7 +79,7 @@ impl ErasedContext {
             .ok()
             .map(|arc| {
                 WorkflowContext::new(
-                    arc.workflow_id.clone(),
+                    Arc::clone(&arc.workflow_id),
                     Arc::clone(&arc.codec),
                     Arc::clone(&arc.metadata),
                 )

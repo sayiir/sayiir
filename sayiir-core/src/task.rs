@@ -1,6 +1,5 @@
 use crate::codec::{Codec, sealed};
-use crate::error::WorkflowError;
-use anyhow::Result;
+use crate::error::{BoxError, WorkflowError};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,9 +55,8 @@ pub struct RetryPolicy {
 ///
 /// Returns an error if the buffer is malformed or too small.
 #[allow(clippy::indexing_slicing)]
-pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String, Bytes>> {
+pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String, Bytes>, BoxError> {
     let mut offset = 0;
-    let mut results = HashMap::new();
 
     // Read number of branches
     if bytes.len() < 4 {
@@ -68,6 +66,8 @@ pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String,
     }
     let branch_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
     offset += 4;
+
+    let mut results = HashMap::with_capacity(branch_count);
 
     // Read each branch result
     for _ in 0..branch_count {
@@ -165,7 +165,7 @@ impl<C: Codec> BranchOutputs<C> {
     /// # Errors
     ///
     /// Returns an error if the branch doesn't exist or deserialization fails.
-    pub fn get<T>(&self, name: &str) -> Result<T>
+    pub fn get<T>(&self, name: &str) -> Result<T, BoxError>
     where
         C: sealed::DecodeValue<T>,
     {
@@ -190,7 +190,7 @@ impl<C: Codec> BranchOutputs<C> {
 ///
 /// ```rust,ignore
 /// use sayiir_core::task::CoreTask;
-/// use anyhow::Result;
+/// use sayiir_core::error::BoxError;
 /// use std::pin::Pin;
 /// use std::future::Future;
 ///
@@ -200,7 +200,7 @@ impl<C: Codec> BranchOutputs<C> {
 /// impl CoreTask for DoubleTask {
 ///     type Input = u32;
 ///     type Output = u32;
-///     type Future = Pin<Box<dyn Future<Output = Result<u32>> + Send>>;
+///     type Future = Pin<Box<dyn Future<Output = Result<u32, BoxError>> + Send>>;
 ///
 ///     fn run(&self, input: u32) -> Self::Future {
 ///         Box::pin(async move { Ok(input * 2) })
@@ -215,7 +215,7 @@ impl<C: Codec> BranchOutputs<C> {
 /// impl CoreTask for MultiplyTask {
 ///     type Input = u32;
 ///     type Output = u32;
-///     type Future = Pin<Box<dyn Future<Output = Result<u32>> + Send>>;
+///     type Future = Pin<Box<dyn Future<Output = Result<u32, BoxError>> + Send>>;
 ///
 ///     fn run(&self, input: u32) -> Self::Future {
 ///         let factor = self.factor;
@@ -226,7 +226,7 @@ impl<C: Codec> BranchOutputs<C> {
 pub trait CoreTask: Send + Sync {
     type Input;
     type Output;
-    type Future: Future<Output = Result<Self::Output>> + Send;
+    type Future: Future<Output = Result<Self::Output, BoxError>> + Send;
 
     /// Run the task with the given input and return the output.
     fn run(&self, input: Self::Input) -> Self::Future;
@@ -252,7 +252,7 @@ where
     F: Fn(I) -> Fut + Send + Sync,
     I: Send,
     O: Send,
-    Fut: Future<Output = Result<O>> + Send,
+    Fut: Future<Output = Result<O, BoxError>> + Send,
 {
     type Input = I;
     type Output = O;
@@ -289,10 +289,10 @@ where
 /// - Better error messages and stack traces
 /// - A concrete type instead of `dyn Future`
 /// - Clearer API boundaries
-pub struct BytesFuture(Pin<Box<dyn Future<Output = Result<Bytes>> + Send>>);
+pub struct BytesFuture(Pin<Box<dyn Future<Output = Result<Bytes, BoxError>> + Send>>);
 
 impl Future for BytesFuture {
-    type Output = Result<Bytes>;
+    type Output = Result<Bytes, BoxError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.0.as_mut().poll(cx)
@@ -303,7 +303,7 @@ impl BytesFuture {
     /// Create a new `BytesFuture` from any future that outputs `Result<Bytes>`.
     pub fn new<F>(fut: F) -> Self
     where
-        F: Future<Output = Result<Bytes>> + Send + 'static,
+        F: Future<Output = Result<Bytes, BoxError>> + Send + 'static,
     {
         BytesFuture(Box::pin(fut))
     }
@@ -360,7 +360,7 @@ impl_codec_task!(
     where F: Fn(I) -> Fut,
           I: Send + 'static,
           O: Send + 'static,
-          Fut: Future<Output = Result<O>> + Send + 'static,
+          Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
           C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 );
 
@@ -374,7 +374,7 @@ where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
     O: Send + 'static,
-    Fut: Future<Output = Result<O>> + Send + 'static,
+    Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
     C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
     to_core_task_arc(Arc::new(func), codec)
@@ -389,7 +389,7 @@ where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
     O: Send + 'static,
-    Fut: Future<Output = Result<O>> + Send + 'static,
+    Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
     C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
     Box::new(UntypedTaskFnWrapper {
@@ -400,8 +400,9 @@ where
 }
 
 /// A boxed async function for use in fork branches (internal).
-type BoxedBranchFn<I, O> =
-    Box<dyn Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O>> + Send>> + Send + Sync>;
+type BoxedBranchFn<I, O> = Box<
+    dyn Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O, BoxError>> + Send>> + Send + Sync,
+>;
 
 /// A branch for use with `fork()` (internal).
 pub(crate) struct Branch<I, O> {
@@ -413,7 +414,7 @@ pub(crate) struct Branch<I, O> {
 pub(crate) fn branch<F, Fut, I, O>(id: &str, f: F) -> Branch<I, O>
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<O>> + Send + 'static,
+    Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
     I: 'static,
     O: 'static,
 {
@@ -465,7 +466,7 @@ where
 
     impl_codec_task!(
         ArcBranchWrapper<I, O, C>
-        where BoxedBranchFn<I, O>: Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O>> + Send>>,
+        where BoxedBranchFn<I, O>: Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O, BoxError>> + Send>>,
               I: Send + 'static,
               O: Send + 'static,
               C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
@@ -493,7 +494,7 @@ impl<F, JoinOutput, Fut, C> CoreTask for HeterogeneousJoinTaskWrapper<F, JoinOut
 where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
-    Fut: Future<Output = Result<JoinOutput>> + Send + 'static,
+    Fut: Future<Output = Result<JoinOutput, BoxError>> + Send + 'static,
     C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
 {
     type Input = Bytes;
@@ -531,7 +532,7 @@ pub fn to_heterogeneous_join_task<F, JoinOutput, Fut, C>(func: F, codec: Arc<C>)
 where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
-    Fut: Future<Output = Result<JoinOutput>> + Send + 'static,
+    Fut: Future<Output = Result<JoinOutput, BoxError>> + Send + 'static,
     C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
 {
     to_heterogeneous_join_task_arc(Arc::new(func), codec)
@@ -548,7 +549,7 @@ pub fn to_heterogeneous_join_task_arc<F, JoinOutput, Fut, C>(
 where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
-    Fut: Future<Output = Result<JoinOutput>> + Send + 'static,
+    Fut: Future<Output = Result<JoinOutput, BoxError>> + Send + 'static,
     C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
 {
     Box::new(HeterogeneousJoinTaskWrapper {

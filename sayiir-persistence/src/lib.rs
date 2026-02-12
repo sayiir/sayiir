@@ -23,7 +23,7 @@
 //!
 //! // Save a snapshot
 //! let snapshot = WorkflowSnapshot::new("instance-123".to_string(), "hash-abc".to_string());
-//! backend.save_snapshot(snapshot).await?;
+//! backend.save_snapshot(&snapshot).await?;
 //!
 //! // Load it back
 //! let loaded = backend.load_snapshot("instance-123").await?;
@@ -49,7 +49,7 @@
 //!
 //! #[async_trait]
 //! impl PersistentBackend for RedisBackend {
-//!     async fn save_snapshot(&self, snapshot: WorkflowSnapshot) -> Result<(), BackendError> {
+//!     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
 //!         // serialize and save to Redis
 //!     }
 //!     // ... implement other methods

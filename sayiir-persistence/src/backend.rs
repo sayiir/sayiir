@@ -40,7 +40,7 @@ pub enum BackendError {
 ///
 /// let backend = InMemoryBackend::new();
 /// let snapshot = WorkflowSnapshot::new("instance-123".to_string(), "hash-abc".to_string());
-/// backend.save_snapshot(snapshot).await?;
+/// backend.save_snapshot(&snapshot).await?;
 /// let restored = backend.load_snapshot("instance-123").await?;
 /// ```
 #[async_trait]
@@ -52,7 +52,7 @@ pub trait PersistentBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns `BackendError` if the snapshot cannot be saved.
-    async fn save_snapshot(&self, snapshot: WorkflowSnapshot) -> Result<(), BackendError>;
+    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError>;
 
     /// Save a single task result atomically.
     ///

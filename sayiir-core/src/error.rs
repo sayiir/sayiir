@@ -1,5 +1,8 @@
 //! Error types for sayiir-core.
 
+/// Generic boxed error type used throughout the crate.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Unified error type for workflow operations.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum WorkflowError {

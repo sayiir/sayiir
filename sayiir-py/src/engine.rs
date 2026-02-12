@@ -4,6 +4,7 @@
 //! via a callback dictionary passed to `run()`.
 
 use bytes::Bytes;
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -83,7 +84,7 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
             },
             WorkflowStatus::Failed(e) => PyWorkflowStatus {
                 status: "failed".to_string(),
-                error: Some(e.to_string()),
+                error: Some(e.clone()),
                 reason: None,
                 cancelled_by: None,
                 output: None,
@@ -144,11 +145,12 @@ impl PyWorkflowEngine {
                     .traceback(py)
                     .and_then(|tb| tb.format().ok())
                     .unwrap_or_default();
-                if traceback.is_empty() {
-                    anyhow::anyhow!("{e}")
+                let msg: sayiir_core::error::BoxError = if traceback.is_empty() {
+                    e.to_string().into()
                 } else {
-                    anyhow::anyhow!("{e}\n\n{traceback}")
-                }
+                    format!("{e}\n\n{traceback}").into()
+                };
+                msg
             })
         })
         .map_err(|e| PyErr::new::<crate::exceptions::TaskError, _>(e.to_string()))?;
@@ -183,9 +185,9 @@ pub(crate) fn execute_python_task(
     // This creates a new event loop, so it must NOT be called from within
     // an already-running loop (e.g. Jupyter). For that use case, the planned
     // async execution path will be needed.
-    let result = if result.getattr("__await__").is_ok() {
-        let asyncio = py.import("asyncio")?;
-        asyncio.call_method1("run", (result,))?
+    let result = if result.getattr(intern!(py, "__await__")).is_ok() {
+        let asyncio = py.import(intern!(py, "asyncio"))?;
+        asyncio.call_method1(intern!(py, "run"), (result,))?
     } else {
         result
     };

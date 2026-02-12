@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::error::BoxError;
 use bytes::Bytes;
 
 /// Sealed helper traits for codec implementations.
@@ -10,7 +10,7 @@ use bytes::Bytes;
 /// 1. Implement the `Encoder` or `Decoder` trait (empty impl is fine)
 /// 2. Implement `sealed::EncodeValue<T>` or `sealed::DecodeValue<T>` with your desired bounds
 pub mod sealed {
-    use super::{Bytes, Result};
+    use super::{BoxError, Bytes};
 
     /// Helper trait for encoding with custom bounds.
     pub trait EncodeValue<T>: Send + Sync + 'static {
@@ -19,7 +19,7 @@ pub mod sealed {
         /// # Errors
         ///
         /// Returns an error if serialization fails.
-        fn encode_value(&self, value: &T) -> Result<Bytes>;
+        fn encode_value(&self, value: &T) -> Result<Bytes, BoxError>;
     }
 
     /// Helper trait for decoding with custom bounds.
@@ -29,7 +29,7 @@ pub mod sealed {
         /// # Errors
         ///
         /// Returns an error if deserialization fails.
-        fn decode_value(&self, bytes: Bytes) -> Result<T>;
+        fn decode_value(&self, bytes: Bytes) -> Result<T, BoxError>;
     }
 }
 
@@ -40,7 +40,7 @@ pub trait Encoder: Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    fn encode<T>(&self, value: &T) -> Result<Bytes>
+    fn encode<T>(&self, value: &T) -> Result<Bytes, BoxError>
     where
         Self: sealed::EncodeValue<T>,
     {
@@ -55,7 +55,7 @@ pub trait Decoder: Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an error if deserialization fails.
-    fn decode<T>(&self, bytes: Bytes) -> Result<T>
+    fn decode<T>(&self, bytes: Bytes) -> Result<T, BoxError>
     where
         Self: sealed::DecodeValue<T>,
     {
@@ -74,7 +74,7 @@ impl<C, T> sealed::EncodeValue<T> for std::sync::Arc<C>
 where
     C: sealed::EncodeValue<T>,
 {
-    fn encode_value(&self, value: &T) -> Result<Bytes> {
+    fn encode_value(&self, value: &T) -> Result<Bytes, BoxError> {
         (**self).encode_value(value)
     }
 }
@@ -83,7 +83,7 @@ impl<C, T> sealed::DecodeValue<T> for std::sync::Arc<C>
 where
     C: sealed::DecodeValue<T>,
 {
-    fn decode_value(&self, bytes: Bytes) -> Result<T> {
+    fn decode_value(&self, bytes: Bytes) -> Result<T, BoxError> {
         (**self).decode_value(bytes)
     }
 }

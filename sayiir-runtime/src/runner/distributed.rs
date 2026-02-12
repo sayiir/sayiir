@@ -21,6 +21,7 @@ use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
 use std::sync::Arc;
 
+use crate::error::RuntimeError;
 use crate::execution::{
     continuation_id, finalize_execution, get_resume_input, serialize_branch_results,
 };
@@ -95,7 +96,7 @@ where
         instance_id: &str,
         reason: Option<String>,
         cancelled_by: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), RuntimeError> {
         self.backend
             .request_cancellation(instance_id, CancellationRequest::new(reason, cancelled_by))
             .await?;
@@ -128,7 +129,7 @@ where
         workflow: &Workflow<C, Input, M>,
         instance_id: impl Into<String>,
         input: Input,
-    ) -> anyhow::Result<WorkflowStatus>
+    ) -> Result<WorkflowStatus, RuntimeError>
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
@@ -147,11 +148,11 @@ where
             input_bytes.clone(),
         );
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: workflow.continuation().first_task_id(),
+            task_id: workflow.continuation().first_task_id().to_string(),
         });
 
         // Save initial snapshot
-        self.backend.save_snapshot(snapshot.clone()).await?;
+        self.backend.save_snapshot(&snapshot).await?;
 
         // Execute workflow with checkpointing
         let context = workflow.context().clone();
@@ -191,7 +192,7 @@ where
         &self,
         workflow: &'w Workflow<C, Input, M>,
         instance_id: &str,
-    ) -> anyhow::Result<WorkflowStatus>
+    ) -> Result<WorkflowStatus, RuntimeError>
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
@@ -247,7 +248,7 @@ where
         snapshot: &'a mut WorkflowSnapshot,
         backend: Arc<B>,
         context: WorkflowContext<C, M>,
-    ) -> anyhow::Result<Bytes>
+    ) -> Result<Bytes, RuntimeError>
     where
         B: 'static,
         C: Codec + 'static,
@@ -282,11 +283,11 @@ where
 
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id(),
+                            task_id: next_cont.first_task_id().to_string(),
                         });
                     }
 
-                    backend.save_snapshot(snapshot.clone()).await?;
+                    backend.save_snapshot(snapshot).await?;
 
                     if backend
                         .check_and_cancel(&snapshot.instance_id, None)
@@ -318,10 +319,10 @@ where
 
                     // Check if all branches already completed
                     let mut all_branches_completed = true;
-                    let mut branch_results = Vec::new();
+                    let mut branch_results = Vec::with_capacity(branches.len());
 
                     for branch in branches {
-                        let branch_id = continuation_id(branch);
+                        let branch_id = continuation_id(branch).to_string();
 
                         if let Some(result) = snapshot.get_task_result(&branch_id) {
                             branch_results.push((branch_id, result.output.clone()));
@@ -332,47 +333,43 @@ where
                     }
 
                     if !all_branches_completed {
-                        // Execute branches in parallel
-                        let branch_info: Vec<(String, Arc<WorkflowContinuation>)> = branches
-                            .iter()
-                            .map(|branch| (continuation_id(branch), Arc::clone(branch)))
-                            .collect();
+                        // Collect cached results inline; only spawn tasks for uncached branches
+                        branch_results.clear();
+                        let mut branch_handles = Vec::with_capacity(branches.len());
 
                         let instance_id = snapshot.instance_id.clone();
 
-                        let branch_handles: Vec<_> = branch_info
-                            .into_iter()
-                            .map(|(branch_id, branch)| {
-                                let cached_result = snapshot
-                                    .get_task_result(&branch_id)
-                                    .map(|r| r.output.clone());
+                        for branch in branches {
+                            let branch_id = continuation_id(branch).to_string();
 
-                                if let Some(result) = cached_result {
-                                    return tokio::task::spawn(async move {
-                                        Ok::<_, anyhow::Error>((branch_id, result))
-                                    });
-                                }
-
+                            if let Some(result) = snapshot.get_task_result(&branch_id) {
+                                // Already completed — collect directly, no spawn needed
+                                branch_results.push((branch_id, result.output.clone()));
+                            } else {
                                 let branch_input = current_input.clone();
                                 let branch_backend = Arc::clone(&backend);
                                 let branch_instance_id = instance_id.clone();
                                 let branch_context = context.clone();
 
-                                tokio::task::spawn(Self::execute_branch_task(
-                                    branch,
+                                branch_handles.push(tokio::task::spawn(Self::execute_branch_task(
+                                    Arc::clone(branch),
                                     branch_input,
                                     branch_backend,
                                     branch_instance_id,
                                     branch_context,
                                     branch_id,
-                                ))
-                            })
-                            .collect();
+                                )));
+                            }
+                        }
 
-                        branch_results = future::try_join_all(branch_handles)
-                            .await?
-                            .into_iter()
-                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        if !branch_handles.is_empty() {
+                            let new_results: Vec<(String, Bytes)> =
+                                future::try_join_all(branch_handles)
+                                    .await?
+                                    .into_iter()
+                                    .collect::<Result<Vec<_>, RuntimeError>>()?;
+                            branch_results.extend(new_results);
+                        }
 
                         // Check for cancellation after fork
                         if backend
@@ -405,12 +402,12 @@ where
                                 })
                                 .collect();
                             snapshot.update_position(ExecutionPosition::AtJoin {
-                                join_id: join_cont.first_task_id(),
+                                join_id: join_cont.first_task_id().to_string(),
                                 completed_branches,
                             });
                         }
 
-                        backend.save_snapshot(snapshot.clone()).await?;
+                        backend.save_snapshot(snapshot).await?;
                     }
 
                     // Proceed to join or return
@@ -441,7 +438,7 @@ where
         instance_id: String,
         context: WorkflowContext<C, M>,
         branch_id: String,
-    ) -> impl std::future::Future<Output = anyhow::Result<(String, Bytes)>> + Send
+    ) -> impl std::future::Future<Output = Result<(String, Bytes), RuntimeError>> + Send
     where
         B: 'static,
         C: Codec + 'static,
@@ -474,7 +471,7 @@ where
         backend: Arc<B>,
         instance_id: String,
         context: WorkflowContext<C, M>,
-    ) -> impl std::future::Future<Output = anyhow::Result<Bytes>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<Bytes, RuntimeError>> + Send + '_
     where
         B: 'static,
         C: Codec + 'static,
@@ -514,7 +511,7 @@ where
                         let branch_handles: Vec<_> = branches
                             .iter()
                             .map(|branch| {
-                                let id = continuation_id(branch);
+                                let id = continuation_id(branch).to_string();
                                 let branch = Arc::clone(branch);
                                 let branch_input = current_input.clone();
                                 let branch_backend = Arc::clone(&backend);
@@ -536,7 +533,7 @@ where
                             future::try_join_all(branch_handles)
                                 .await?
                                 .into_iter()
-                                .collect::<anyhow::Result<Vec<_>>>()?;
+                                .collect::<Result<Vec<_>, RuntimeError>>()?;
 
                         match join {
                             Some(join_continuation) => {
@@ -566,7 +563,7 @@ where
         instance_id: String,
         context: WorkflowContext<C, M>,
         branch_id: String,
-    ) -> impl std::future::Future<Output = anyhow::Result<(String, Bytes)>> + Send
+    ) -> impl std::future::Future<Output = Result<(String, Bytes), RuntimeError>> + Send
     where
         B: 'static,
         C: Codec + 'static,
@@ -602,6 +599,7 @@ mod tests {
     use crate::serialization::JsonCodec;
     use sayiir_core::codec::Encoder;
     use sayiir_core::context::WorkflowContext;
+    use sayiir_core::error::BoxError;
     use sayiir_core::task::BranchOutputs;
     use sayiir_core::workflow::WorkflowBuilder;
     use sayiir_persistence::InMemoryBackend;
@@ -674,7 +672,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("fail", |_i: u32| async move {
-                Err::<u32, _>(anyhow::anyhow!("intentional failure"))
+                Err::<u32, BoxError>("intentional failure".into())
             })
             .build()
             .unwrap();
@@ -767,7 +765,7 @@ mod tests {
 
         let workflow = WorkflowBuilder::new(ctx())
             .then("fail", |_i: u32| async move {
-                Err::<u32, _>(anyhow::anyhow!("failure"))
+                Err::<u32, BoxError>("failure".into())
             })
             .build()
             .unwrap();
@@ -803,7 +801,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: "step1".into(),
         });
-        runner.backend().save_snapshot(snapshot).await.unwrap();
+        runner.backend().save_snapshot(&snapshot).await.unwrap();
 
         // Build a different workflow
         let workflow2 = WorkflowBuilder::new(ctx())
@@ -846,7 +844,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: "slow_task".into(),
         });
-        runner.backend().save_snapshot(snapshot).await.unwrap();
+        runner.backend().save_snapshot(&snapshot).await.unwrap();
 
         // Request cancellation
         runner
@@ -889,7 +887,7 @@ mod tests {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: "task1".into(),
         });
-        runner.backend().save_snapshot(snapshot).await.unwrap();
+        runner.backend().save_snapshot(&snapshot).await.unwrap();
 
         runner
             .cancel("inst-precancel", Some("pre-cancel".into()), None)
@@ -932,7 +930,7 @@ mod tests {
         let workflow = WorkflowBuilder::new(ctx())
             .then("step1", |i: u32| async move { Ok(i + 1) })
             .then("fail_step", |_i: u32| async move {
-                Err::<u32, _>(anyhow::anyhow!("mid-chain failure"))
+                Err::<u32, BoxError>("mid-chain failure".into())
             })
             .then("step3", |i: u32| async move { Ok(i * 2) })
             .build()

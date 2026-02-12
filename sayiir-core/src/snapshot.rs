@@ -145,9 +145,7 @@ impl WorkflowSnapshotState {
         use crate::workflow::WorkflowStatus;
         match self {
             Self::Completed { .. } => Some(WorkflowStatus::Completed),
-            Self::Failed { error } => Some(WorkflowStatus::Failed(
-                crate::error::WorkflowError::ResumeError(error.clone()).into(),
-            )),
+            Self::Failed { error } => Some(WorkflowStatus::Failed(error.clone())),
             Self::Cancelled {
                 reason,
                 cancelled_by,

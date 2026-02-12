@@ -1,9 +1,9 @@
-use anyhow::{Context, Result};
 use bytecheck::CheckBytes;
 use bytes::Bytes;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
 use sayiir_core::codec::{Decoder, Encoder, sealed};
+use sayiir_core::error::BoxError;
 
 /// A codec that can serialize and deserialize values using rkyv.
 ///
@@ -41,9 +41,10 @@ where
         >,
     >,
 {
-    fn encode_value(&self, value: &T) -> Result<Bytes> {
-        let aligned_vec =
-            to_bytes::<Error>(value).context("Failed to serialize value with rkyv")?;
+    fn encode_value(&self, value: &T) -> Result<Bytes, BoxError> {
+        let aligned_vec = to_bytes::<Error>(value).map_err(|e| -> BoxError {
+            format!("Failed to serialize value with rkyv: {e}").into()
+        })?;
         let vec: Vec<u8> = aligned_vec.into();
         Ok(Bytes::from(vec))
     }
@@ -57,7 +58,9 @@ where
     for<'a> T::Archived: CheckBytes<rkyv::api::high::HighValidator<'a, Error>>,
     T::Archived: Deserialize<T, Strategy<rkyv::de::Pool, Error>>,
 {
-    fn decode_value(&self, bytes: Bytes) -> Result<T> {
-        from_bytes::<T, Error>(&bytes).context("Failed to deserialize value with rkyv")
+    fn decode_value(&self, bytes: Bytes) -> Result<T, BoxError> {
+        from_bytes::<T, Error>(&bytes).map_err(|e| -> BoxError {
+            format!("Failed to deserialize value with rkyv: {e}").into()
+        })
     }
 }
