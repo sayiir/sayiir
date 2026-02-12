@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use workflow_core::codec::Codec;
 use workflow_core::codec::sealed;
 use workflow_core::context::with_context;
+use workflow_core::error::WorkflowError;
 use workflow_core::registry::TaskRegistry;
 use workflow_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
 use workflow_core::task_claim::AvailableTask;
@@ -215,11 +216,11 @@ where
         C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
     {
         if available_task.workflow_definition_hash != workflow.definition_hash() {
-            return Err(anyhow::anyhow!(
-                "Workflow definition hash mismatch: expected {}, found {}",
-                workflow.definition_hash(),
-                available_task.workflow_definition_hash
-            ));
+            return Err(WorkflowError::DefinitionMismatch {
+                expected: workflow.definition_hash().to_string(),
+                found: available_task.workflow_definition_hash.clone(),
+            }
+            .into());
         }
 
         let claim = self
@@ -308,10 +309,7 @@ where
                     &self.worker_id,
                 )
                 .await;
-            return Err(anyhow::anyhow!(
-                "Task {} not found in workflow",
-                available_task.task_id
-            ));
+            return Err(WorkflowError::TaskNotFound(available_task.task_id.clone()).into());
         }
 
         // Start heartbeat task to periodically extend the claim
@@ -440,7 +438,7 @@ where
                 );
 
                 release_claim().await;
-                return Err(anyhow::anyhow!("Task panicked: {panic_msg}"));
+                return Err(WorkflowError::TaskPanicked(panic_msg).into());
             }
         };
 
@@ -613,14 +611,14 @@ where
                 match current {
                     WorkflowContinuation::Task { id, func, next } => {
                         if id == task_id {
-                            let func = func.as_ref().ok_or_else(|| {
-                                anyhow::anyhow!("Task '{id}' has no implementation")
-                            })?;
+                            let func = func
+                                .as_ref()
+                                .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
                             return func.run(input).await;
                         } else if let Some(next_cont) = next {
                             current = next_cont;
                         } else {
-                            return Err(anyhow::anyhow!("Task {task_id} not found"));
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
                     WorkflowContinuation::Fork { branches, join } => {
@@ -640,7 +638,7 @@ where
                         if let Some(join_cont) = join {
                             current = join_cont;
                         } else {
-                            return Err(anyhow::anyhow!("Task {task_id} not found"));
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
                 }

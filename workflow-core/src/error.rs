@@ -1,27 +1,58 @@
 //! Error types for workflow-core.
 
 /// Unified error type for workflow operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum WorkflowError {
     /// A duplicate task ID was found during workflow building.
+    #[error("Duplicate task id: '{0}'")]
     DuplicateTaskId(String),
+
     /// A referenced task ID was not found in the registry.
+    #[error("Task '{0}' not found in registry")]
     TaskNotFound(String),
+
+    /// The task has no implementation (function body).
+    #[error("Task '{0}' has no implementation")]
+    TaskNotImplemented(String),
+
     /// The workflow definition hash doesn't match.
     /// This indicates the serialized state was created with a different workflow definition.
+    #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
     DefinitionMismatch {
         /// The expected hash (from current workflow).
         expected: String,
         /// The hash found in the serialized state.
         found: String,
     },
+
     /// The workflow was cancelled.
+    #[error("Workflow cancelled{}", reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default())]
     Cancelled {
         /// Optional reason for the cancellation.
         reason: Option<String>,
         /// Optional identifier of who cancelled the workflow.
         cancelled_by: Option<String>,
     },
+
+    /// A fork has no branches and no join task.
+    #[error("Fork has no branches and no join task")]
+    EmptyFork,
+
+    /// A task panicked during execution.
+    #[error("Task panicked: {0}")]
+    TaskPanicked(String),
+
+    /// Cannot resume workflow from saved state.
+    #[error("Cannot resume workflow: {0}")]
+    ResumeError(String),
+
+    /// Deserialization of binary data failed.
+    #[error("Deserialization error: {0}")]
+    Deserialization(String),
+
+    /// A named branch was not found in the outputs.
+    #[error("Branch '{0}' not found")]
+    BranchNotFound(String),
 }
 
 impl WorkflowError {
@@ -34,29 +65,3 @@ impl WorkflowError {
         }
     }
 }
-
-impl std::fmt::Display for WorkflowError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WorkflowError::DuplicateTaskId(id) => write!(f, "Duplicate task id: '{id}'"),
-            WorkflowError::TaskNotFound(id) => {
-                write!(f, "Task '{id}' not found in registry")
-            }
-            WorkflowError::DefinitionMismatch { expected, found } => {
-                write!(
-                    f,
-                    "Workflow definition mismatch: expected hash '{expected}', found '{found}'"
-                )
-            }
-            WorkflowError::Cancelled { reason, .. } => {
-                if let Some(reason) = reason {
-                    write!(f, "Workflow cancelled: {reason}")
-                } else {
-                    write!(f, "Workflow cancelled")
-                }
-            }
-        }
-    }
-}
-
-impl std::error::Error for WorkflowError {}

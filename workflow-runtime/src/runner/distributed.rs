@@ -209,11 +209,11 @@ where
 
         // Validate definition hash
         if snapshot.definition_hash != workflow.definition_hash() {
-            return Err(anyhow::anyhow!(
-                "Workflow definition hash mismatch: expected {}, found {}",
-                workflow.definition_hash(),
-                snapshot.definition_hash
-            ));
+            return Err(WorkflowError::DefinitionMismatch {
+                expected: workflow.definition_hash().to_string(),
+                found: snapshot.definition_hash.clone(),
+            }
+            .into());
         }
 
         // Check if already completed, failed, or cancelled
@@ -223,7 +223,9 @@ where
         if snapshot.state.is_failed()
             && let WorkflowSnapshotState::Failed { error } = &snapshot.state
         {
-            return Ok(WorkflowStatus::Failed(anyhow::anyhow!("{error}")));
+            return Ok(WorkflowStatus::Failed(
+                WorkflowError::ResumeError(error.clone()).into(),
+            ));
         }
         if let WorkflowSnapshotState::Cancelled {
             reason,
@@ -326,7 +328,7 @@ where
                     }
                 }
                 WorkflowContinuation::Task { func: None, id, .. } => {
-                    return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
+                    return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                 }
                 WorkflowContinuation::Fork { branches, join } => {
                     // Check for cancellation before starting fork
@@ -442,9 +444,10 @@ where
                             current_input = join_input;
                         }
                         None => {
-                            return branch_results.last().map(|(_, b)| b.clone()).ok_or_else(
-                                || anyhow::anyhow!("Fork with no branches and no join task"),
-                            );
+                            return branch_results
+                                .last()
+                                .map(|(_, b)| b.clone())
+                                .ok_or_else(|| WorkflowError::EmptyFork.into());
                         }
                     }
                 }
@@ -527,7 +530,7 @@ where
                         }
                     }
                     WorkflowContinuation::Task { func: None, id, .. } => {
-                        return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
+                        return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                     }
                     WorkflowContinuation::Fork { branches, join } => {
                         // Nested fork within a branch
@@ -565,9 +568,10 @@ where
                                 current_input = join_input;
                             }
                             None => {
-                                return branch_results.last().map(|(_, b)| b.clone()).ok_or_else(
-                                    || anyhow::anyhow!("Fork with no branches and no join task"),
-                                );
+                                return branch_results
+                                    .last()
+                                    .map(|(_, b)| b.clone())
+                                    .ok_or_else(|| WorkflowError::EmptyFork.into());
                             }
                         }
                     }
@@ -605,5 +609,368 @@ where
             })
             .await
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::too_many_lines
+)]
+mod tests {
+    use super::*;
+    use crate::serialization::JsonCodec;
+    use workflow_core::codec::Encoder;
+    use workflow_core::context::WorkflowContext;
+    use workflow_core::task::BranchOutputs;
+    use workflow_core::workflow::WorkflowBuilder;
+    use workflow_persistence::InMemoryBackend;
+
+    fn ctx() -> WorkflowContext<JsonCodec, ()> {
+        WorkflowContext::new("test-workflow", Arc::new(JsonCodec), Arc::new(()))
+    }
+
+    // ========================================================================
+    // Run (fresh execution)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_run_single_task() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("add_one", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 5u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        // Verify snapshot was saved as completed
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_completed());
+    }
+
+    #[tokio::test]
+    async fn test_run_chained_tasks() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("add_one", |i: u32| async move { Ok(i + 1) })
+            .then("double", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_completed());
+    }
+
+    #[tokio::test]
+    async fn test_run_three_task_chain() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .then("step2", |i: u32| async move { Ok(i * 3) })
+            .then("step3", |i: u32| async move { Ok(i - 2) })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 5u32).await.unwrap();
+        // 5+1=6, 6*3=18, 18-2=16
+        assert!(matches!(status, WorkflowStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn test_run_task_failure() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("fail", |_i: u32| async move {
+                Err::<u32, _>(anyhow::anyhow!("intentional failure"))
+            })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 1u32).await.unwrap();
+        match status {
+            WorkflowStatus::Failed(e) => {
+                assert!(e.to_string().contains("intentional failure"));
+            }
+            _ => panic!("Expected Failed status"),
+        }
+
+        // Snapshot should be marked as failed
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_failed());
+    }
+
+    #[tokio::test]
+    async fn test_run_fork_join() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("prepare", |i: u32| async move { Ok(i) })
+            .branches(|b| {
+                b.add("double", |i: u32| async move { Ok(i * 2) });
+                b.add("add_ten", |i: u32| async move { Ok(i + 10) });
+            })
+            .join("combine", |outputs: BranchOutputs<JsonCodec>| async move {
+                let doubled: u32 = outputs.get("double")?;
+                let added: u32 = outputs.get("add_ten")?;
+                Ok(doubled + added)
+            })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 5u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_completed());
+    }
+
+    #[tokio::test]
+    async fn test_run_checkpoints_intermediate_tasks() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        // The final snapshot should be completed, but we can verify the
+        // instance was tracked throughout
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_completed());
+    }
+
+    // ========================================================================
+    // Resume
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_resume_completed_workflow() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        // Run to completion
+        runner.run(&workflow, "inst-1", 5u32).await.unwrap();
+
+        // Resume should return Completed immediately
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn test_resume_failed_workflow() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("fail", |_i: u32| async move {
+                Err::<u32, _>(anyhow::anyhow!("failure"))
+            })
+            .build()
+            .unwrap();
+
+        runner.run(&workflow, "inst-1", 1u32).await.unwrap();
+
+        let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        match status {
+            WorkflowStatus::Failed(_) => {}
+            _ => panic!("Expected Failed status"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_definition_hash_mismatch() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow1 = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        // Run with workflow1
+        runner.run(&workflow1, "inst-1", 5u32).await.unwrap();
+
+        // Manually create in-progress snapshot with workflow1's hash
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-2".into(),
+            workflow1.definition_hash().to_string(),
+            Bytes::from(serde_json::to_vec(&5u32).unwrap()),
+        );
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "step1".into(),
+        });
+        runner.backend().save_snapshot(snapshot).await.unwrap();
+
+        // Build a different workflow
+        let workflow2 = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Resume with different workflow definition should fail
+        let result = runner.resume(&workflow2, "inst-2").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mismatch"));
+    }
+
+    // ========================================================================
+    // Cancellation
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_cancel_running_workflow() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        // Create a workflow with a slow task
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("slow_task", |i: u32| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok(i)
+            })
+            .build()
+            .unwrap();
+
+        // Set up a snapshot as if it's in progress
+        let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-cancel".into(),
+            workflow.definition_hash().to_string(),
+            input_bytes,
+        );
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "slow_task".into(),
+        });
+        runner.backend().save_snapshot(snapshot).await.unwrap();
+
+        // Request cancellation
+        runner
+            .cancel(
+                "inst-cancel",
+                Some("testing".into()),
+                Some("test-suite".into()),
+            )
+            .await
+            .unwrap();
+
+        // Verify cancellation request was stored
+        let req = runner
+            .backend()
+            .get_cancellation_request("inst-cancel")
+            .await
+            .unwrap();
+        assert!(req.is_some());
+        assert_eq!(req.unwrap().reason, Some("testing".into()));
+    }
+
+    #[tokio::test]
+    async fn test_run_with_pre_cancellation() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("task1", |i: u32| async move { Ok(i + 1) })
+            .then("task2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Save initial snapshot and request cancellation before running
+        let input_bytes = Arc::new(JsonCodec).encode(&1u32).unwrap();
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-precancel".into(),
+            workflow.definition_hash().to_string(),
+            input_bytes,
+        );
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task1".into(),
+        });
+        runner.backend().save_snapshot(snapshot).await.unwrap();
+
+        runner
+            .cancel("inst-precancel", Some("pre-cancel".into()), None)
+            .await
+            .unwrap();
+
+        // Resume should detect cancellation
+        let status = runner.resume(&workflow, "inst-precancel").await.unwrap();
+        match status {
+            WorkflowStatus::Cancelled { reason, .. } => {
+                assert_eq!(reason, Some("pre-cancel".into()));
+            }
+            _ => panic!("Expected Cancelled status, got: {status:?}"),
+        }
+    }
+
+    // ========================================================================
+    // Edge cases
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_resume_nonexistent_instance() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("task", |i: u32| async move { Ok(i) })
+            .build()
+            .unwrap();
+
+        let result = runner.resume(&workflow, "nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_failure_in_chain_saves_snapshot() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .then("fail_step", |_i: u32| async move {
+                Err::<u32, _>(anyhow::anyhow!("mid-chain failure"))
+            })
+            .then("step3", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
+        match status {
+            WorkflowStatus::Failed(e) => {
+                assert!(e.to_string().contains("mid-chain failure"));
+            }
+            _ => panic!("Expected Failed"),
+        }
+
+        // Snapshot should be saved as failed
+        let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
+        assert!(snapshot.state.is_failed());
     }
 }

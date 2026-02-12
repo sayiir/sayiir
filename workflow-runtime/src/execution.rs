@@ -43,7 +43,7 @@ fn resolve_join<'a>(
         let output = branch_results
             .last()
             .map(|(_, b)| b.clone())
-            .ok_or_else(|| anyhow::anyhow!("Fork with no branches and no join task"))?;
+            .ok_or(WorkflowError::EmptyFork)?;
         Ok(JoinResolution::Done(output))
     }
 }
@@ -189,7 +189,7 @@ pub async fn execute_continuation_async(
                 }
             }
             WorkflowContinuation::Task { func: None, id, .. } => {
-                return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
+                return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
             }
             WorkflowContinuation::Fork { branches, join } => {
                 let branch_handles: Vec<_> = branches
@@ -250,7 +250,7 @@ async fn execute_branch_async(
                 }
             }
             WorkflowContinuation::Task { func: None, id, .. } => {
-                return Err(anyhow::anyhow!("Task '{id}' has no implementation"));
+                return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
             }
             WorkflowContinuation::Fork { branches, join } => {
                 // Nested forks in branches: execute sequentially to avoid unbounded spawning
@@ -567,11 +567,11 @@ where
 
     // Validate definition hash
     if snapshot.definition_hash != definition_hash {
-        return Err(anyhow::anyhow!(
-            "Workflow definition hash mismatch: expected {}, found {}",
-            definition_hash,
-            snapshot.definition_hash
-        ));
+        return Err(WorkflowError::DefinitionMismatch {
+            expected: definition_hash.to_string(),
+            found: snapshot.definition_hash.clone(),
+        }
+        .into());
     }
 
     // Check if already in terminal state
@@ -580,7 +580,7 @@ where
     }
     if let WorkflowSnapshotState::Failed { ref error } = snapshot.state {
         return Ok(ResumeOutcome::AlreadyTerminal(WorkflowStatus::Failed(
-            anyhow::anyhow!("{error}"),
+            WorkflowError::ResumeError(error.clone()).into(),
         )));
     }
     if let WorkflowSnapshotState::Cancelled {
@@ -604,6 +604,7 @@ where
 }
 
 /// Outcome of [`prepare_resume`].
+#[derive(Debug)]
 pub enum ResumeOutcome {
     /// Workflow can be resumed with this snapshot and input.
     Ready {
@@ -630,17 +631,18 @@ pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> anyhow::Result<Bytes> {
         } => {
             if completed_tasks.is_empty() {
                 snapshot.initial_input_bytes().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Cannot resume: no completed tasks and initial input not stored"
+                    WorkflowError::ResumeError(
+                        "no completed tasks and initial input not stored".into(),
                     )
+                    .into()
                 })
             } else {
-                snapshot
-                    .get_last_task_output()
-                    .ok_or_else(|| anyhow::anyhow!("Cannot resume: no task results available"))
+                snapshot.get_last_task_output().ok_or_else(|| {
+                    WorkflowError::ResumeError("no task results available".into()).into()
+                })
             }
         }
-        _ => Err(anyhow::anyhow!("Cannot resume: workflow not in progress")),
+        _ => Err(WorkflowError::ResumeError("workflow not in progress".into()).into()),
     }
 }
 
@@ -691,5 +693,772 @@ where
             let _ = backend.save_snapshot(snapshot.clone()).await;
             Ok(WorkflowStatus::Failed(e))
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::too_many_lines
+)]
+mod tests {
+    use super::*;
+    use crate::serialization::JsonCodec;
+    use std::sync::Arc;
+    use workflow_core::task::{deserialize_named_branch_results, to_core_task};
+    use workflow_persistence::InMemoryBackend;
+
+    fn codec() -> Arc<JsonCodec> {
+        Arc::new(JsonCodec)
+    }
+
+    fn encode_u32(val: u32) -> Bytes {
+        Bytes::from(serde_json::to_vec(&val).unwrap())
+    }
+
+    fn decode_u32(bytes: &Bytes) -> u32 {
+        serde_json::from_slice(bytes).unwrap()
+    }
+
+    /// Build a WorkflowContinuation::Task with a real func.
+    fn task_node<F, Fut>(
+        id: &str,
+        f: F,
+        next: Option<Box<WorkflowContinuation>>,
+    ) -> WorkflowContinuation
+    where
+        F: Fn(u32) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<u32>> + Send + 'static,
+    {
+        let c = codec();
+        WorkflowContinuation::Task {
+            id: id.to_string(),
+            func: Some(to_core_task(f, c)),
+            next,
+        }
+    }
+
+    /// Build a WorkflowContinuation::Task with no func (for callback-based tests).
+    fn stub_node(id: &str, next: Option<Box<WorkflowContinuation>>) -> WorkflowContinuation {
+        WorkflowContinuation::Task {
+            id: id.to_string(),
+            func: None,
+            next,
+        }
+    }
+
+    // ========================================================================
+    // serialize_branch_results
+    // ========================================================================
+
+    #[test]
+    fn test_serialize_branch_results_roundtrip() {
+        let results = vec![
+            ("branch_a".to_string(), Bytes::from(vec![1, 2, 3])),
+            ("branch_b".to_string(), Bytes::from(vec![4, 5])),
+        ];
+
+        let serialized = serialize_branch_results(&results).unwrap();
+        let deserialized = deserialize_named_branch_results(&serialized).unwrap();
+
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized["branch_a"], Bytes::from(vec![1, 2, 3]));
+        assert_eq!(deserialized["branch_b"], Bytes::from(vec![4, 5]));
+    }
+
+    #[test]
+    fn test_serialize_branch_results_empty() {
+        let results: Vec<(String, Bytes)> = vec![];
+        let serialized = serialize_branch_results(&results).unwrap();
+        let deserialized = deserialize_named_branch_results(&serialized).unwrap();
+        assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_branch_results_single() {
+        let results = vec![("only".to_string(), Bytes::from("data"))];
+        let serialized = serialize_branch_results(&results).unwrap();
+        let deserialized = deserialize_named_branch_results(&serialized).unwrap();
+        assert_eq!(deserialized.len(), 1);
+        assert_eq!(deserialized["only"], Bytes::from("data"));
+    }
+
+    // ========================================================================
+    // continuation_id
+    // ========================================================================
+
+    #[test]
+    fn test_continuation_id_task() {
+        let cont = WorkflowContinuation::Task {
+            id: "my_task".into(),
+            func: None,
+            next: None,
+        };
+        assert_eq!(continuation_id(&cont), "my_task");
+    }
+
+    #[test]
+    fn test_continuation_id_fork() {
+        let cont = WorkflowContinuation::Fork {
+            branches: vec![].into_boxed_slice(),
+            join: None,
+        };
+        assert_eq!(continuation_id(&cont), "unnamed");
+    }
+
+    // ========================================================================
+    // execute_continuation_sync
+    // ========================================================================
+
+    #[test]
+    fn test_sync_single_task() {
+        let input = encode_u32(5);
+        let cont = stub_node("add_one", None);
+
+        let callback = |_id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+            let val = decode_u32(&input);
+            Ok(encode_u32(val + 1))
+        };
+
+        let result = execute_continuation_sync(&cont, input, &callback).unwrap();
+        assert_eq!(decode_u32(&result), 6);
+    }
+
+    #[test]
+    fn test_sync_chained_tasks() {
+        let double = stub_node("double", None);
+        let add_one = stub_node("add_one", Some(Box::new(double)));
+        let input = encode_u32(10);
+
+        let callback = |id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+            let val = decode_u32(&input);
+            match id {
+                "add_one" => Ok(encode_u32(val + 1)),
+                "double" => Ok(encode_u32(val * 2)),
+                _ => anyhow::bail!("Unknown task: {id}"),
+            }
+        };
+
+        let result = execute_continuation_sync(&add_one, input, &callback).unwrap();
+        // 10 + 1 = 11, 11 * 2 = 22
+        assert_eq!(decode_u32(&result), 22);
+    }
+
+    #[test]
+    fn test_sync_fork_with_join() {
+        let branch_a = Arc::new(stub_node("branch_a", None));
+        let branch_b = Arc::new(stub_node("branch_b", None));
+        let join_task = stub_node("join", None);
+
+        let fork = WorkflowContinuation::Fork {
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: Some(Box::new(join_task)),
+        };
+
+        let input = encode_u32(10);
+
+        let callback = |id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+            let val: u32 = serde_json::from_slice(&input).unwrap_or(0);
+            match id {
+                "branch_a" => Ok(encode_u32(val * 2)),
+                "branch_b" => Ok(encode_u32(val + 5)),
+                "join" => {
+                    let branches = deserialize_named_branch_results(&input).unwrap();
+                    let a = decode_u32(&branches["branch_a"]);
+                    let b = decode_u32(&branches["branch_b"]);
+                    Ok(encode_u32(a + b))
+                }
+                _ => anyhow::bail!("Unknown task: {id}"),
+            }
+        };
+
+        let result = execute_continuation_sync(&fork, input, &callback).unwrap();
+        // branch_a: 10*2=20, branch_b: 10+5=15, join: 20+15=35
+        assert_eq!(decode_u32(&result), 35);
+    }
+
+    #[test]
+    fn test_sync_fork_without_join() {
+        let branch_a = Arc::new(stub_node("branch_a", None));
+        let branch_b = Arc::new(stub_node("branch_b", None));
+
+        let fork = WorkflowContinuation::Fork {
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: None,
+        };
+
+        let input = encode_u32(10);
+
+        let callback = |id: &str, input: Bytes| -> anyhow::Result<Bytes> {
+            let val = decode_u32(&input);
+            match id {
+                "branch_a" => Ok(encode_u32(val * 2)),
+                "branch_b" => Ok(encode_u32(val + 5)),
+                _ => anyhow::bail!("Unknown"),
+            }
+        };
+
+        // Without join, returns last branch result
+        let result = execute_continuation_sync(&fork, input, &callback).unwrap();
+        assert_eq!(decode_u32(&result), 15); // branch_b: 10+5
+    }
+
+    #[test]
+    fn test_sync_task_failure_propagates() {
+        let cont = stub_node("fail_task", None);
+        let input = encode_u32(1);
+
+        let callback =
+            |_id: &str, _input: Bytes| -> anyhow::Result<Bytes> { anyhow::bail!("task exploded") };
+
+        let result = execute_continuation_sync(&cont, input, &callback);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("task exploded"));
+    }
+
+    // ========================================================================
+    // execute_continuation_async
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_async_single_task() {
+        let input = encode_u32(5);
+        let cont = task_node("add_one", |i: u32| async move { Ok(i + 1) }, None);
+
+        let result = execute_continuation_async(&cont, input).await.unwrap();
+        assert_eq!(decode_u32(&result), 6);
+    }
+
+    #[tokio::test]
+    async fn test_async_chained_tasks() {
+        let double = task_node("double", |i: u32| async move { Ok(i * 2) }, None);
+        let add_one = task_node(
+            "add_one",
+            |i: u32| async move { Ok(i + 1) },
+            Some(Box::new(double)),
+        );
+
+        let input = encode_u32(10);
+        let result = execute_continuation_async(&add_one, input).await.unwrap();
+        assert_eq!(decode_u32(&result), 22);
+    }
+
+    #[tokio::test]
+    async fn test_async_fork_with_parallel_branches() {
+        let branch_a = Arc::new(task_node(
+            "branch_a",
+            |i: u32| async move { Ok(i * 2) },
+            None,
+        ));
+        let branch_b = Arc::new(task_node(
+            "branch_b",
+            |i: u32| async move { Ok(i + 5) },
+            None,
+        ));
+
+        // No join - returns last branch result
+        let fork = WorkflowContinuation::Fork {
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: None,
+        };
+
+        let input = encode_u32(10);
+        let result = execute_continuation_async(&fork, input).await.unwrap();
+        assert_eq!(decode_u32(&result), 15); // branch_b: 10+5
+    }
+
+    #[tokio::test]
+    async fn test_async_task_no_implementation() {
+        let cont = WorkflowContinuation::Task {
+            id: "missing".into(),
+            func: None,
+            next: None,
+        };
+
+        let result = execute_continuation_async(&cont, Bytes::new()).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no implementation")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_async_task_failure_propagates() {
+        let cont = task_node(
+            "fail",
+            |_i: u32| async move { anyhow::bail!("async task failed") },
+            None,
+        );
+
+        let input = encode_u32(1);
+        let result = execute_continuation_async(&cont, input).await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // prepare_run / prepare_resume / finalize_execution
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_prepare_run_creates_snapshot() {
+        let backend = InMemoryBackend::new();
+        let snapshot = prepare_run(
+            "inst-1".into(),
+            "hash-1".into(),
+            Bytes::from("input"),
+            "task-1".into(),
+            &backend,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.instance_id, "inst-1");
+        assert_eq!(snapshot.definition_hash, "hash-1");
+        assert!(snapshot.state.is_in_progress());
+
+        // Verify it was saved to backend
+        let loaded = backend.load_snapshot("inst-1").await.unwrap();
+        assert_eq!(loaded.instance_id, "inst-1");
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resume_ready() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-1".into(),
+            "hash-1".into(),
+            Bytes::from("input"),
+        );
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+        match outcome {
+            ResumeOutcome::Ready {
+                snapshot,
+                input_bytes,
+            } => {
+                assert_eq!(snapshot.instance_id, "inst-1");
+                assert_eq!(input_bytes, Bytes::from("input"));
+            }
+            _ => panic!("Expected Ready outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resume_with_completed_tasks() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-1".into(),
+            "hash-1".into(),
+            Bytes::from("initial"),
+        );
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("task1_output"));
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+        match outcome {
+            ResumeOutcome::Ready { input_bytes, .. } => {
+                // Should use last task output, not initial input
+                assert_eq!(input_bytes, Bytes::from("task1_output"));
+            }
+            _ => panic!("Expected Ready outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resume_already_completed() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_completed(Bytes::from("result"));
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+        match outcome {
+            ResumeOutcome::AlreadyTerminal(WorkflowStatus::Completed) => {}
+            _ => panic!("Expected AlreadyTerminal(Completed)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resume_already_failed() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_failed("err".into());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+        match outcome {
+            ResumeOutcome::AlreadyTerminal(WorkflowStatus::Failed(_)) => {}
+            _ => panic!("Expected AlreadyTerminal(Failed)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resume_already_cancelled() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_cancelled(Some("reason".into()), Some("admin".into()), None);
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let outcome = prepare_resume("inst-1", "hash-1", &backend).await.unwrap();
+        match outcome {
+            ResumeOutcome::AlreadyTerminal(WorkflowStatus::Cancelled { reason, .. }) => {
+                assert_eq!(reason, Some("reason".into()));
+            }
+            _ => panic!("Expected AlreadyTerminal(Cancelled)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prepare_resume_hash_mismatch() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        let result = prepare_resume("inst-1", "wrong-hash", &backend).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_finalize_execution_success() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        let status = finalize_execution(Ok(Bytes::from("output")), &mut snapshot, &backend)
+            .await
+            .unwrap();
+
+        match status {
+            WorkflowStatus::Completed => {}
+            _ => panic!("Expected Completed"),
+        }
+
+        let saved = backend.load_snapshot("inst-1").await.unwrap();
+        assert!(saved.state.is_completed());
+    }
+
+    #[tokio::test]
+    async fn test_finalize_execution_failure() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        let status =
+            finalize_execution(Err(anyhow::anyhow!("task failed")), &mut snapshot, &backend)
+                .await
+                .unwrap();
+
+        match status {
+            WorkflowStatus::Failed(e) => {
+                assert!(e.to_string().contains("task failed"));
+            }
+            _ => panic!("Expected Failed"),
+        }
+
+        let saved = backend.load_snapshot("inst-1").await.unwrap();
+        assert!(saved.state.is_failed());
+    }
+
+    #[tokio::test]
+    async fn test_finalize_execution_cancellation() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        // Mark as cancelled in backend so finalize can reload details
+        snapshot.mark_cancelled(Some("timeout".into()), Some("system".into()), None);
+        backend.save_snapshot(snapshot).await.unwrap();
+
+        // Reset local snapshot to in-progress for finalize logic
+        let mut local_snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+
+        let status = finalize_execution(
+            Err(WorkflowError::cancelled().into()),
+            &mut local_snapshot,
+            &backend,
+        )
+        .await
+        .unwrap();
+
+        match status {
+            WorkflowStatus::Cancelled {
+                reason,
+                cancelled_by,
+            } => {
+                assert_eq!(reason, Some("timeout".into()));
+                assert_eq!(cancelled_by, Some("system".into()));
+            }
+            _ => panic!("Expected Cancelled"),
+        }
+    }
+
+    // ========================================================================
+    // execute_continuation_with_checkpointing
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_checkpointing_single_task() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(5);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        let cont = stub_node("add_one", None);
+
+        let callback = |id: &str, input: Bytes| {
+            let id = id.to_string();
+            async move {
+                let val: u32 = serde_json::from_slice(&input)?;
+                match id.as_str() {
+                    "add_one" => Ok(Bytes::from(serde_json::to_vec(&(val + 1))?)),
+                    _ => anyhow::bail!("Unknown: {id}"),
+                }
+            }
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &cont,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decode_u32(&result), 6);
+        assert!(snapshot.get_task_result("add_one").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_checkpointing_chain() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(10);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        let double = stub_node("double", None);
+        let add_one = stub_node("add_one", Some(Box::new(double)));
+
+        let callback = |id: &str, input: Bytes| {
+            let id = id.to_string();
+            async move {
+                let val: u32 = serde_json::from_slice(&input)?;
+                match id.as_str() {
+                    "add_one" => Ok(Bytes::from(serde_json::to_vec(&(val + 1))?)),
+                    "double" => Ok(Bytes::from(serde_json::to_vec(&(val * 2))?)),
+                    _ => anyhow::bail!("Unknown: {id}"),
+                }
+            }
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &add_one,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decode_u32(&result), 22); // (10+1)*2
+        assert!(snapshot.get_task_result("add_one").is_some());
+        assert!(snapshot.get_task_result("double").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_checkpointing_skips_completed_tasks() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(10);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        // Pre-mark task as completed (simulates resume)
+        snapshot.mark_task_completed("add_one".into(), encode_u32(11));
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        let double = stub_node("double", None);
+        let add_one = stub_node("add_one", Some(Box::new(double)));
+
+        let was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let was_called_clone = was_called.clone();
+
+        let callback = move |id: &str, input: Bytes| {
+            let id = id.to_string();
+            let was_called_inner = was_called_clone.clone();
+            async move {
+                let val: u32 = serde_json::from_slice(&input)?;
+                match id.as_str() {
+                    "add_one" => {
+                        was_called_inner.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(Bytes::from(serde_json::to_vec(&(val + 1))?))
+                    }
+                    "double" => Ok(Bytes::from(serde_json::to_vec(&(val * 2))?)),
+                    _ => anyhow::bail!("Unknown: {id}"),
+                }
+            }
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &add_one,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await
+        .unwrap();
+
+        // add_one should NOT have been called - it was already completed
+        assert!(!was_called.load(std::sync::atomic::Ordering::SeqCst));
+        // cached output 11 * 2 = 22
+        assert_eq!(decode_u32(&result), 22);
+    }
+
+    #[tokio::test]
+    async fn test_checkpointing_fork_sequential() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(10);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        let branch_a = Arc::new(stub_node("branch_a", None));
+        let branch_b = Arc::new(stub_node("branch_b", None));
+        let join_task = stub_node("join", None);
+
+        let fork = WorkflowContinuation::Fork {
+            branches: vec![branch_a, branch_b].into_boxed_slice(),
+            join: Some(Box::new(join_task)),
+        };
+
+        let callback = |id: &str, input: Bytes| {
+            let id = id.to_string();
+            async move {
+                let val: u32 = serde_json::from_slice(&input).unwrap_or(0);
+                match id.as_str() {
+                    "branch_a" => Ok(Bytes::from(serde_json::to_vec(&(val * 2))?)),
+                    "branch_b" => Ok(Bytes::from(serde_json::to_vec(&(val + 5))?)),
+                    "join" => {
+                        let branches = deserialize_named_branch_results(&input)?;
+                        let a: u32 = serde_json::from_slice(&branches["branch_a"])?;
+                        let b: u32 = serde_json::from_slice(&branches["branch_b"])?;
+                        Ok(Bytes::from(serde_json::to_vec(&(a + b))?))
+                    }
+                    _ => anyhow::bail!("Unknown: {id}"),
+                }
+            }
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &fork,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await
+        .unwrap();
+
+        // branch_a: 10*2=20, branch_b: 10+5=15, join: 20+15=35
+        assert_eq!(decode_u32(&result), 35);
+    }
+
+    #[tokio::test]
+    async fn test_checkpointing_cancellation() {
+        let backend = InMemoryBackend::new();
+        let input = encode_u32(5);
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+        backend.save_snapshot(snapshot.clone()).await.unwrap();
+
+        // Request cancellation before execution
+        let request = workflow_core::snapshot::CancellationRequest {
+            reason: Some("test cancel".into()),
+            requested_by: Some("tester".into()),
+            requested_at: chrono::Utc::now(),
+        };
+        backend
+            .request_cancellation("inst-1", request)
+            .await
+            .unwrap();
+
+        let cont = stub_node("task1", None);
+
+        let callback = |_id: &str, _input: Bytes| async { anyhow::bail!("Should not be called") };
+
+        let result = execute_continuation_with_checkpointing(
+            &cont,
+            input,
+            &mut snapshot,
+            &backend,
+            &callback,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.downcast_ref::<WorkflowError>().is_some());
+    }
+
+    // ========================================================================
+    // get_resume_input
+    // ========================================================================
+
+    #[test]
+    fn test_get_resume_input_no_completed_tasks() {
+        let snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-1".into(),
+            "hash-1".into(),
+            Bytes::from("initial"),
+        );
+        let input = get_resume_input(&snapshot).unwrap();
+        assert_eq!(input, Bytes::from("initial"));
+    }
+
+    #[test]
+    fn test_get_resume_input_with_completed_tasks() {
+        let mut snapshot = WorkflowSnapshot::with_initial_input(
+            "inst-1".into(),
+            "hash-1".into(),
+            Bytes::from("initial"),
+        );
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("task1_out"));
+        let input = get_resume_input(&snapshot).unwrap();
+        assert_eq!(input, Bytes::from("task1_out"));
+    }
+
+    #[test]
+    fn test_get_resume_input_not_in_progress() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_completed(Bytes::from("done"));
+        let result = get_resume_input(&snapshot);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_resume_input_no_initial_input() {
+        let snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        let result = get_resume_input(&snapshot);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("initial input not stored")
+        );
     }
 }

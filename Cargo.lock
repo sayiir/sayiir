@@ -932,6 +932,7 @@ dependencies = [
  "chrono",
  "serde",
  "sha2",
+ "thiserror",
  "tokio",
 ]
 

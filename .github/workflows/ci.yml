@@ -43,32 +43,36 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v6
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install tools
-        run: pip install ruff pyright
-
       - name: Run ruff check
-        run: ruff check python/
+        run: uvx ruff check python/
 
       - name: Run ruff format check
-        run: ruff format --check python/
+        run: uvx ruff format --check python/
 
       - name: Run pyright
-        run: pyright python/
+        run: uvx pyright python/
 
   python:
     name: Python Binding
+    needs: python-lint
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - name: Checkout sources
         uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -86,10 +90,10 @@ jobs:
 
       - name: Install and test import
         run: |
-          pip install dist/*.whl
+          uv pip install --system dist/*.whl
           python -c "import sayiir; print(sayiir)"
 
       - name: Run pytest
         run: |
-          pip install pytest pydantic
+          uv pip install --system pytest pydantic
           pytest python/tests/ -v

@@ -1,4 +1,5 @@
 use crate::codec::{Codec, sealed};
+use crate::error::WorkflowError;
 use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,9 @@ pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String,
 
     // Read number of branches
     if bytes.len() < 4 {
-        return Err(anyhow::anyhow!("Buffer too small for branch count"));
+        return Err(
+            WorkflowError::Deserialization("buffer too small for branch count".into()).into(),
+        );
     }
     let branch_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
     offset += 4;
@@ -70,28 +73,32 @@ pub fn deserialize_named_branch_results(bytes: &Bytes) -> Result<HashMap<String,
     for _ in 0..branch_count {
         // Read name length
         if bytes.len() < offset + 4 {
-            return Err(anyhow::anyhow!("Buffer too small for name length"));
+            return Err(
+                WorkflowError::Deserialization("buffer too small for name length".into()).into(),
+            );
         }
         let name_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
         offset += 4;
 
         // Read name (must copy for String conversion)
         if bytes.len() < offset + name_len {
-            return Err(anyhow::anyhow!("Buffer too small for name"));
+            return Err(WorkflowError::Deserialization("buffer too small for name".into()).into());
         }
         let name = String::from_utf8(bytes[offset..offset + name_len].to_vec())?;
         offset += name_len;
 
         // Read data length
         if bytes.len() < offset + 4 {
-            return Err(anyhow::anyhow!("Buffer too small for data length"));
+            return Err(
+                WorkflowError::Deserialization("buffer too small for data length".into()).into(),
+            );
         }
         let data_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
         offset += 4;
 
         // Zero-copy slice for data
         if bytes.len() < offset + data_len {
-            return Err(anyhow::anyhow!("Buffer too small for data"));
+            return Err(WorkflowError::Deserialization("buffer too small for data".into()).into());
         }
         let data = bytes.slice(offset..offset + data_len);
         offset += data_len;
@@ -165,7 +172,7 @@ impl<C: Codec> BranchOutputs<C> {
         let bytes = self
             .outputs
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Branch '{name}' not found"))?;
+            .ok_or_else(|| WorkflowError::BranchNotFound(name.to_string()))?;
 
         self.codec.decode(bytes.clone())
     }
