@@ -95,16 +95,16 @@ This isn't accidental. It means you can swap any layer without touching the othe
 
 ### How we compare
 
-| | Sayiir | Temporal | Restate | Inngest | DBOS |
-|---|---|---|---|---|---|
-| **Architecture** | Library (embedded) | Server cluster | Single binary server | Centralized server | Library + Postgres |
-| **Recovery model** | Checkpoint & resume | Deterministic replay | Journal replay | Step replay | Checkpoint & resume |
-| **Determinism required** | No | Yes | Yes | Yes | No |
-| **Infrastructure** | None (library) | Multi-service + DB | Single binary | Server | Postgres |
-| **Rust core** | Native | Migrating to | Written in | No | No |
-| **Language SDKs** | Rust, Python | Go, Java, TS, Python, .NET | TS, Java, Python, Go, Rust | TS, Python, Go | Python, TS, Go, Java |
-| **License** | MIT | MIT | BSL | SSPL | MIT |
-| **Self-host complexity** | Zero | High | Low | Medium | Low |
+| | Sayiir | Temporal | Cadence | Restate | Inngest | DBOS | Windmill | Elsa |
+|---|---|---|---|---|---|---|---|---|
+| **Architecture** | Library (embedded) | Server cluster | Server cluster | Single binary server | Centralized server | Library + Postgres | Platform (server + workers) | Library or server (.NET) |
+| **Recovery model** | Checkpoint & resume | Deterministic replay | Deterministic replay | Journal replay | Step replay | Checkpoint & resume | Step retry | State persistence |
+| **Determinism required** | No | Yes | Yes | Yes | Yes | No | No | No |
+| **Infrastructure** | None (library) | Multi-service + DB | Multi-service + DB | Single binary | Server | Postgres | Postgres + workers | None (library) or DB |
+| **Rust core** | Native | Migrating to | No (Go) | Written in | No | No | Backend in Rust | No (.NET) |
+| **Language SDKs** | Rust, Python | Go, Java, TS, Python, .NET | Go, Java | TS, Java, Python, Go, Rust | TS, Python, Go | Python, TS, Go, Java | Python, TS, Go, Bash, +20 | .NET (C#) |
+| **License** | MIT | MIT | Apache 2.0 | BSL | SSPL | MIT | AGPLv3 | MIT |
+| **Self-host complexity** | Zero | High | High | Low | Medium | Low | Medium | Low |
 
 ---
 
@@ -132,6 +132,16 @@ The most sophisticated option, but sophistication has costs:
 - **Activities vs workflows is a false dichotomy** — You must split your logic into "workflow code" (deterministic, replay-safe) and "activities" (side effects). This artificial distinction adds cognitive load and boilerplate.
 - **Expect a month before productivity** — The learning curve is real. Temporal's own documentation acknowledges this isn't the right fit if your team "doesn't have strong software engineering experience."
 - **Heavy infrastructure** — Requires their server, a database (PostgreSQL/Cassandra), optionally Elasticsearch. Self-hosting is non-trivial; their cloud offering is the path of least resistance.
+
+#### Cadence
+
+Temporal's predecessor, built at Uber:
+
+- **Same replay model, smaller ecosystem** — Cadence uses the same deterministic replay and event sourcing approach as Temporal (its creators went on to build Temporal). All the same determinism constraints apply — no random values, no system time, no direct I/O in workflow code.
+- **Go and Java only** — No Python, TypeScript, or .NET SDKs. If your team isn't writing Go or Java, Cadence isn't an option.
+- **Same infrastructure weight as Temporal** — Requires a multi-service cluster (frontend, history, matching, workers) plus Cassandra or MySQL. Self-hosting complexity is comparable to Temporal.
+- **Internal focus** — Cadence was built for Uber's internal needs and is maintained with that priority. Community adoption and third-party ecosystem are significantly smaller than Temporal's.
+- **Frozen in time** — While Temporal has evolved with new SDKs, cloud offering, and features, Cadence has remained largely stable. Stability is a feature for existing users, but new adopters get fewer capabilities and less community support.
 
 #### Apache Airflow
 
@@ -188,6 +198,15 @@ A platform that combines process scheduling with workflow features:
 - **Subprocess-based execution model** — Windmill spawns subprocesses and captures their output. This contrasts with library-first durable workflow engines like Temporal or Sayiir, where workflows are expressed directly in application code rather than via external scripts managed by a platform.
 - **AGPLv3 licensing** — It adds further constraints for commercial use.
 - **Platform, not a library** — You don't import Windmill; you deploy it. Your workflows live in their UI, their database, their execution model. **Self-hosted doesn't mean portable**. How you structure scripts, how you pass data, how you handle errors, how you deploy workers—Windmill has strong opinions, and your code must conform.
+
+#### Elsa Workflows
+
+.NET workflow library with visual designer:
+
+- **Library architecture — but .NET only** — Elsa can be embedded as a NuGet package, which is the right architectural choice. But it's exclusively .NET/C#. No path to Python, Go, or TypeScript. If your stack isn't .NET, Elsa doesn't exist for you.
+- **Visual designer focus** — Elsa's strength is its Blazor-based workflow designer (Elsa Studio). Workflows can be defined in code, JSON, or visually. This makes it closer to a BPM tool than a developer-first workflow library.
+- **No durable execution** — Elsa persists workflow state and supports long-running workflows with bookmarks/signals, but it's not a durable execution engine. There's no automatic checkpointing of arbitrary code — you design workflows as activity graphs, not as regular application code.
+- **Ecosystem limitations** — Smaller community than Temporal or Airflow. Enterprise support is available through ELSA-X, but the ecosystem of integrations and production battle-testing is limited.
 
 ### What Developers Actually Want
 
