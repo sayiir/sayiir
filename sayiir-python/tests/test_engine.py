@@ -133,8 +133,8 @@ class TestSimpleEngine:
         wf = (
             Flow("multi-step")
             .fork()
-            .branch(step_a, step_b)   # 5 → 50 → 51
-            .branch(branch_a)          # 5 → 15
+            .branch(step_a, step_b)  # 5 → 50 → 51
+            .branch(branch_a)  # 5 → 15
             .join(collect_join)
             .build()
         )

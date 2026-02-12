@@ -56,12 +56,7 @@ class TestPydanticIntegration:
 
     def test_chained_pydantic_then_plain(self):
         """Pydantic output feeds into a plain (non-model) task."""
-        wf = (
-            Flow("pydantic-chain")
-            .then(greet_user)
-            .then(shout_greeting)
-            .build()
-        )
+        wf = Flow("pydantic-chain").then(greet_user).then(shout_greeting).build()
         result = run_workflow(wf, {"name": "Eve", "age": 25})
         assert result == "HELLO, EVE!"
 
