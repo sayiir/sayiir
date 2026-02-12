@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-use sayiir_core::snapshot::CancellationRequest;
+use sayiir_core::snapshot::{CancellationRequest, PauseRequest};
 use sayiir_core::workflow::WorkflowStatus;
 use sayiir_persistence::{InMemoryBackend, PersistentBackend};
 use sayiir_runtime::{
@@ -127,6 +127,7 @@ impl PyDurableEngine {
                             };
                             Ok((status, output))
                         }
+                        ResumeOutcome::Paused(status) => Ok((status, None)),
                         ResumeOutcome::Ready {
                             mut snapshot,
                             input_bytes,
@@ -172,6 +173,30 @@ impl PyDurableEngine {
                     CancellationRequest::new(reason, cancelled_by),
                 ),
             )
+            .map_err(backend_err_to_py)
+    }
+
+    /// Request pausing of a running workflow.
+    #[pyo3(signature = (instance_id, reason=None, paused_by=None))]
+    fn pause(
+        &self,
+        instance_id: String,
+        reason: Option<String>,
+        paused_by: Option<String>,
+    ) -> PyResult<()> {
+        self.runtime
+            .block_on(
+                self.backend
+                    .request_pause(&instance_id, PauseRequest::new(reason, paused_by)),
+            )
+            .map_err(backend_err_to_py)
+    }
+
+    /// Unpause a paused workflow so it can be resumed.
+    fn unpause(&self, instance_id: String) -> PyResult<()> {
+        self.runtime
+            .block_on(self.backend.unpause(&instance_id))
+            .map(|_| ())
             .map_err(backend_err_to_py)
     }
 

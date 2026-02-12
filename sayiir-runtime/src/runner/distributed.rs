@@ -17,7 +17,7 @@ use sayiir_core::codec::sealed;
 use sayiir_core::context::{WorkflowContext, with_context};
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{
-    CancellationRequest, ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState,
+    CancellationRequest, ExecutionPosition, PauseRequest, WorkflowSnapshot, WorkflowSnapshotState,
 };
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use crate::error::RuntimeError;
 use crate::execution::{
-    finalize_execution, get_resume_input, park_at_delay, serialize_branch_results,
+    ForkBranchOutcome, check_guards, check_parked_position, collect_cached_branches,
+    execute_or_skip_task, finalize_execution, get_resume_input, park_at_delay,
+    serialize_branch_results, settle_fork_branches,
 };
 
 /// A single-process workflow runner with checkpointing for crash recovery.
@@ -104,6 +106,37 @@ where
             .await?;
 
         Ok(())
+    }
+
+    /// Request pausing of a workflow.
+    ///
+    /// The workflow will be paused at the next task boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend fails to store the pause request.
+    pub async fn pause(
+        &self,
+        instance_id: &str,
+        reason: Option<String>,
+        paused_by: Option<String>,
+    ) -> Result<(), RuntimeError> {
+        self.backend
+            .request_pause(instance_id, PauseRequest::new(reason, paused_by))
+            .await?;
+        Ok(())
+    }
+
+    /// Unpause a paused workflow and return the updated snapshot.
+    ///
+    /// Transitions the workflow from Paused back to `InProgress`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend fails to unpause the workflow.
+    pub async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, RuntimeError> {
+        let snapshot = self.backend.unpause(instance_id).await?;
+        Ok(snapshot)
     }
 
     /// Get a reference to the backend.
@@ -189,7 +222,7 @@ where
     /// - The snapshot is not found
     /// - The workflow definition hash doesn't match (workflow definition changed)
     /// - The workflow cannot be resumed
-    #[allow(clippy::needless_lifetimes, clippy::too_many_lines)]
+    #[allow(clippy::needless_lifetimes)]
     pub async fn resume<'w, C, Input, M>(
         &self,
         workflow: &'w Workflow<C, Input, M>,
@@ -235,26 +268,11 @@ where
         };
 
         if let Some((wake_at, delay_id, next_task_id)) = delay_info {
-            tracing::debug!(instance_id, %delay_id, "checking cancellation at delay on resume");
-            if self
-                .backend
-                .check_and_cancel(&snapshot.instance_id, Some(&delay_id))
-                .await?
-            {
-                let snapshot = self.backend.load_snapshot(instance_id).await?;
-                let (reason, cancelled_by) = snapshot
-                    .state
-                    .cancellation_details()
-                    .unwrap_or((None, None));
-                return Ok(WorkflowStatus::Cancelled {
-                    reason,
-                    cancelled_by,
-                });
-            }
-
-            if chrono::Utc::now() < wake_at {
-                tracing::debug!(instance_id, %delay_id, %wake_at, "delay not yet expired");
-                return Ok(WorkflowStatus::Waiting { wake_at, delay_id });
+            let result =
+                check_parked_position(self.backend.as_ref(), instance_id, &delay_id, wake_at)
+                    .await?;
+            if let Some(status) = result.into_status() {
+                return Ok(status);
             }
             tracing::info!(instance_id, %delay_id, "delay expired, advancing execution");
             if let Some(next_id) = next_task_id {
@@ -285,34 +303,13 @@ where
         };
 
         if let Some((wake_at, fork_id)) = fork_info {
-            tracing::debug!(instance_id, %fork_id, "checking cancellation at fork on resume");
-            if self
-                .backend
-                .check_and_cancel(&snapshot.instance_id, Some(&fork_id))
-                .await?
-            {
-                let snapshot = self.backend.load_snapshot(instance_id).await?;
-                let (reason, cancelled_by) = snapshot
-                    .state
-                    .cancellation_details()
-                    .unwrap_or((None, None));
-                return Ok(WorkflowStatus::Cancelled {
-                    reason,
-                    cancelled_by,
-                });
-            }
-
-            if chrono::Utc::now() < wake_at {
-                tracing::debug!(instance_id, %fork_id, %wake_at, "fork delays not yet expired");
-                return Ok(WorkflowStatus::Waiting {
-                    wake_at,
-                    delay_id: fork_id,
-                });
+            let result =
+                check_parked_position(self.backend.as_ref(), instance_id, &fork_id, wake_at)
+                    .await?;
+            if let Some(status) = result.into_status() {
+                return Ok(status);
             }
             tracing::info!(instance_id, %fork_id, "fork delays expired, resuming execution");
-            // Fall through to general resume code — the fork handler in
-            // execute_with_checkpointing will re-execute branches, skipping
-            // cached sub-tasks and expired delays.
         }
 
         // Resume execution
@@ -341,7 +338,7 @@ where
     }
 
     /// Execute continuation with checkpointing after each task (iterative, no boxing).
-    #[allow(clippy::too_many_lines, clippy::manual_async_fn)]
+    #[allow(clippy::manual_async_fn)]
     async fn execute_with_checkpointing<'a, C, M>(
         continuation: &'a WorkflowContinuation,
         input: Bytes,
@@ -364,39 +361,19 @@ where
                     func: Some(func),
                     next,
                 } => {
-                    // Check for cancellation before executing task
-                    if backend
-                        .check_and_cancel(&snapshot.instance_id, Some(id))
-                        .await?
-                    {
-                        return Err(WorkflowError::cancelled().into());
-                    }
+                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
 
-                    // Check if this task was already completed
-                    let output = if let Some(task_result) = snapshot.get_task_result(id) {
-                        task_result.output.clone()
-                    } else {
-                        let output = func.run(current_input).await?;
-                        snapshot.mark_task_completed(id.clone(), output.clone());
-                        output
-                    };
+                    let output =
+                        execute_or_skip_task(id, current_input, |i| func.run(i), snapshot).await?;
 
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
                             task_id: next_cont.first_task_id().to_string(),
                         });
                     }
-
                     backend.save_snapshot(snapshot).await?;
+                    check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
 
-                    if backend
-                        .check_and_cancel(&snapshot.instance_id, None)
-                        .await?
-                    {
-                        return Err(WorkflowError::cancelled().into());
-                    }
-
-                    // Continue to next or return
                     match next {
                         Some(next_continuation) => {
                             current = next_continuation;
@@ -409,16 +386,9 @@ where
                     return Err(WorkflowError::TaskNotImplemented(id.clone()).into());
                 }
                 WorkflowContinuation::Delay { id, duration, next } => {
-                    tracing::debug!(delay_id = %id, "checking cancellation before delay");
-                    if backend
-                        .check_and_cancel(&snapshot.instance_id, Some(id))
-                        .await?
-                    {
-                        return Err(WorkflowError::cancelled().into());
-                    }
+                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
 
                     if snapshot.get_task_result(id).is_some() {
-                        tracing::debug!(delay_id = %id, "delay already completed, skipping");
                         match next {
                             Some(n) => {
                                 current = n;
@@ -428,7 +398,6 @@ where
                         }
                     }
 
-                    tracing::info!(delay_id = %id, ?duration, "parking workflow at delay");
                     return Err(park_at_delay(
                         id,
                         duration,
@@ -444,169 +413,29 @@ where
                     branches,
                     join,
                 } => {
-                    // Check for cancellation before starting fork
-                    if backend
-                        .check_and_cancel(&snapshot.instance_id, None)
-                        .await?
-                    {
-                        return Err(WorkflowError::cancelled().into());
-                    }
+                    check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
 
-                    // Check if all branches already completed
-                    let mut all_branches_completed = true;
-                    let mut branch_results = Vec::with_capacity(branches.len());
-
-                    for branch in branches {
-                        let branch_id = branch.id().to_string();
-
-                        if let Some(result) = snapshot.get_task_result(&branch_id) {
-                            branch_results.push((branch_id, result.output.clone()));
+                    let branch_results =
+                        if let Some(cached) = collect_cached_branches(branches, snapshot) {
+                            cached
                         } else {
-                            all_branches_completed = false;
-                            break;
-                        }
-                    }
-
-                    if !all_branches_completed {
-                        // Collect cached results inline; only spawn tasks for uncached branches
-                        branch_results.clear();
-                        let mut branch_handles = Vec::with_capacity(branches.len());
-
-                        let instance_id = snapshot.instance_id.clone();
-
-                        for branch in branches {
-                            let branch_id = branch.id().to_string();
-
-                            if let Some(result) = snapshot.get_task_result(&branch_id) {
-                                // Already completed — collect directly, no spawn needed
-                                branch_results.push((branch_id, result.output.clone()));
-                            } else {
-                                let branch_input = current_input.clone();
-                                let branch_backend = Arc::clone(&backend);
-                                let branch_instance_id = instance_id.clone();
-                                let branch_context = context.clone();
-
-                                branch_handles.push(tokio::task::spawn(Self::execute_branch_task(
-                                    Arc::clone(branch),
-                                    branch_input,
-                                    branch_backend,
-                                    branch_instance_id,
-                                    branch_context,
-                                    branch_id,
-                                )));
-                            }
-                        }
-
-                        if !branch_handles.is_empty() {
-                            // Use join_all to wait for all branches (not try_join_all)
-                            // so we can collect completed results even when some
-                            // branches return Waiting.
-                            let all_results = future::join_all(branch_handles).await;
-
-                            let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
-
-                            for result in all_results {
-                                match result {
-                                    Ok(Ok((branch_id, output))) => {
-                                        branch_results.push((branch_id, output));
-                                    }
-                                    Ok(Err(RuntimeError::Workflow(WorkflowError::Waiting {
-                                        wake_at,
-                                    }))) => {
-                                        max_wake_at = Some(match max_wake_at {
-                                            Some(existing) => existing.max(wake_at),
-                                            None => wake_at,
-                                        });
-                                    }
-                                    Ok(Err(e)) => return Err(e),
-                                    Err(join_err) => return Err(RuntimeError::from(join_err)),
-                                }
-                            }
-
-                            // If any branch is waiting, park at fork
-                            if let Some(wake_at) = max_wake_at {
-                                // Save completed branch results to backend
-                                for (branch_id, output) in &branch_results {
-                                    backend
-                                        .save_task_result(
-                                            &snapshot.instance_id,
-                                            branch_id,
-                                            output.clone(),
-                                        )
-                                        .await?;
-                                }
-
-                                // Reload snapshot from backend to include sub-task
-                                // results saved by branch execution
-                                let mut updated_snapshot =
-                                    backend.load_snapshot(&snapshot.instance_id).await?;
-
-                                let completed_branches: std::collections::HashMap<
-                                    String,
-                                    sayiir_core::snapshot::TaskResult,
-                                > = branch_results
-                                    .iter()
-                                    .map(|(id, output)| {
-                                        (
-                                            id.clone(),
-                                            sayiir_core::snapshot::TaskResult {
-                                                task_id: id.clone(),
-                                                output: output.clone(),
-                                            },
-                                        )
-                                    })
-                                    .collect();
-
-                                updated_snapshot.update_position(ExecutionPosition::AtFork {
-                                    fork_id: fork_id.clone(),
-                                    completed_branches,
-                                    wake_at,
-                                });
-                                backend.save_snapshot(&updated_snapshot).await?;
-                                *snapshot = updated_snapshot;
-
-                                return Err(WorkflowError::Waiting { wake_at }.into());
-                            }
-                        }
-
-                        // Check for cancellation after fork
-                        if backend
-                            .check_and_cancel(&snapshot.instance_id, None)
+                            let outcome = Self::execute_fork_branches_parallel(
+                                branches,
+                                &current_input,
+                                snapshot,
+                                &backend,
+                                &context,
+                            )
+                            .await?;
+                            settle_fork_branches(
+                                fork_id,
+                                outcome,
+                                join.as_deref(),
+                                snapshot,
+                                backend.as_ref(),
+                            )
                             .await?
-                        {
-                            return Err(WorkflowError::cancelled().into());
-                        }
-
-                        // Sync local snapshot
-                        for (branch_id, output) in &branch_results {
-                            snapshot.mark_task_completed(branch_id.clone(), output.clone());
-                        }
-
-                        tracing::debug!("Updating position for join");
-                        if let Some(join_cont) = join {
-                            let completed_branches: std::collections::HashMap<
-                                String,
-                                sayiir_core::snapshot::TaskResult,
-                            > = branch_results
-                                .iter()
-                                .map(|(id, output)| {
-                                    (
-                                        id.clone(),
-                                        sayiir_core::snapshot::TaskResult {
-                                            task_id: id.clone(),
-                                            output: output.clone(),
-                                        },
-                                    )
-                                })
-                                .collect();
-                            snapshot.update_position(ExecutionPosition::AtJoin {
-                                join_id: join_cont.first_task_id().to_string(),
-                                completed_branches,
-                            });
-                        }
-
-                        backend.save_snapshot(snapshot).await?;
-                    }
+                        };
 
                     // Proceed to join or return
                     match join {
@@ -625,6 +454,73 @@ where
                 }
             }
         }
+    }
+
+    /// Execute fork branches in parallel using tokio tasks.
+    async fn execute_fork_branches_parallel<C, M>(
+        branches: &[Arc<WorkflowContinuation>],
+        input: &Bytes,
+        snapshot: &WorkflowSnapshot,
+        backend: &Arc<B>,
+        context: &WorkflowContext<C, M>,
+    ) -> Result<ForkBranchOutcome, RuntimeError>
+    where
+        B: 'static,
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
+    {
+        let mut branch_results = Vec::with_capacity(branches.len());
+        let mut branch_handles = Vec::with_capacity(branches.len());
+        let instance_id = snapshot.instance_id.clone();
+
+        for branch in branches {
+            let branch_id = branch.id().to_string();
+
+            if let Some(result) = snapshot.get_task_result(&branch_id) {
+                branch_results.push((branch_id, result.output.clone()));
+            } else {
+                let branch_input = input.clone();
+                let branch_backend = Arc::clone(backend);
+                let branch_instance_id = instance_id.clone();
+                let branch_context = context.clone();
+
+                branch_handles.push(tokio::task::spawn(Self::execute_branch_task(
+                    Arc::clone(branch),
+                    branch_input,
+                    branch_backend,
+                    branch_instance_id,
+                    branch_context,
+                    branch_id,
+                )));
+            }
+        }
+
+        let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
+
+        if !branch_handles.is_empty() {
+            let all_results = future::join_all(branch_handles).await;
+
+            for result in all_results {
+                match result {
+                    Ok(Ok((branch_id, output))) => {
+                        branch_results.push((branch_id, output));
+                    }
+                    Ok(Err(RuntimeError::Workflow(WorkflowError::Waiting { wake_at }))) => {
+                        max_wake_at = Some(match max_wake_at {
+                            Some(existing) => existing.max(wake_at),
+                            None => wake_at,
+                        });
+                    }
+                    Ok(Err(e)) => return Err(e),
+                    Err(join_err) => return Err(RuntimeError::from(join_err)),
+                }
+            }
+        }
+
+        Ok(ForkBranchOutcome {
+            results: branch_results,
+            max_wake_at,
+        })
     }
 
     /// Execute a branch in a spawned task (takes ownership for Send).

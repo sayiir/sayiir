@@ -21,6 +21,7 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | Task registry for serializable workflows | Stable |
 | Workflow serialization with definition hash validation | Stable |
 | Durable delay/timer primitives (`sleep` between steps) | Stable |
+| Workflow pause and resume | Stable |
 | Panic-safe execution | Stable |
 | `WorkflowContext` with task-local metadata access | Stable |
 | InMemory backend (development/testing) | Stable |
@@ -33,14 +34,14 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | Fluent `Flow` builder API (`.then()`, `.fork()`, `.branch()`, `.join()`) | Done |
 | Simple execution (`run_workflow`) | Done |
 | Durable execution with checkpointing (`run_durable_workflow`) | Done |
-| Resume and cancel from Python | Done |
+| Resume, cancel, pause and unpause from Python | Done |
 | Fork/join with multi-step branches | Done |
 | Pydantic integration (automatic validation/serialization) | Done |
 | Type stubs (`.pyi`) and PEP 561 compliance | Done |
 | Async task support (via `asyncio.run()`) | Done |
 | Durable delays (`.delay()` with `timedelta` support) | Done |
 | `InMemoryBackend` exposed to Python | Done |
-| `WorkflowStatus` with error/cancellation details | Done |
+| `WorkflowStatus` with error/cancellation/pause details | Done |
 
 ---
 
@@ -52,7 +53,7 @@ The Python SDK is the first language binding and the template for all future bin
 
 - [x] `WorkflowStatus.output` — carry workflow result through durable engine
 - [x] `is_in_progress()` method on `WorkflowStatus`
-- [x] `resume_workflow` / `cancel_workflow` module-level helpers
+- [x] `resume_workflow` / `cancel_workflow` / `pause_workflow` / `unpause_workflow` module-level helpers
 - [x] Custom exception hierarchy (`WorkflowError`, `TaskError`, `BackendError`)
 - [x] Updated type stubs (`.pyi`) with output, exceptions, `is_in_progress`
 - [x] Resume returns decoded output for `AlreadyTerminal(Completed)`
@@ -121,6 +122,16 @@ Pause a workflow for minutes, hours, or days — surviving process restarts.
 - [x] `delay(duration)` as a first-class workflow primitive (Rust + Python)
 - [x] Timer persisted to backend, not held in memory
 - [x] Resume after timer expiry on any worker
+
+### Workflow Pause / Resume ✅
+
+Pause a running workflow at the next task boundary. Unpause and resume when ready.
+
+- [x] `pause(reason, paused_by)` request-based signaling (checked at every task boundary)
+- [x] `unpause()` transitions back to in-progress for re-execution
+- [x] Paused state preserves execution position and completed tasks for exact resume
+- [x] Pause checks at all boundaries: before/after tasks, delays, and forks
+- [x] Available from Rust (`CheckpointingRunner`, `PooledWorker`) and Python (`pause_workflow`, `unpause_workflow`)
 
 ### Signals / External Events
 
@@ -246,9 +257,29 @@ Commercial offering for teams that need more:
 - **Audit logging** — Immutable execution history for compliance
 - **Time-critical tasks** — Hard deadline enforcement, SLA guarantees, automatic escalation
 - **Multi-tenancy** — Isolated worker pools, resource quotas, tenant-specific config
-- **Security** — mTLS, RBAC, secrets management (Vault, AWS Secrets Manager)
 - **Auto-scaling** — Queue-depth-based worker provisioning, Kubernetes HPA/KEDA
 - **Code sandboxing** — Secure execution of untrusted/tenant-provided code
+
+### Security
+
+Workflow state is a high-value target — it contains business data, task inputs/outputs, and execution history. The Sayiir Server enterprise tier provides defense in depth.
+
+**Authentication & Authorization**
+
+- [ ] Worker authentication — mTLS or HMAC-signed claims so only authorized workers can claim and execute tasks
+- [ ] RBAC — Role-based access control for workflow operations (start, cancel, resume, inspect)
+- [ ] API authentication — Token or certificate-based auth for all server endpoints
+
+**Data Protection**
+
+- [ ] Encryption at rest — Backend-level encryption for snapshots and task results (Postgres TDE, KMS-managed keys)
+- [ ] Payload-level encryption — Pluggable envelope encryption at the codec layer so task inputs/outputs are encrypted independently of the storage backend; even DB admins or leaked backups don't expose sensitive workflow data
+- [ ] Secure credential passing — `SecretRef` type that resolves at execution time (from env, Vault, AWS Secrets Manager) rather than flowing secrets through the checkpoint pipeline
+
+**Integrity & Tamper Detection**
+
+- [ ] Snapshot integrity verification — HMAC or digital signatures on serialized snapshots to detect direct DB edits or state corruption (the `definition_hash` validates workflow structure, but nothing currently guards the data)
+- [ ] Input validation at system boundary — Sanitize and validate payloads at the binding layer before deserialization into task arguments
 
 ---
 

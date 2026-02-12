@@ -12,7 +12,7 @@ keywords.workspace = true
 
 [features]
 default = ["rkyv", "json"]
-json = ["dep:serde_json"]
+json = []
 rkyv = ["dep:rkyv", "dep:bytecheck"]
 
 [dependencies]
@@ -27,9 +27,12 @@ thiserror = { workspace = true }
 tokio-util = "0.7"
 futures = "0.3"
 chrono = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 rkyv = { workspace = true, optional = true }
 bytecheck = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [lib]
 name = "sayiir_runtime"

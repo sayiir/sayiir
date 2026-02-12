@@ -10,6 +10,7 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::workflow::{WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -44,6 +45,139 @@ pub(crate) async fn park_at_delay<B: PersistentBackend>(
         return RuntimeError::from(e);
     }
     WorkflowError::Waiting { wake_at }.into()
+}
+
+/// Check for cancellation and pause before or after a task boundary.
+///
+/// Combines the cancel + pause check into a single call. Returns `Ok(())` if
+/// execution should proceed, or an error if the workflow was cancelled or paused.
+pub(crate) async fn check_guards<B: PersistentBackend>(
+    backend: &B,
+    instance_id: &str,
+    cancel_scope: Option<&str>,
+) -> Result<(), RuntimeError> {
+    if backend.check_and_cancel(instance_id, cancel_scope).await? {
+        return Err(WorkflowError::cancelled().into());
+    }
+    if backend.check_and_pause(instance_id).await? {
+        return Err(WorkflowError::paused().into());
+    }
+    Ok(())
+}
+
+/// Build a `HashMap<String, TaskResult>` from branch results.
+///
+/// Pure function that eliminates the repeated pattern of converting
+/// `&[(String, Bytes)]` to a `HashMap` for snapshot position updates.
+pub(crate) fn build_completed_branches(
+    branch_results: &[(String, Bytes)],
+) -> HashMap<String, TaskResult> {
+    branch_results
+        .iter()
+        .map(|(id, output)| {
+            (
+                id.clone(),
+                TaskResult {
+                    task_id: id.clone(),
+                    output: output.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Execute a task or skip it if already cached in the snapshot.
+///
+/// Checks the snapshot cache first. If the task result exists, returns it.
+/// Otherwise, calls the provided `execute` closure and marks the task as
+/// completed in the snapshot.
+///
+/// Does NOT save the snapshot to the backend — the caller handles position
+/// update + save after, since the position depends on context.
+pub(crate) async fn execute_or_skip_task<F, Fut, E>(
+    id: &str,
+    input: Bytes,
+    execute: F,
+    snapshot: &mut WorkflowSnapshot,
+) -> Result<Bytes, RuntimeError>
+where
+    F: FnOnce(Bytes) -> Fut,
+    Fut: Future<Output = Result<Bytes, E>>,
+    E: Into<RuntimeError>,
+{
+    if let Some(task_result) = snapshot.get_task_result(id) {
+        return Ok(task_result.output.clone());
+    }
+    let output = execute(input).await.map_err(Into::into)?;
+    snapshot.mark_task_completed(id.to_string(), output.clone());
+    Ok(output)
+}
+
+/// Park a workflow at a fork because one or more branches are waiting.
+///
+/// Saves completed branch results to the backend, reloads the snapshot
+/// (to pick up sub-task results from branch execution), sets the `AtFork`
+/// position, saves, and returns `WorkflowError::Waiting`.
+///
+/// Returns `RuntimeError` (not `Result`) — caller uses
+/// `return Err(park_at_fork(...).await)`.
+pub(crate) async fn park_at_fork<B: PersistentBackend>(
+    fork_id: &str,
+    branch_results: &[(String, Bytes)],
+    wake_at: chrono::DateTime<chrono::Utc>,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+) -> RuntimeError {
+    for (branch_id, output) in branch_results {
+        if let Err(e) = backend
+            .save_task_result(&snapshot.instance_id, branch_id, output.clone())
+            .await
+        {
+            return RuntimeError::from(e);
+        }
+    }
+
+    let mut updated_snapshot = match backend.load_snapshot(&snapshot.instance_id).await {
+        Ok(s) => s,
+        Err(e) => return RuntimeError::from(e),
+    };
+
+    updated_snapshot.update_position(ExecutionPosition::AtFork {
+        fork_id: fork_id.to_string(),
+        completed_branches: build_completed_branches(branch_results),
+        wake_at,
+    });
+    if let Err(e) = backend.save_snapshot(&updated_snapshot).await {
+        return RuntimeError::from(e);
+    }
+    *snapshot = updated_snapshot;
+
+    WorkflowError::Waiting { wake_at }.into()
+}
+
+/// Sync branch results into the local snapshot and save the join position.
+///
+/// Marks each branch as completed in the snapshot, sets the `AtJoin` position
+/// (if there is a join continuation), and saves to the backend.
+pub(crate) async fn save_join_position<B: PersistentBackend>(
+    branch_results: &[(String, Bytes)],
+    join: Option<&WorkflowContinuation>,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+) -> Result<(), RuntimeError> {
+    for (branch_id, output) in branch_results {
+        snapshot.mark_task_completed(branch_id.clone(), output.clone());
+    }
+
+    if let Some(join_cont) = join {
+        snapshot.update_position(ExecutionPosition::AtJoin {
+            join_id: join_cont.first_task_id().to_string(),
+            completed_branches: build_completed_branches(branch_results),
+        });
+    }
+
+    backend.save_snapshot(snapshot).await?;
+    Ok(())
 }
 
 /// Outcome of resolving a fork's join.
@@ -83,48 +217,180 @@ fn resolve_join<'a>(
 
 /// Serialize named branch results into a format that can be passed to the join task.
 ///
-/// Uses a length-prefixed format with names:
-/// - 4 bytes: number of branches (u32, little-endian)
-/// - For each branch:
-///   - 4 bytes: name length (u32, little-endian)
-///   - N bytes: name (UTF-8)
-///   - 4 bytes: data length (u32, little-endian)
-///   - M bytes: data
+/// Uses `serde_json` to serialize [`NamedBranchResults`](sayiir_core::branch_results::NamedBranchResults).
 ///
 /// # Errors
 ///
-/// Returns an error if writing to the buffer fails.
-#[allow(clippy::cast_possible_truncation)]
+/// Returns an error if serialization fails.
 pub fn serialize_branch_results(branch_results: &[(String, Bytes)]) -> Result<Bytes, RuntimeError> {
-    use std::io::Write;
+    use sayiir_core::branch_results::NamedBranchResults;
 
-    let write_inner = || -> Result<Vec<u8>, std::io::Error> {
-        // Pre-calculate exact buffer size: 4 (count) + per-branch (4 + name_len + 4 + data_len)
-        let capacity = 4 + branch_results
-            .iter()
-            .map(|(n, d)| 8 + n.len() + d.len())
-            .sum::<usize>();
-        let mut buffer = Vec::with_capacity(capacity);
+    let nbr = NamedBranchResults::new(branch_results.to_vec());
+    Ok(Bytes::from(
+        serde_json::to_vec(&nbr).map_err(BoxError::from)?,
+    ))
+}
 
-        // Safe: we never have more than u32::MAX branches in practice
-        buffer.write_all(&(branch_results.len() as u32).to_le_bytes())?;
+/// Returns `Some(results)` if every branch is cached, `None` otherwise.
+pub(crate) fn collect_cached_branches(
+    branches: &[Arc<WorkflowContinuation>],
+    snapshot: &WorkflowSnapshot,
+) -> Option<Vec<(String, Bytes)>> {
+    let mut results = Vec::with_capacity(branches.len());
+    for branch in branches {
+        let branch_id = branch.id().to_string();
+        if let Some(result) = snapshot.get_task_result(&branch_id) {
+            results.push((branch_id, result.output.clone()));
+        } else {
+            return None;
+        }
+    }
+    Some(results)
+}
 
-        // Write each branch result with name and length prefix
-        for (name, data) in branch_results {
-            // Write name length and name
-            let name_bytes = name.as_bytes();
-            buffer.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
-            buffer.write_all(name_bytes)?;
+/// Outcome of executing fork branches (before settling).
+pub(crate) struct ForkBranchOutcome {
+    /// Branch results collected so far (including cached ones).
+    pub results: Vec<(String, Bytes)>,
+    /// If any branch returned `Waiting`, the latest wake time.
+    pub max_wake_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
-            // Write data length and data
-            buffer.write_all(&(data.len() as u32).to_le_bytes())?;
-            buffer.write_all(data.as_ref())?;
+/// Park if any branch is delayed, otherwise check guards and save join position.
+pub(crate) async fn settle_fork_branches<B: PersistentBackend>(
+    fork_id: &str,
+    outcome: ForkBranchOutcome,
+    join: Option<&WorkflowContinuation>,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+) -> Result<Vec<(String, Bytes)>, RuntimeError> {
+    if let Some(wake_at) = outcome.max_wake_at {
+        return Err(park_at_fork(fork_id, &outcome.results, wake_at, snapshot, backend).await);
+    }
+    check_guards(backend, &snapshot.instance_id, None).await?;
+    save_join_position(&outcome.results, join, snapshot, backend).await?;
+    Ok(outcome.results)
+}
+
+/// Execute fork branches sequentially, collecting results and tracking delays.
+pub(crate) async fn execute_fork_branches_sequential<F, Fut, B>(
+    branches: &[Arc<WorkflowContinuation>],
+    input: &Bytes,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+    execute_task: &F,
+) -> Result<ForkBranchOutcome, RuntimeError>
+where
+    B: PersistentBackend,
+    F: Fn(&str, Bytes) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<Bytes, BoxError>> + Send,
+{
+    let mut branch_results = Vec::with_capacity(branches.len());
+    let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
+    let instance_id = snapshot.instance_id.clone();
+
+    for branch in branches {
+        let branch_id = branch.id().to_string();
+
+        if let Some(result) = snapshot.get_task_result(&branch_id) {
+            branch_results.push((branch_id, result.output.clone()));
+            continue;
         }
 
-        Ok(buffer)
-    };
+        match execute_branch_with_checkpointing(
+            branch,
+            input.clone(),
+            &instance_id,
+            backend,
+            execute_task,
+        )
+        .await
+        {
+            Ok(output) => {
+                snapshot.mark_task_completed(branch_id.clone(), output.clone());
+                backend
+                    .save_task_result(&instance_id, &branch_id, output.clone())
+                    .await?;
+                branch_results.push((branch_id, output));
+            }
+            Err(RuntimeError::Workflow(WorkflowError::Waiting { wake_at })) => {
+                max_wake_at = Some(match max_wake_at {
+                    Some(existing) => existing.max(wake_at),
+                    None => wake_at,
+                });
+            }
+            Err(e) => return Err(e),
+        }
+    }
 
-    Ok(Bytes::from(write_inner().map_err(BoxError::from)?))
+    Ok(ForkBranchOutcome {
+        results: branch_results,
+        max_wake_at,
+    })
+}
+
+/// Result of checking a parked position (delay or fork) on resume.
+pub(crate) enum ParkedCheckResult {
+    /// Workflow was cancelled while parked.
+    Cancelled(WorkflowStatus),
+    /// Workflow was paused while parked.
+    Paused(WorkflowStatus),
+    /// The wake time has not yet arrived.
+    StillWaiting {
+        wake_at: chrono::DateTime<chrono::Utc>,
+        node_id: String,
+    },
+    /// The wake time has passed; execution can continue.
+    Expired,
+}
+
+impl ParkedCheckResult {
+    /// If the position is not expired, return the status for early return.
+    pub(crate) fn into_status(self) -> Option<WorkflowStatus> {
+        match self {
+            Self::Cancelled(status) | Self::Paused(status) => Some(status),
+            Self::StillWaiting { wake_at, node_id } => Some(WorkflowStatus::Waiting {
+                wake_at,
+                delay_id: node_id,
+            }),
+            Self::Expired => None,
+        }
+    }
+}
+
+/// Check cancel / pause / wake-time for a parked position (delay or fork).
+pub(crate) async fn check_parked_position<B: PersistentBackend>(
+    backend: &B,
+    instance_id: &str,
+    node_id: &str,
+    wake_at: chrono::DateTime<chrono::Utc>,
+) -> Result<ParkedCheckResult, RuntimeError> {
+    if backend.check_and_cancel(instance_id, Some(node_id)).await? {
+        let snapshot = backend.load_snapshot(instance_id).await?;
+        let (reason, cancelled_by) = snapshot
+            .state
+            .cancellation_details()
+            .unwrap_or((None, None));
+        return Ok(ParkedCheckResult::Cancelled(WorkflowStatus::Cancelled {
+            reason,
+            cancelled_by,
+        }));
+    }
+    if backend.check_and_pause(instance_id).await? {
+        let snapshot = backend.load_snapshot(instance_id).await?;
+        let (reason, paused_by) = snapshot.state.pause_details().unwrap_or((None, None));
+        return Ok(ParkedCheckResult::Paused(WorkflowStatus::Paused {
+            reason,
+            paused_by,
+        }));
+    }
+    if chrono::Utc::now() < wake_at {
+        return Ok(ParkedCheckResult::StillWaiting {
+            wake_at,
+            node_id: node_id.to_string(),
+        });
+    }
+    Ok(ParkedCheckResult::Expired)
 }
 
 /// Execute a workflow continuation synchronously.
@@ -323,7 +589,6 @@ fn execute_async_inner<'a>(
 ///
 /// # Errors
 /// Returns an error if task execution, cancellation checking, or snapshot saving fails.
-#[allow(clippy::too_many_lines)]
 pub async fn execute_continuation_with_checkpointing<F, Fut, B>(
     continuation: &WorkflowContinuation,
     input: Bytes,
@@ -342,38 +607,19 @@ where
     loop {
         match current {
             WorkflowContinuation::Task { id, next, .. } => {
-                // Check for cancellation before executing task
-                if backend
-                    .check_and_cancel(&snapshot.instance_id, Some(id))
-                    .await?
-                {
-                    return Err(WorkflowError::cancelled().into());
-                }
+                check_guards(backend, &snapshot.instance_id, Some(id)).await?;
 
-                // Check if this task was already completed (resume case)
-                let output = if let Some(task_result) = snapshot.get_task_result(id) {
-                    task_result.output.clone()
-                } else {
-                    let output = execute_task(id, current_input).await?;
-                    snapshot.mark_task_completed(id.clone(), output.clone());
-                    output
-                };
+                let output =
+                    execute_or_skip_task(id, current_input, |i| execute_task(id, i), snapshot)
+                        .await?;
 
                 if let Some(next_cont) = next {
                     snapshot.update_position(ExecutionPosition::AtTask {
                         task_id: next_cont.first_task_id().to_string(),
                     });
                 }
-
                 backend.save_snapshot(snapshot).await?;
-
-                // Check for cancellation after task completion
-                if backend
-                    .check_and_cancel(&snapshot.instance_id, None)
-                    .await?
-                {
-                    return Err(WorkflowError::cancelled().into());
-                }
+                check_guards(backend, &snapshot.instance_id, None).await?;
 
                 match next {
                     Some(next_continuation) => {
@@ -384,16 +630,9 @@ where
                 }
             }
             WorkflowContinuation::Delay { id, duration, next } => {
-                tracing::debug!(delay_id = %id, "checking cancellation before delay");
-                if backend
-                    .check_and_cancel(&snapshot.instance_id, Some(id))
-                    .await?
-                {
-                    return Err(WorkflowError::cancelled().into());
-                }
+                check_guards(backend, &snapshot.instance_id, Some(id)).await?;
 
                 if snapshot.get_task_result(id).is_some() {
-                    tracing::debug!(delay_id = %id, "delay already completed, skipping");
                     match next {
                         Some(n) => {
                             current = n;
@@ -403,7 +642,6 @@ where
                     }
                 }
 
-                tracing::info!(delay_id = %id, ?duration, "parking workflow at delay");
                 return Err(park_at_delay(
                     id,
                     duration,
@@ -419,147 +657,24 @@ where
                 branches,
                 join,
             } => {
-                // Check for cancellation before starting fork
-                if backend
-                    .check_and_cancel(&snapshot.instance_id, None)
-                    .await?
-                {
-                    return Err(WorkflowError::cancelled().into());
-                }
+                check_guards(backend, &snapshot.instance_id, None).await?;
 
-                // Check if all branches already completed (resume case)
-                let mut all_branches_completed = true;
-                let mut branch_results = Vec::with_capacity(branches.len());
-
-                for branch in branches {
-                    let branch_id = branch.id().to_string();
-
-                    if let Some(result) = snapshot.get_task_result(&branch_id) {
-                        branch_results.push((branch_id, result.output.clone()));
+                let branch_results =
+                    if let Some(cached) = collect_cached_branches(branches, snapshot) {
+                        cached
                     } else {
-                        all_branches_completed = false;
-                        break;
-                    }
-                }
-
-                if !all_branches_completed {
-                    // Execute branches sequentially (GIL-friendly)
-                    branch_results.clear();
-                    let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
-
-                    for branch in branches {
-                        let branch_id = branch.id().to_string();
-
-                        // Check if this specific branch was already completed
-                        if let Some(result) = snapshot.get_task_result(&branch_id) {
-                            branch_results.push((branch_id, result.output.clone()));
-                            continue;
-                        }
-
-                        match execute_branch_with_checkpointing(
-                            branch,
-                            current_input.clone(),
-                            &snapshot.instance_id,
+                        let outcome = execute_fork_branches_sequential(
+                            branches,
+                            &current_input,
+                            snapshot,
                             backend,
                             execute_task,
                         )
-                        .await
-                        {
-                            Ok(output) => {
-                                // Save branch result to snapshot and backend
-                                snapshot.mark_task_completed(branch_id.clone(), output.clone());
-                                backend
-                                    .save_task_result(
-                                        &snapshot.instance_id,
-                                        &branch_id,
-                                        output.clone(),
-                                    )
-                                    .await?;
-                                branch_results.push((branch_id, output));
-                            }
-                            Err(RuntimeError::Workflow(WorkflowError::Waiting { wake_at })) => {
-                                max_wake_at = Some(match max_wake_at {
-                                    Some(existing) => existing.max(wake_at),
-                                    None => wake_at,
-                                });
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
+                        .await?;
+                        settle_fork_branches(fork_id, outcome, join.as_deref(), snapshot, backend)
+                            .await?
+                    };
 
-                    // If any branch is waiting, park at fork
-                    if let Some(wake_at) = max_wake_at {
-                        // Save completed branch results to backend so they survive
-                        // the snapshot reload below
-                        for (branch_id, output) in &branch_results {
-                            backend
-                                .save_task_result(&snapshot.instance_id, branch_id, output.clone())
-                                .await?;
-                        }
-
-                        // Reload snapshot from backend to include sub-task results
-                        // saved by branch execution
-                        let mut updated_snapshot =
-                            backend.load_snapshot(&snapshot.instance_id).await?;
-
-                        let completed_branches: std::collections::HashMap<String, TaskResult> =
-                            branch_results
-                                .iter()
-                                .map(|(id, output)| {
-                                    (
-                                        id.clone(),
-                                        TaskResult {
-                                            task_id: id.clone(),
-                                            output: output.clone(),
-                                        },
-                                    )
-                                })
-                                .collect();
-
-                        updated_snapshot.update_position(ExecutionPosition::AtFork {
-                            fork_id: fork_id.clone(),
-                            completed_branches,
-                            wake_at,
-                        });
-                        backend.save_snapshot(&updated_snapshot).await?;
-                        *snapshot = updated_snapshot;
-
-                        return Err(WorkflowError::Waiting { wake_at }.into());
-                    }
-
-                    // Check for cancellation after fork
-                    if backend
-                        .check_and_cancel(&snapshot.instance_id, None)
-                        .await?
-                    {
-                        return Err(WorkflowError::cancelled().into());
-                    }
-
-                    // Update position for join
-                    if let Some(join_cont) = join {
-                        let completed_branches: std::collections::HashMap<String, TaskResult> =
-                            branch_results
-                                .iter()
-                                .map(|(id, output)| {
-                                    (
-                                        id.clone(),
-                                        TaskResult {
-                                            task_id: id.clone(),
-                                            output: output.clone(),
-                                        },
-                                    )
-                                })
-                                .collect();
-                        snapshot.update_position(ExecutionPosition::AtJoin {
-                            join_id: join_cont.first_task_id().to_string(),
-                            completed_branches,
-                        });
-                    }
-
-                    backend.save_snapshot(snapshot).await?;
-                }
-
-                // Proceed to join or return
                 match resolve_join(join.as_deref(), &branch_results)? {
                     JoinResolution::Continue { next, input } => {
                         current = next;
@@ -736,6 +851,9 @@ where
 
     // Check if already in terminal state
     if let Some(status) = snapshot.state.as_terminal_status() {
+        if snapshot.state.is_paused() {
+            return Ok(ResumeOutcome::Paused(status));
+        }
         return Ok(ResumeOutcome::AlreadyTerminal(status));
     }
 
@@ -759,6 +877,8 @@ pub enum ResumeOutcome {
     },
     /// Workflow is already in a terminal state.
     AlreadyTerminal(WorkflowStatus),
+    /// Workflow is paused (not terminal, but cannot execute until unpaused).
+    Paused(WorkflowStatus),
 }
 
 /// Get the input for resuming execution from a snapshot.
@@ -858,6 +978,21 @@ where
                 None,
             ))
         }
+        Err(RuntimeError::Workflow(WorkflowError::Paused { .. })) => {
+            // Reload snapshot to get pause details (set by check_and_pause)
+            if let Ok(paused_snapshot) = backend.load_snapshot(&snapshot.instance_id).await
+                && let Some((reason, paused_by)) = paused_snapshot.state.pause_details()
+            {
+                return Ok((WorkflowStatus::Paused { reason, paused_by }, None));
+            }
+            Ok((
+                WorkflowStatus::Paused {
+                    reason: None,
+                    paused_by: None,
+                },
+                None,
+            ))
+        }
         Err(e) => {
             snapshot.mark_failed(e.to_string());
             let _ = backend.save_snapshot(snapshot).await;
@@ -877,7 +1012,8 @@ where
 mod tests {
     use super::*;
     use crate::serialization::JsonCodec;
-    use sayiir_core::task::{deserialize_named_branch_results, to_core_task};
+    use sayiir_core::branch_results::NamedBranchResults;
+    use sayiir_core::task::to_core_task;
     use sayiir_persistence::InMemoryBackend;
     use std::sync::Arc;
 
@@ -932,18 +1068,19 @@ mod tests {
         ];
 
         let serialized = serialize_branch_results(&results).unwrap();
-        let deserialized = deserialize_named_branch_results(&serialized).unwrap();
+        let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
+        let map = deserialized.into_map();
 
-        assert_eq!(deserialized.len(), 2);
-        assert_eq!(deserialized["branch_a"], Bytes::from(vec![1, 2, 3]));
-        assert_eq!(deserialized["branch_b"], Bytes::from(vec![4, 5]));
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["branch_a"], Bytes::from(vec![1, 2, 3]));
+        assert_eq!(map["branch_b"], Bytes::from(vec![4, 5]));
     }
 
     #[test]
     fn test_serialize_branch_results_empty() {
         let results: Vec<(String, Bytes)> = vec![];
         let serialized = serialize_branch_results(&results).unwrap();
-        let deserialized = deserialize_named_branch_results(&serialized).unwrap();
+        let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
         assert!(deserialized.is_empty());
     }
 
@@ -951,9 +1088,10 @@ mod tests {
     fn test_serialize_branch_results_single() {
         let results = vec![("only".to_string(), Bytes::from("data"))];
         let serialized = serialize_branch_results(&results).unwrap();
-        let deserialized = deserialize_named_branch_results(&serialized).unwrap();
-        assert_eq!(deserialized.len(), 1);
-        assert_eq!(deserialized["only"], Bytes::from("data"));
+        let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
+        let map = deserialized.into_map();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["only"], Bytes::from("data"));
     }
 
     // ========================================================================
@@ -1014,9 +1152,10 @@ mod tests {
                 "branch_a" => Ok(encode_u32(val * 2)),
                 "branch_b" => Ok(encode_u32(val + 5)),
                 "join" => {
-                    let branches = deserialize_named_branch_results(&input).unwrap();
-                    let a = decode_u32(&branches["branch_a"]);
-                    let b = decode_u32(&branches["branch_b"]);
+                    let branches: NamedBranchResults = serde_json::from_slice(&input).unwrap();
+                    let map = branches.into_map();
+                    let a = decode_u32(&map["branch_a"]);
+                    let b = decode_u32(&map["branch_b"]);
                     Ok(encode_u32(a + b))
                 }
                 _ => Err(format!("Unknown task: {id}").into()),
@@ -1510,9 +1649,10 @@ mod tests {
                     "branch_a" => Ok(Bytes::from(serde_json::to_vec(&(val * 2))?)),
                     "branch_b" => Ok(Bytes::from(serde_json::to_vec(&(val + 5))?)),
                     "join" => {
-                        let branches = deserialize_named_branch_results(&input)?;
-                        let a: u32 = serde_json::from_slice(&branches["branch_a"])?;
-                        let b: u32 = serde_json::from_slice(&branches["branch_b"])?;
+                        let branches: NamedBranchResults = serde_json::from_slice(&input)?;
+                        let map = branches.into_map();
+                        let a: u32 = serde_json::from_slice(&map["branch_a"])?;
+                        let b: u32 = serde_json::from_slice(&map["branch_b"])?;
                         Ok(Bytes::from(serde_json::to_vec(&(a + b))?))
                     }
                     _ => Err(format!("Unknown: {id}").into()),
@@ -1938,10 +2078,12 @@ mod tests {
                     "before_delay" => Ok(encode_u32(val + 100)),
                     "after_delay" => Ok(encode_u32(val + 1)),
                     "join" => {
-                        let branches = sayiir_core::task::deserialize_named_branch_results(&input)?;
-                        let a: u32 = serde_json::from_slice(&branches["branch_a"])?;
+                        let branches: sayiir_core::branch_results::NamedBranchResults =
+                            serde_json::from_slice(&input)?;
+                        let map = branches.into_map();
+                        let a: u32 = serde_json::from_slice(&map["branch_a"])?;
                         // branch_b's ID is "before_delay" (first task in the chain)
-                        let b: u32 = serde_json::from_slice(&branches["before_delay"])?;
+                        let b: u32 = serde_json::from_slice(&map["before_delay"])?;
                         Ok(encode_u32(a + b))
                     }
                     other => Err(format!("Unknown task: {other}").into()),
@@ -2218,6 +2360,83 @@ mod tests {
                 other => panic!("Expected AtFork, got {other:?}"),
             },
             other => panic!("Expected InProgress, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use sayiir_core::branch_results::NamedBranchResults;
+
+    // Property 1: Roundtrip identity — serialize then deserialize recovers the same entries.
+    proptest! {
+        #[test]
+        fn serialize_deserialize_roundtrip(
+            entries in proptest::collection::vec(
+                (
+                    "[a-z]{0,32}",
+                    proptest::collection::vec(any::<u8>(), 0..64),
+                ),
+                0..8,
+            )
+        ) {
+            let typed: Vec<(String, Bytes)> = entries
+                .into_iter()
+                .map(|(n, d)| (n, Bytes::from(d)))
+                .collect();
+
+            let serialized = serialize_branch_results(&typed).unwrap();
+            let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
+
+            prop_assert_eq!(deserialized.as_slice(), typed.as_slice());
+        }
+    }
+
+    // Property 11: `get_resume_input` always errors for non-InProgress states.
+    proptest! {
+        #[test]
+        fn non_in_progress_always_errors(
+            variant in 0..3u8,
+            error_msg in "[a-zA-Z0-9 ]{0,32}",
+            reason in prop::option::of("[a-zA-Z0-9 ]{0,32}"),
+            cancelled_by in prop::option::of("[a-zA-Z0-9 ]{0,32}"),
+            output_data in proptest::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let mut snapshot = WorkflowSnapshot::new("inst".into(), "hash".into());
+            match variant {
+                0 => snapshot.mark_completed(Bytes::from(output_data)),
+                1 => snapshot.mark_failed(error_msg),
+                _ => snapshot.mark_cancelled(reason, cancelled_by, None),
+            }
+
+            let result = get_resume_input(&snapshot);
+            prop_assert!(result.is_err(), "Expected Err for non-InProgress state");
+        }
+    }
+
+    // Property 12: InProgress with no completed tasks returns the initial input.
+    proptest! {
+        #[test]
+        fn in_progress_empty_tasks_returns_initial_input(
+            input_data in proptest::collection::vec(any::<u8>(), 1..64),
+        ) {
+            let initial = Bytes::from(input_data);
+            let snapshot = WorkflowSnapshot::with_initial_input(
+                "inst".into(),
+                "hash".into(),
+                initial.clone(),
+            );
+
+            let result = get_resume_input(&snapshot).unwrap();
+            prop_assert_eq!(result, initial);
         }
     }
 }

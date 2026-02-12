@@ -19,7 +19,9 @@ use sayiir_core::codec::sealed;
 use sayiir_core::context::with_context;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::registry::TaskRegistry;
-use sayiir_core::snapshot::{CancellationRequest, ExecutionPosition, WorkflowSnapshot};
+use sayiir_core::snapshot::{
+    CancellationRequest, ExecutionPosition, PauseRequest, WorkflowSnapshot,
+};
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
@@ -29,6 +31,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
+
+/// Result of pre-execution validation and claim.
+enum PreExecutionResult {
+    /// Task claimed and snapshot loaded; ready to execute.
+    Ready { snapshot: Box<WorkflowSnapshot> },
+    /// Task should be skipped (already claimed, cancelled, paused, or completed).
+    Skip(WorkflowStatus),
+}
 
 /// A pooled worker that claims and executes tasks from a shared backend.
 ///
@@ -161,6 +171,33 @@ where
         Ok(())
     }
 
+    /// Request pausing of a workflow.
+    ///
+    /// This requests pausing of the specified workflow instance.
+    /// Running tasks will complete, but no new tasks will be started.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID to pause
+    /// - `reason`: Optional reason for the pause
+    /// - `paused_by`: Optional identifier of who requested the pause
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workflow cannot be paused (not found or in terminal/paused state).
+    pub async fn pause_workflow(
+        &self,
+        instance_id: &str,
+        reason: Option<String>,
+        paused_by: Option<String>,
+    ) -> Result<(), crate::error::RuntimeError> {
+        self.backend
+            .request_pause(instance_id, PauseRequest::new(reason, paused_by))
+            .await?;
+
+        Ok(())
+    }
+
     /// Get a reference to the backend.
     #[must_use]
     pub fn backend(&self) -> &Arc<B> {
@@ -186,6 +223,22 @@ where
         }
     }
 
+    /// Load paused status from a snapshot.
+    ///
+    /// Attempts to load the snapshot and extract pause details.
+    /// Returns `WorkflowStatus::Paused` with either the extracted details or defaults.
+    async fn load_paused_status(&self, instance_id: &str) -> WorkflowStatus {
+        if let Ok(snapshot) = self.backend.load_snapshot(instance_id).await
+            && let Some((reason, paused_by)) = snapshot.state.pause_details()
+        {
+            return WorkflowStatus::Paused { reason, paused_by };
+        }
+        WorkflowStatus::Paused {
+            reason: None,
+            paused_by: None,
+        }
+    }
+
     /// Execute a single task from an available task.
     ///
     /// This claims the task, executes it, updates the snapshot, and releases the claim.
@@ -197,7 +250,6 @@ where
     /// - The workflow definition hash doesn't match
     /// - Task execution fails
     /// - Snapshot update fails
-    #[allow(clippy::too_many_lines)]
     pub async fn execute_task<C, Input, M>(
         &self,
         workflow: &Workflow<C, Input, M>,
@@ -208,9 +260,121 @@ where
         M: Send + Sync + 'static,
         C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
     {
-        if available_task.workflow_definition_hash != workflow.definition_hash() {
+        let mut snapshot = match self
+            .validate_and_claim_task(
+                workflow.definition_hash(),
+                workflow.continuation(),
+                &available_task,
+            )
+            .await?
+        {
+            PreExecutionResult::Ready { snapshot } => *snapshot,
+            PreExecutionResult::Skip(status) => return Ok(status),
+        };
+
+        let (heartbeat_cancel, heartbeat_handle) =
+            self.spawn_heartbeat(&available_task.instance_id, &available_task.task_id);
+
+        tracing::debug!(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            "Executing task"
+        );
+
+        let context = workflow.context().clone();
+        let continuation = workflow.continuation();
+        let task_id = available_task.task_id.clone();
+        let input = available_task.input.clone();
+
+        // Execute task with panic safety - wrap in catch_unwind to ensure claim release
+        let execution_future = with_context(context, || async move {
+            Self::execute_task_by_id(continuation, &task_id, input).await
+        });
+
+        // Catch panics to ensure we always release the claim
+        let panic_result = AssertUnwindSafe(execution_future).catch_unwind().await;
+
+        // Cancel heartbeat and wait for it to stop before releasing claim
+        heartbeat_cancel.cancel();
+        if let Some(handle) = heartbeat_handle {
+            let _ = handle.await;
+            tracing::debug!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Stopped heartbeat for task"
+            );
+        }
+
+        // Handle panic case first
+        let result = match panic_result {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Task panicked with unknown payload".to_string()
+                };
+
+                tracing::error!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    panic = %panic_msg,
+                    "Task panicked - releasing claim"
+                );
+
+                self.release_claim_quietly(&available_task.instance_id, &available_task.task_id)
+                    .await;
+                return Err(WorkflowError::TaskPanicked(panic_msg).into());
+            }
+        };
+
+        match result {
+            Ok(output) => {
+                self.handle_task_success(
+                    workflow.continuation(),
+                    &available_task,
+                    &mut snapshot,
+                    output,
+                )
+                .await
+            }
+            Err(e) => {
+                tracing::error!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    error = %e,
+                    "Task execution failed"
+                );
+                self.release_claim_quietly(&available_task.instance_id, &available_task.task_id)
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Release a task claim, ignoring errors.
+    async fn release_claim_quietly(&self, instance_id: &str, task_id: &str) {
+        let _ = self
+            .backend
+            .release_task_claim(instance_id, task_id, &self.worker_id)
+            .await;
+    }
+
+    /// Validate the task, claim it, and load the snapshot.
+    ///
+    /// Returns `Ready` with the snapshot if the task can be executed,
+    /// or `Skip` with a status if it should be skipped.
+    async fn validate_and_claim_task(
+        &self,
+        definition_hash: &str,
+        continuation: &WorkflowContinuation,
+        available_task: &AvailableTask,
+    ) -> Result<PreExecutionResult, crate::error::RuntimeError> {
+        if available_task.workflow_definition_hash != definition_hash {
             return Err(WorkflowError::DefinitionMismatch {
-                expected: workflow.definition_hash().to_string(),
+                expected: definition_hash.to_string(),
                 found: available_task.workflow_definition_hash.clone(),
             }
             .into());
@@ -239,10 +403,10 @@ where
                 task_id = %available_task.task_id,
                 "Task was already claimed by another worker"
             );
-            return Ok(WorkflowStatus::InProgress);
+            return Ok(PreExecutionResult::Skip(WorkflowStatus::InProgress));
         }
 
-        let mut snapshot = self
+        let snapshot = self
             .backend
             .load_snapshot(&available_task.instance_id)
             .await?;
@@ -258,17 +422,30 @@ where
                 task_id = %available_task.task_id,
                 "Workflow was cancelled, releasing claim"
             );
-            let _ = self
-                .backend
-                .release_task_claim(
-                    &available_task.instance_id,
-                    &available_task.task_id,
-                    &self.worker_id,
-                )
+            self.release_claim_quietly(&available_task.instance_id, &available_task.task_id)
                 .await;
-            return Ok(self
-                .load_cancelled_status(&available_task.instance_id)
-                .await);
+            return Ok(PreExecutionResult::Skip(
+                self.load_cancelled_status(&available_task.instance_id)
+                    .await,
+            ));
+        }
+
+        // Check for pause before executing
+        if self
+            .backend
+            .check_and_pause(&available_task.instance_id)
+            .await?
+        {
+            tracing::info!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Workflow was paused, releasing claim"
+            );
+            self.release_claim_quietly(&available_task.instance_id, &available_task.task_id)
+                .await;
+            return Ok(PreExecutionResult::Skip(
+                self.load_paused_status(&available_task.instance_id).await,
+            ));
         }
 
         if snapshot.get_task_result(&available_task.task_id).is_some() {
@@ -277,40 +454,38 @@ where
                 task_id = %available_task.task_id,
                 "Task already completed, releasing claim"
             );
-            let _ = self
-                .backend
-                .release_task_claim(
-                    &available_task.instance_id,
-                    &available_task.task_id,
-                    &self.worker_id,
-                )
+            self.release_claim_quietly(&available_task.instance_id, &available_task.task_id)
                 .await;
-            return Ok(WorkflowStatus::InProgress);
+            return Ok(PreExecutionResult::Skip(WorkflowStatus::InProgress));
         }
 
-        if !Self::find_task_id_in_continuation(workflow.continuation(), &available_task.task_id) {
+        if !Self::find_task_id_in_continuation(continuation, &available_task.task_id) {
             tracing::error!(
                 instance_id = %available_task.instance_id,
                 task_id = %available_task.task_id,
                 "Task does not exist in workflow, releasing claim"
             );
-            let _ = self
-                .backend
-                .release_task_claim(
-                    &available_task.instance_id,
-                    &available_task.task_id,
-                    &self.worker_id,
-                )
+            self.release_claim_quietly(&available_task.instance_id, &available_task.task_id)
                 .await;
             return Err(WorkflowError::TaskNotFound(available_task.task_id.clone()).into());
         }
 
-        // Start heartbeat task to periodically extend the claim
+        Ok(PreExecutionResult::Ready {
+            snapshot: Box::new(snapshot),
+        })
+    }
+
+    /// Spawn a heartbeat task that periodically extends the claim.
+    fn spawn_heartbeat(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> (CancellationToken, Option<tokio::task::JoinHandle<()>>) {
         let heartbeat_cancel = CancellationToken::new();
         let heartbeat_handle = if let Some(interval) = self.heartbeat_interval {
             let backend = self.backend.clone();
-            let instance_id = available_task.instance_id.clone();
-            let task_id = available_task.task_id.clone();
+            let instance_id = instance_id.to_string();
+            let task_id = task_id.to_string();
             let worker_id = self.worker_id.clone();
             let claim_ttl = self.claim_ttl;
             let cancel_token = heartbeat_cancel.clone();
@@ -350,7 +525,6 @@ where
                                             error = %e,
                                             "Failed to extend task claim during heartbeat"
                                         );
-                                        // Continue anyway - the task execution should handle expiration
                                     } else {
                                         tracing::trace!(
                                             instance_id = %instance_id,
@@ -369,141 +543,82 @@ where
             None
         };
 
+        (heartbeat_cancel, heartbeat_handle)
+    }
+
+    /// Handle a successful task execution: update snapshot, release claim, check guards.
+    async fn handle_task_success(
+        &self,
+        continuation: &WorkflowContinuation,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        output: Bytes,
+    ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        snapshot.mark_task_completed(available_task.task_id.clone(), output.clone());
         tracing::debug!(
             instance_id = %available_task.instance_id,
             task_id = %available_task.task_id,
-            "Executing task"
+            "Task completed"
         );
 
-        let context = workflow.context().clone();
-        let continuation = workflow.continuation();
-        let task_id = available_task.task_id.clone();
-        let input = available_task.input.clone();
+        Self::update_position_after_task(continuation, &available_task.task_id, snapshot);
 
-        // Execute task with panic safety - wrap in catch_unwind to ensure claim release
-        let execution_future = with_context(context, || async move {
-            Self::execute_task_by_id(continuation, &task_id, input).await
-        });
+        self.backend.save_snapshot(snapshot).await?;
 
-        // Catch panics to ensure we always release the claim
-        let panic_result = AssertUnwindSafe(execution_future).catch_unwind().await;
+        self.backend
+            .release_task_claim(
+                &available_task.instance_id,
+                &available_task.task_id,
+                &self.worker_id,
+            )
+            .await?;
 
-        // Cancel heartbeat and wait for it to stop before releasing claim
-        heartbeat_cancel.cancel();
-        if let Some(handle) = heartbeat_handle {
-            let _ = handle.await;
+        // Check for cancellation after task completion
+        if self
+            .backend
+            .check_and_cancel(&available_task.instance_id, None)
+            .await?
+        {
+            tracing::info!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Workflow was cancelled after task completion"
+            );
+            return Ok(self
+                .load_cancelled_status(&available_task.instance_id)
+                .await);
+        }
+
+        // Check for pause after task completion
+        if self
+            .backend
+            .check_and_pause(&available_task.instance_id)
+            .await?
+        {
+            tracing::info!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Workflow was paused after task completion"
+            );
+            return Ok(self.load_paused_status(&available_task.instance_id).await);
+        }
+
+        if Self::is_workflow_complete(continuation, snapshot) {
+            tracing::info!(
+                instance_id = %available_task.instance_id,
+                task_id = %available_task.task_id,
+                "Workflow complete"
+            );
+            snapshot.mark_completed(output);
+            self.backend.save_snapshot(snapshot).await?;
+            Ok(WorkflowStatus::Completed)
+        } else {
             tracing::debug!(
                 instance_id = %available_task.instance_id,
                 task_id = %available_task.task_id,
-                "Stopped heartbeat for task"
+                "Task completed, workflow continues"
             );
-        }
-
-        let release_claim = || async {
-            let _ = self
-                .backend
-                .release_task_claim(
-                    &available_task.instance_id,
-                    &available_task.task_id,
-                    &self.worker_id,
-                )
-                .await;
-        };
-
-        // Handle panic case first
-        let result = match panic_result {
-            Ok(result) => result,
-            Err(panic_payload) => {
-                // Task panicked - release claim and return error
-                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Task panicked with unknown payload".to_string()
-                };
-
-                tracing::error!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    panic = %panic_msg,
-                    "Task panicked - releasing claim"
-                );
-
-                release_claim().await;
-                return Err(WorkflowError::TaskPanicked(panic_msg).into());
-            }
-        };
-
-        match result {
-            Ok(output) => {
-                snapshot.mark_task_completed(available_task.task_id.clone(), output.clone());
-                tracing::debug!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    "Task completed"
-                );
-
-                Self::update_position_after_task(
-                    workflow.continuation(),
-                    &available_task.task_id,
-                    &mut snapshot,
-                );
-
-                self.backend.save_snapshot(&snapshot).await?;
-
-                self.backend
-                    .release_task_claim(
-                        &available_task.instance_id,
-                        &available_task.task_id,
-                        &self.worker_id,
-                    )
-                    .await?;
-
-                // Check for cancellation after task completion
-                if self
-                    .backend
-                    .check_and_cancel(&available_task.instance_id, None)
-                    .await?
-                {
-                    tracing::info!(
-                        instance_id = %available_task.instance_id,
-                        task_id = %available_task.task_id,
-                        "Workflow was cancelled after task completion"
-                    );
-                    return Ok(self
-                        .load_cancelled_status(&available_task.instance_id)
-                        .await);
-                }
-
-                if Self::is_workflow_complete(workflow.continuation(), &snapshot) {
-                    tracing::info!(
-                        instance_id = %available_task.instance_id,
-                        task_id = %available_task.task_id,
-                        "Workflow complete"
-                    );
-                    snapshot.mark_completed(output);
-                    self.backend.save_snapshot(&snapshot).await?;
-                    Ok(WorkflowStatus::Completed)
-                } else {
-                    tracing::debug!(
-                        instance_id = %available_task.instance_id,
-                        task_id = %available_task.task_id,
-                        "Task completed, workflow continues"
-                    );
-                    Ok(WorkflowStatus::InProgress)
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    instance_id = %available_task.instance_id,
-                    task_id = %available_task.task_id,
-                    error = %e,
-                    "Task execution failed"
-                );
-                release_claim().await;
-                Err(e)
-            }
+            Ok(WorkflowStatus::InProgress)
         }
     }
 

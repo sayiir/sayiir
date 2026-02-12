@@ -229,6 +229,7 @@ After studying these solutions, the pattern is clear:
 | Automatic checkpointing        | Stable |
 | Fork/join parallelism          | Stable |
 | Crash recovery and resume      | Stable |
+| Pause and resume workflows     | Stable |
 | Panic-safe execution           | Stable |
 | Pluggable storage backends     | Stable |
 | Durable timers/delays          | Stable |
@@ -243,7 +244,7 @@ After studying these solutions, the pattern is clear:
 | `@task` decorator with metadata | Done |
 | Fluent `Flow` builder API | Done |
 | Durable execution with checkpointing | Done |
-| Resume and cancel | Done |
+| Resume, cancel, pause and unpause | Done |
 | Fork/join with multi-step branches | Done |
 | Durable delays (`.delay()`) | Done |
 | Pydantic integration (automatic validation) | Done |
@@ -558,7 +559,7 @@ For teams that need more:
 - **Worker Pools** — Isolated execution environments per tenant/workload
 - **Code Sandboxing** — Secure execution of untrusted or tenant-provided code with resource limits and isolation
 - **Auto-scaling** — Dynamic worker provisioning based on queue depth
-- **Security** — mTLS, RBAC, secrets management
+- **Security** — mTLS worker authentication, RBAC, payload-level encryption, snapshot integrity verification (HMAC), secure credential passing (Vault, AWS Secrets Manager)
 
 ---
 

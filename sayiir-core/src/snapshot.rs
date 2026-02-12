@@ -77,6 +77,32 @@ impl CancellationRequest {
     }
 }
 
+/// A request to pause a workflow.
+///
+/// This is stored separately from the workflow state and checked by workers
+/// at task boundaries. The actual `Paused` state is set after processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PauseRequest {
+    /// Optional reason for the pause.
+    pub reason: Option<String>,
+    /// Optional identifier of who requested the pause.
+    pub requested_by: Option<String>,
+    /// Timestamp when the pause was requested.
+    pub requested_at: DateTime<Utc>,
+}
+
+impl PauseRequest {
+    /// Create a new pause request with the current timestamp.
+    #[must_use]
+    pub fn new(reason: Option<String>, requested_by: Option<String>) -> Self {
+        Self {
+            reason,
+            requested_by,
+            requested_at: Utc::now(),
+        }
+    }
+}
+
 /// State of a workflow snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSnapshotState {
@@ -113,6 +139,23 @@ pub enum WorkflowSnapshotState {
         /// The task ID that was interrupted (if any).
         interrupted_at_task: Option<String>,
     },
+    /// Workflow was paused. Unlike Cancelled, this preserves position and
+    /// `last_completed_task_id` so that the workflow can resume from exactly
+    /// where it stopped.
+    Paused {
+        /// Optional reason for the pause.
+        reason: Option<String>,
+        /// Optional identifier of who paused the workflow.
+        paused_by: Option<String>,
+        /// Timestamp when the workflow was paused.
+        paused_at: DateTime<Utc>,
+        /// Results from tasks that completed before pausing.
+        completed_tasks: HashMap<String, TaskResult>,
+        /// Execution position at the time of pause (for exact resume).
+        position: ExecutionPosition,
+        /// ID of the last completed task (for deterministic resume).
+        last_completed_task_id: Option<String>,
+    },
 }
 
 impl WorkflowSnapshotState {
@@ -136,7 +179,13 @@ impl WorkflowSnapshotState {
         matches!(self, WorkflowSnapshotState::Cancelled { .. })
     }
 
+    /// Check if the workflow is paused.
+    pub fn is_paused(&self) -> bool {
+        matches!(self, WorkflowSnapshotState::Paused { .. })
+    }
+
     /// Check if the workflow is in a terminal state (completed, failed, or cancelled).
+    /// Note: Paused is NOT terminal — the workflow can be resumed.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -164,6 +213,12 @@ impl WorkflowSnapshotState {
                 reason: reason.clone(),
                 cancelled_by: cancelled_by.clone(),
             }),
+            Self::Paused {
+                reason, paused_by, ..
+            } => Some(WorkflowStatus::Paused {
+                reason: reason.clone(),
+                paused_by: paused_by.clone(),
+            }),
             Self::InProgress { .. } => None,
         }
     }
@@ -190,6 +245,21 @@ impl WorkflowSnapshotState {
         } = self
         {
             Some((reason.clone(), cancelled_by.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Extract pause details if in `Paused` state.
+    ///
+    /// Returns `Some((reason, paused_by))` if paused, `None` otherwise.
+    #[must_use]
+    pub fn pause_details(&self) -> Option<(Option<String>, Option<String>)> {
+        if let WorkflowSnapshotState::Paused {
+            reason, paused_by, ..
+        } = self
+        {
+            Some((reason.clone(), paused_by.clone()))
         } else {
             None
         }
@@ -280,6 +350,9 @@ impl WorkflowSnapshot {
             }
             | WorkflowSnapshotState::Cancelled {
                 completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Paused {
+                completed_tasks, ..
             } => completed_tasks.get(task_id),
             _ => None,
         }
@@ -351,6 +424,49 @@ impl WorkflowSnapshot {
     pub fn mark_failed(&mut self, error: String) {
         self.state = WorkflowSnapshotState::Failed { error };
         self.updated_at = Self::current_timestamp();
+    }
+
+    /// Mark the workflow as paused.
+    ///
+    /// This preserves the completed tasks, position, and `last_completed_task_id`
+    /// from the current `InProgress` state so that the workflow can resume from
+    /// exactly where it stopped.
+    pub fn mark_paused(&mut self, request: &PauseRequest) {
+        if let WorkflowSnapshotState::InProgress {
+            position,
+            completed_tasks,
+            last_completed_task_id,
+        } = &self.state
+        {
+            self.state = WorkflowSnapshotState::Paused {
+                reason: request.reason.clone(),
+                paused_by: request.requested_by.clone(),
+                paused_at: Utc::now(),
+                completed_tasks: completed_tasks.clone(),
+                position: position.clone(),
+                last_completed_task_id: last_completed_task_id.clone(),
+            };
+            self.updated_at = Self::current_timestamp();
+        }
+    }
+
+    /// Transition from Paused back to `InProgress`, restoring position and
+    /// `completed_tasks` so execution can continue.
+    pub fn mark_unpaused(&mut self) {
+        if let WorkflowSnapshotState::Paused {
+            completed_tasks,
+            position,
+            last_completed_task_id,
+            ..
+        } = &self.state
+        {
+            self.state = WorkflowSnapshotState::InProgress {
+                position: position.clone(),
+                completed_tasks: completed_tasks.clone(),
+                last_completed_task_id: last_completed_task_id.clone(),
+            };
+            self.updated_at = Self::current_timestamp();
+        }
     }
 
     /// Mark the workflow as cancelled.
@@ -587,5 +703,127 @@ mod tests {
         assert!(snapshot.created_at > 0);
         assert!(snapshot.updated_at > 0);
         assert_eq!(snapshot.created_at, snapshot.updated_at);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Strategy for arbitrary `TaskResult`.
+    fn arb_task_result() -> impl Strategy<Value = TaskResult> {
+        (
+            "[a-z0-9]{1,8}",
+            proptest::collection::vec(any::<u8>(), 0..32),
+        )
+            .prop_map(|(task_id, data)| TaskResult {
+                task_id,
+                output: Bytes::from(data),
+            })
+    }
+
+    /// Strategy for arbitrary `HashMap<String, TaskResult>`.
+    fn arb_completed_tasks() -> impl Strategy<Value = HashMap<String, TaskResult>> {
+        proptest::collection::hash_map("[a-z0-9]{1,8}", arb_task_result(), 0..4)
+    }
+
+    /// Strategy for arbitrary `WorkflowSnapshotState`.
+    fn arb_state() -> impl Strategy<Value = WorkflowSnapshotState> {
+        prop_oneof![
+            // InProgress
+            arb_completed_tasks().prop_map(|tasks| {
+                WorkflowSnapshotState::InProgress {
+                    position: ExecutionPosition::NotStarted,
+                    completed_tasks: tasks,
+                    last_completed_task_id: None,
+                }
+            }),
+            // Completed
+            proptest::collection::vec(any::<u8>(), 0..32).prop_map(|data| {
+                WorkflowSnapshotState::Completed {
+                    final_output: Bytes::from(data),
+                }
+            }),
+            // Failed
+            "[a-zA-Z0-9 ]{0,32}".prop_map(|error| WorkflowSnapshotState::Failed { error }),
+            // Cancelled
+            (
+                prop::option::of("[a-zA-Z0-9 ]{0,32}"),
+                prop::option::of("[a-zA-Z0-9 ]{0,32}"),
+                arb_completed_tasks(),
+                prop::option::of("[a-z0-9]{1,8}"),
+            )
+                .prop_map(
+                    |(reason, cancelled_by, completed_tasks, interrupted_at_task)| {
+                        WorkflowSnapshotState::Cancelled {
+                            reason,
+                            cancelled_by,
+                            cancelled_at: Utc::now(),
+                            completed_tasks,
+                            interrupted_at_task,
+                        }
+                    }
+                ),
+            // Paused
+            (
+                prop::option::of("[a-zA-Z0-9 ]{0,32}"),
+                prop::option::of("[a-zA-Z0-9 ]{0,32}"),
+                arb_completed_tasks(),
+                prop::option::of("[a-z0-9]{1,8}"),
+            )
+                .prop_map(
+                    |(reason, paused_by, completed_tasks, last_completed_task_id)| {
+                        WorkflowSnapshotState::Paused {
+                            reason,
+                            paused_by,
+                            paused_at: Utc::now(),
+                            completed_tasks,
+                            position: ExecutionPosition::NotStarted,
+                            last_completed_task_id,
+                        }
+                    }
+                ),
+        ]
+    }
+
+    proptest! {
+        // Property 8: Exactly one predicate is true for any state.
+        #[test]
+        fn exactly_one_predicate_true(state in arb_state()) {
+            let flags = [
+                state.is_in_progress(),
+                state.is_completed(),
+                state.is_failed(),
+                state.is_cancelled(),
+                state.is_paused(),
+            ];
+            let count = flags.iter().filter(|&&f| f).count();
+            prop_assert!(count == 1, "Expected exactly 1 true predicate, got {}: {:?}", count, flags);
+        }
+
+        // Property 9: `is_terminal()` is equivalent to completed, failed, or cancelled.
+        #[test]
+        fn terminal_consistency(state in arb_state()) {
+            prop_assert_eq!(
+                state.is_terminal(),
+                state.is_completed() || state.is_failed() || state.is_cancelled(),
+            );
+        }
+
+        // Property 10: `as_terminal_status().is_some() == !is_in_progress()`.
+        #[test]
+        fn as_terminal_status_consistency(state in arb_state()) {
+            prop_assert_eq!(
+                state.as_terminal_status().is_some(),
+                !state.is_in_progress(),
+            );
+        }
     }
 }

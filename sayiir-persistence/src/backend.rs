@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::Duration;
-use sayiir_core::snapshot::{CancellationRequest, WorkflowSnapshot};
+use sayiir_core::snapshot::{CancellationRequest, PauseRequest, WorkflowSnapshot};
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::task_claim::TaskClaim;
 
@@ -24,6 +24,9 @@ pub enum BackendError {
     /// Cannot cancel workflow in current state.
     #[error("Cannot cancel workflow in state: {0}")]
     CannotCancel(String),
+    /// Cannot pause workflow in current state.
+    #[error("Cannot pause workflow in state: {0}")]
+    CannotPause(String),
 }
 
 /// Trait for persistent storage of workflow snapshots.
@@ -238,4 +241,46 @@ pub trait PersistentBackend: Send + Sync {
         instance_id: &str,
         interrupted_at_task: Option<&str>,
     ) -> Result<bool, BackendError>;
+
+    /// Request pausing of a workflow.
+    ///
+    /// This stores a pause request that workers will check at task boundaries.
+    /// The workflow transitions to `Paused` state when a worker processes the request.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: The workflow instance ID
+    /// - `request`: The pause request details
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError::NotFound` if no snapshot exists for the instance.
+    /// Returns `BackendError::CannotPause` if the workflow is in a terminal or paused state.
+    async fn request_pause(
+        &self,
+        instance_id: &str,
+        request: PauseRequest,
+    ) -> Result<(), BackendError>;
+
+    /// Get the pending pause request for a workflow, if any.
+    async fn get_pause_request(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<PauseRequest>, BackendError>;
+
+    /// Clear the pause request for a workflow.
+    async fn clear_pause_request(&self, instance_id: &str) -> Result<(), BackendError>;
+
+    /// Atomically check for a pause request and transition to paused state.
+    ///
+    /// Returns `true` if the workflow was paused, `false` if no pause was pending.
+    async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError>;
+
+    /// Transition a paused workflow back to in-progress and return the updated snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BackendError::NotFound` if no snapshot exists.
+    /// Returns `BackendError::CannotPause` if the workflow is not in `Paused` state.
+    async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError>;
 }

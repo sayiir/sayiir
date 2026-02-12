@@ -849,6 +849,7 @@ dependencies = [
  "sayiir-core",
  "sayiir-persistence",
  "sayiir-runtime",
+ "serde_json",
  "tokio",
 ]
 

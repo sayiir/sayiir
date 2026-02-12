@@ -2,13 +2,13 @@
 //!
 //! This module provides serialization and deserialization of Python objects
 //! to/from bytes using JSON as the interchange format. It also handles
-//! decoding binary-encoded fork/join branch results into Python dicts.
+//! decoding JSON-encoded fork/join branch results into Python dicts.
 
 use bytes::Bytes;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
-use sayiir_core::task::deserialize_named_branch_results;
+use sayiir_core::branch_results::NamedBranchResults;
 
 /// Encodes a Python object to JSON bytes.
 ///
@@ -26,7 +26,7 @@ pub fn encode_pyobject(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Bytes
 /// Decodes JSON bytes to a Python object.
 ///
 /// Tries JSON first (fast path for normal tasks). If the bytes are not valid
-/// UTF-8 or not valid JSON, falls back to decoding binary-encoded branch
+/// UTF-8 or not valid JSON, falls back to decoding JSON-encoded branch
 /// results (used by fork/join — see [`decode_branch_results_to_pydict`]).
 pub fn decode_to_pyobject(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> {
     // Fast path: try UTF-8 + JSON
@@ -37,25 +37,25 @@ pub fn decode_to_pyobject(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> 
         }
     }
 
-    // Fallback: binary-encoded branch results from fork/join
+    // Fallback: JSON-encoded branch results from fork/join
     decode_branch_results_to_pydict(py, bytes)
 }
 
-/// Decodes binary length-prefixed branch results into a Python dict.
+/// Decodes JSON-encoded branch results into a Python dict.
 ///
-/// The binary format is produced by `serialize_branch_results()` in the runtime:
-/// `[u32 count][u32 name_len][name][u32 data_len][data]...`
+/// The JSON format is produced by `serialize_branch_results()` in the runtime,
+/// which serializes a `NamedBranchResults` via serde.
 ///
 /// Each branch value is individually JSON-decoded (since `encode_pyobject`
 /// produces valid JSON for each branch output).
 fn decode_branch_results_to_pydict(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> {
-    let named = deserialize_named_branch_results(bytes)
+    let named: NamedBranchResults = serde_json::from_slice(bytes)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     let json_mod = py.import(intern!(py, "json"))?;
     let dict = PyDict::new(py);
 
-    for (name, data) in &named {
+    for (name, data) in named.as_slice() {
         let json_str = std::str::from_utf8(data)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let val = json_mod.call_method1(intern!(py, "loads"), (json_str,))?;

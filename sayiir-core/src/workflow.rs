@@ -1,11 +1,6 @@
-use crate::codec::Codec;
-use crate::codec::sealed;
 use crate::context::WorkflowContext;
 use crate::error::WorkflowError;
-use crate::task::{
-    BranchOutputs, ErasedBranch, UntypedCoreTask, branch, to_core_task_arc,
-    to_heterogeneous_join_task_arc,
-};
+use crate::task::UntypedCoreTask;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::marker::PhantomData;
@@ -16,7 +11,7 @@ use std::sync::Arc;
 macro_rules! impl_find_duplicate_id {
     ($name:ident, task_fields: { $($task_extra:tt)* }, delay_extra: { $($delay_extra:tt)* }, deref_branch: $deref:expr) => {
         impl $name {
-            fn find_duplicate_id(&self) -> Option<String> {
+            pub(crate) fn find_duplicate_id(&self) -> Option<String> {
                 fn collect(cont: &$name, seen: &mut HashSet<String>) -> Option<String> {
                     match cont {
                         $name::Task { id, next, $($task_extra)* } => {
@@ -370,6 +365,13 @@ pub enum WorkflowStatus {
         /// Optional identifier of who cancelled the workflow.
         cancelled_by: Option<String>,
     },
+    /// The workflow was paused.
+    Paused {
+        /// Optional reason for the pause.
+        reason: Option<String>,
+        /// Optional identifier of who paused the workflow.
+        paused_by: Option<String>,
+    },
     /// The workflow is waiting for a delay to expire.
     Waiting {
         /// When the delay expires.
@@ -379,782 +381,20 @@ pub enum WorkflowStatus {
     },
 }
 
-/// Marker type for empty continuation (no tasks yet).
-pub struct NoContinuation;
-
-/// Marker type for no registry (non-serializable workflow).
-pub struct NoRegistry;
-
-/// Trait for continuation state - allows unified handling of empty vs existing continuation.
-pub trait ContinuationState {
-    /// Append a new task to this continuation state, returning a `WorkflowContinuation`.
-    fn append(self, new_task: WorkflowContinuation) -> WorkflowContinuation;
-}
-
-impl ContinuationState for NoContinuation {
-    fn append(self, new_task: WorkflowContinuation) -> WorkflowContinuation {
-        new_task
-    }
-}
-
-impl ContinuationState for WorkflowContinuation {
-    fn append(mut self, new_task: WorkflowContinuation) -> WorkflowContinuation {
-        append_to_chain(&mut self, new_task);
-        self
-    }
-}
+// Re-export builder types for backwards compatibility.
+pub use crate::builder::{
+    BranchCollector, ContinuationState, ForkBuilder, NoContinuation, NoRegistry, RegistryBehavior,
+    WorkflowBuilder,
+};
 
 use crate::registry::TaskRegistry;
 
-/// Trait for registry behavior - allows unified implementation of builder methods.
-pub trait RegistryBehavior {
-    /// Register a task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
-    fn maybe_register<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
-    where
-        F: Fn(I) -> Fut + Send + Sync + 'static,
-        I: Send + 'static,
-        O: Send + 'static,
-        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
-        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
-
-    /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
-    fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
-    where
-        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
-        O: Send + 'static,
-        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static;
-}
-
-impl RegistryBehavior for NoRegistry {
-    fn maybe_register<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
-    where
-        F: Fn(I) -> Fut + Send + Sync + 'static,
-        I: Send + 'static,
-        O: Send + 'static,
-        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
-        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
-    {
-        // No-op for non-serializable workflows
-    }
-
-    fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
-    where
-        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
-        O: Send + 'static,
-        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
-    {
-        // No-op for non-serializable workflows
-    }
-}
-
-impl RegistryBehavior for TaskRegistry {
-    fn maybe_register<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
-    where
-        F: Fn(I) -> Fut + Send + Sync + 'static,
-        I: Send + 'static,
-        O: Send + 'static,
-        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
-        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
-    {
-        use crate::task::TaskMetadata;
-        self.register_fn_arc(id, codec, Arc::clone(func), TaskMetadata::default());
-    }
-
-    fn maybe_register_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
-    where
-        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
-        O: Send + 'static,
-        Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
-        C: Codec + sealed::EncodeValue<O> + Send + Sync + 'static,
-    {
-        use crate::task::TaskMetadata;
-        self.register_arc_join(id, codec, Arc::clone(func), TaskMetadata::default());
-    }
-}
-
-pub struct WorkflowBuilder<C, Input, Output, M = (), Cont = NoContinuation, R = NoRegistry> {
-    context: WorkflowContext<C, M>,
-    continuation: Cont,
-    registry: R,
-    last_task_id: Option<String>,
-    _phantom: PhantomData<(Input, Output)>,
-}
-
 /// A built workflow that can be executed.
 pub struct Workflow<C, Input, M = ()> {
-    definition_hash: String,
-    context: WorkflowContext<C, M>,
-    continuation: WorkflowContinuation,
-    _phantom: PhantomData<Input>,
-}
-
-#[allow(clippy::mismatching_type_param_order)] // Input used for both Input and Output initially
-impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry> {
-    /// Create a new workflow builder with a context object.
-    ///
-    /// The context contains the workflow ID, codec and metadata that will be available
-    /// at any execution point via the `sayiir_ctx!` macro.
-    #[must_use]
-    pub fn new(ctx: WorkflowContext<C, M>) -> Self
-    where
-        C: Codec,
-        M: Send + Sync + 'static,
-    {
-        Self {
-            context: ctx,
-            continuation: NoContinuation,
-            registry: NoRegistry,
-            last_task_id: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Enable registry tracking for serializable workflows with a new empty registry.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::TaskMetadata;
-    /// use std::time::Duration;
-    ///
-    /// let ctx = WorkflowContext::new("my-workflow", codec, metadata);
-    /// let workflow = WorkflowBuilder::new(ctx)
-    ///     .with_registry()  // Enable serialization
-    ///     .then("step1", |i: u32| async move { Ok(i + 1) })
-    ///     .with_metadata(TaskMetadata {
-    ///         display_name: Some("Increment".into()),
-    ///         timeout: Some(Duration::from_secs(30)),
-    ///         ..Default::default()
-    ///     })
-    ///     .build()?;  // Returns SerializableWorkflow
-    /// ```
-    #[must_use]
-    pub fn with_registry(
-        self,
-    ) -> WorkflowBuilder<C, Input, Input, M, NoContinuation, TaskRegistry> {
-        self.with_existing_registry(TaskRegistry::new())
-    }
-
-    /// Enable registry tracking with an existing registry.
-    ///
-    /// Use this to reference pre-registered tasks via [`then_registered`] or to
-    /// compose workflows from task libraries.
-    ///
-    /// **Note**: Takes ownership of the registry. For deserialization/hydration,
-    /// rebuild the same registry from code on the deserializing side.
-    /// See [`TaskRegistry`](crate::registry::TaskRegistry) docs for the pattern.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // Shared function for building registry (called on both sides)
-    /// fn build_registry(codec: Arc<MyCodec>) -> TaskRegistry {
-    ///     let mut registry = TaskRegistry::new();
-    ///     registry.register_fn("step1", codec.clone(), |i: u32| async move { Ok(i + 1) });
-    ///     registry
-    /// }
-    ///
-    /// // Build workflow
-    /// let registry = build_registry(codec.clone());
-    /// let ctx = WorkflowContext::new("my-workflow", codec.clone(), metadata);
-    /// let workflow = WorkflowBuilder::new(ctx)
-    ///     .with_existing_registry(registry)
-    ///     .then_registered::<u32>("step1")
-    ///     .build()?;
-    ///
-    /// // Deserialize (on another side): rebuild registry, then convert to runnable
-    /// let registry = build_registry(codec.clone());
-    /// let runnable = serialized_continuation.to_runnable(&registry)?;
-    /// ```
-    #[must_use]
-    pub fn with_existing_registry(
-        self,
-        registry: TaskRegistry,
-    ) -> WorkflowBuilder<C, Input, Input, M, NoContinuation, TaskRegistry> {
-        WorkflowBuilder {
-            context: self.context,
-            continuation: NoContinuation,
-            registry,
-            last_task_id: None,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// Methods for adding tasks - unified implementation using `RegistryBehavior` and `ContinuationState`.
-impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
-where
-    R: RegistryBehavior,
-    Cont: ContinuationState,
-{
-    /// Add a sequential task to the workflow.
-    pub fn then<F, Fut, NewOutput>(
-        mut self,
-        id: &str,
-        func: F,
-    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
-    where
-        F: Fn(Output) -> Fut + Send + Sync + 'static,
-        Output: Send + 'static,
-        NewOutput: Send + 'static,
-        Fut: std::future::Future<Output = Result<NewOutput, crate::error::BoxError>>
-            + Send
-            + 'static,
-        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
-    {
-        let codec = Arc::clone(&self.context.codec);
-        let func = Arc::new(func);
-
-        // Register if registry is enabled (no-op for NoRegistry)
-        self.registry
-            .maybe_register::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
-
-        let task = to_core_task_arc(func, codec);
-
-        let new_task = WorkflowContinuation::Task {
-            id: id.to_string(),
-            func: Some(task),
-            next: None,
-        };
-
-        let continuation = self.continuation.append(new_task);
-
-        WorkflowBuilder {
-            continuation,
-            context: self.context,
-            registry: self.registry,
-            last_task_id: Some(id.to_string()),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// Delay method — available for all registry/continuation combinations.
-impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
-where
-    Cont: ContinuationState,
-{
-    /// Add a durable delay to the workflow.
-    ///
-    /// The delay is transparent to data flow — the input passes through unchanged.
-    /// In non-durable runners the delay is a simple sleep. In durable runners
-    /// the workflow parks at the delay, persists `wake_at`, and returns
-    /// `WorkflowStatus::Waiting`. A later `resume()` call advances past the
-    /// delay once the wall clock reaches `wake_at`.
-    #[must_use]
-    pub fn delay(
-        self,
-        id: &str,
-        duration: std::time::Duration,
-    ) -> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, R> {
-        let new_node = WorkflowContinuation::Delay {
-            id: id.to_string(),
-            duration,
-            next: None,
-        };
-        let continuation = self.continuation.append(new_node);
-        WorkflowBuilder {
-            continuation,
-            context: self.context,
-            registry: self.registry,
-            last_task_id: Some(id.to_string()),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// Methods for referencing pre-registered tasks (only available with `TaskRegistry`).
-impl<C, Input, Output, M, Cont> WorkflowBuilder<C, Input, Output, M, Cont, TaskRegistry>
-where
-    Cont: ContinuationState,
-{
-    /// Reference a pre-registered task by ID.
-    ///
-    /// The task must have been registered in the registry before calling this method.
-    /// Type safety is maintained through the `NewOutput` type parameter - ensure it
-    /// matches the registered task's output type.
-    ///
-    /// # Errors
-    ///
-    /// Returns `WorkflowError::TaskNotFound` if the task ID is not in the registry.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::TaskMetadata;
-    ///
-    /// let mut registry = TaskRegistry::new();
-    /// registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
-    ///
-    /// let workflow = WorkflowBuilder::new(ctx)
-    ///     .with_existing_registry(registry)
-    ///     .then_registered::<u32>("double")?
-    ///     .with_metadata(TaskMetadata {
-    ///         display_name: Some("Double".into()),
-    ///         ..Default::default()
-    ///     })
-    ///     .build()?;
-    /// ```
-    pub fn then_registered<NewOutput>(
-        self,
-        id: &str,
-    ) -> Result<
-        WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>,
-        WorkflowError,
-    >
-    where
-        Output: Send + 'static,
-        NewOutput: Send + 'static,
-    {
-        let func = self
-            .registry
-            .get(id)
-            .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
-
-        let new_task = WorkflowContinuation::Task {
-            id: id.to_string(),
-            func: Some(func),
-            next: None,
-        };
-
-        let continuation = self.continuation.append(new_task);
-
-        Ok(WorkflowBuilder {
-            continuation,
-            context: self.context,
-            registry: self.registry,
-            last_task_id: Some(id.to_string()),
-            _phantom: PhantomData,
-        })
-    }
-
-    /// Attach metadata to the most recently added task.
-    ///
-    /// This method allows chaining metadata after `then()`, `then_registered()`,
-    /// or `join()` calls.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::{TaskMetadata, RetryPolicy};
-    /// use std::time::Duration;
-    ///
-    /// let workflow = WorkflowBuilder::new(ctx)
-    ///     .with_registry()
-    ///     .then("double", |i: u32| async move { Ok(i * 2) })
-    ///     .with_metadata(TaskMetadata {
-    ///         display_name: Some("Double".into()),
-    ///         timeout: Some(Duration::from_secs(30)),
-    ///         ..Default::default()
-    ///     })
-    ///     .then("add_ten", |i: u32| async move { Ok(i + 10) })
-    ///     .build()?;
-    /// ```
-    #[must_use]
-    pub fn with_metadata(mut self, metadata: crate::task::TaskMetadata) -> Self {
-        if let Some(ref id) = self.last_task_id {
-            self.registry.set_metadata(id, metadata);
-        }
-        self
-    }
-}
-
-/// Fork methods - unified implementation.
-impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R> {
-    /// Fork the workflow into multiple parallel branches with heterogeneous outputs.
-    ///
-    /// Each branch receives the same input (the current workflow's output) and executes in parallel.
-    /// Branches can return different types. After all branches complete, use `join()` to combine
-    /// the results using `BranchOutputs` for type-safe named access.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::TaskMetadata;
-    ///
-    /// workflow
-    ///     .then("prepare", |input| async { Ok(input) })
-    ///     .with_metadata(TaskMetadata {
-    ///         display_name: Some("Prepare Input".into()),
-    ///         ..Default::default()
-    ///     })
-    ///     .branches(|b| {
-    ///         b.add("count", |i: u32| async move { Ok(i * 2) });
-    ///         b.add("name", |i: u32| async move { Ok(format!("item_{}", i)) });
-    ///     })
-    ///     .join("combine", |outputs: BranchOutputs<_>| async move {
-    ///         let count: u32 = outputs.get("count")?;
-    ///         let name: String = outputs.get("name")?;
-    ///         Ok(format!("{}: {}", name, count))
-    ///     })
-    ///     .with_metadata(TaskMetadata {
-    ///         display_name: Some("Combine Results".into()),
-    ///         ..Default::default()
-    ///     })
-    /// ```
-    pub fn branches<F>(self, f: F) -> ForkBuilder<C, Input, Output, M, Cont, R>
-    where
-        F: FnOnce(&mut BranchCollector<C, Output>),
-        C: Codec,
-    {
-        let codec = Arc::clone(&self.context.codec);
-        let mut collector = BranchCollector {
-            codec,
-            branches: Vec::new(),
-            _phantom: PhantomData,
-        };
-        f(&mut collector);
-
-        ForkBuilder {
-            context: self.context,
-            continuation: self.continuation,
-            branches: collector.branches,
-            registry: self.registry,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Fork the workflow into multiple parallel branches (low-level API).
-    pub fn fork(self) -> ForkBuilder<C, Input, Output, M, Cont, R> {
-        ForkBuilder {
-            context: self.context,
-            continuation: self.continuation,
-            branches: Vec::new(),
-            registry: self.registry,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// Build method for `WorkflowBuilder` without registry - returns Workflow.
-impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, NoRegistry> {
-    /// Build the workflow into an executable workflow.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if duplicate task IDs are found.
-    pub fn build(self) -> Result<Workflow<C, Input, M>, WorkflowError>
-    where
-        Input: Send + 'static,
-        Output: Send + 'static,
-        M: Send + Sync + 'static,
-        C: Codec
-            + sealed::DecodeValue<Input>
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<Input>
-            + sealed::EncodeValue<Output>,
-    {
-        if let Some(dup) = self.continuation.find_duplicate_id() {
-            return Err(WorkflowError::DuplicateTaskId(dup));
-        }
-
-        let definition_hash = self
-            .continuation
-            .to_serializable()
-            .compute_definition_hash();
-
-        Ok(Workflow {
-            definition_hash,
-            continuation: self.continuation,
-            context: self.context,
-            _phantom: PhantomData,
-        })
-    }
-}
-
-/// Build method for `WorkflowBuilder` with registry - returns `SerializableWorkflow`.
-impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, TaskRegistry> {
-    /// Build the workflow into a serializable workflow.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if duplicate task IDs are found.
-    pub fn build(self) -> Result<SerializableWorkflow<C, Input, M>, WorkflowError>
-    where
-        Input: Send + 'static,
-        Output: Send + 'static,
-        M: Send + Sync + 'static,
-        C: Codec
-            + sealed::DecodeValue<Input>
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<Input>
-            + sealed::EncodeValue<Output>,
-    {
-        if let Some(dup) = self.continuation.find_duplicate_id() {
-            return Err(WorkflowError::DuplicateTaskId(dup));
-        }
-
-        let definition_hash = self
-            .continuation
-            .to_serializable()
-            .compute_definition_hash();
-
-        let inner = Workflow {
-            definition_hash,
-            continuation: self.continuation,
-            context: self.context,
-            _phantom: PhantomData,
-        };
-
-        Ok(SerializableWorkflow {
-            inner,
-            registry: self.registry,
-        })
-    }
-}
-
-/// Helper function to append a task to the continuation chain.
-fn append_to_chain(continuation: &mut WorkflowContinuation, new_task: WorkflowContinuation) {
-    match continuation {
-        WorkflowContinuation::Task { next, .. } | WorkflowContinuation::Delay { next, .. } => {
-            match next {
-                Some(next_box) => append_to_chain(next_box, new_task),
-                None => *next = Some(Box::new(new_task)),
-            }
-        }
-        WorkflowContinuation::Fork { join, .. } => match join {
-            Some(join_box) => append_to_chain(join_box, new_task),
-            None => *join = Some(Box::new(new_task)),
-        },
-    }
-}
-
-/// Collector for adding branches in a closure.
-///
-/// Used by [`WorkflowBuilder::branches`] to collect multiple branches.
-pub struct BranchCollector<C, Input> {
-    codec: Arc<C>,
-    branches: Vec<ErasedBranch>,
-    _phantom: PhantomData<Input>,
-}
-
-impl<C, Input> BranchCollector<C, Input> {
-    /// Add a branch to the fork.
-    ///
-    /// Each branch receives the same input and can return a different output type.
-    /// Duplicate IDs are checked at `build()` time.
-    pub fn add<F, Fut, BranchOutput>(&mut self, id: &str, func: F)
-    where
-        F: Fn(Input) -> Fut + Send + Sync + 'static,
-        Input: Send + 'static,
-        BranchOutput: Send + 'static,
-        Fut: std::future::Future<Output = Result<BranchOutput, crate::error::BoxError>>
-            + Send
-            + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<BranchOutput>,
-    {
-        let erased = branch(id, func).erase(Arc::clone(&self.codec));
-        self.branches.push(erased);
-    }
-}
-
-/// Builder for constructing fork branches fluently.
-///
-/// Created by calling `.fork()` on a `WorkflowBuilder`. Add branches with `.branch()`,
-/// then complete with `.join()`.
-pub struct ForkBuilder<C, Input, Output, M, Cont = NoContinuation, R = NoRegistry> {
-    context: WorkflowContext<C, M>,
-    continuation: Cont,
-    branches: Vec<ErasedBranch>,
-    registry: R,
-    _phantom: PhantomData<(Input, Output)>,
-}
-
-/// For `ForkBuilder` methods - unified implementation using `RegistryBehavior` and `ContinuationState`.
-impl<C, Input, Output, M, Cont, R> ForkBuilder<C, Input, Output, M, Cont, R>
-where
-    R: RegistryBehavior,
-    Cont: ContinuationState,
-{
-    /// Add a branch to the fork.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `ForkBuilder` with the branch added.
-    ///
-    #[must_use]
-    pub fn branch<F, Fut, BranchOutput>(mut self, id: &str, func: F) -> Self
-    where
-        F: Fn(Output) -> Fut + Send + Sync + 'static,
-        Output: Send + 'static,
-        BranchOutput: Send + 'static,
-        Fut: std::future::Future<Output = Result<BranchOutput, crate::error::BoxError>>
-            + Send
-            + 'static,
-        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<BranchOutput> + 'static,
-    {
-        let codec = Arc::clone(&self.context.codec);
-        let func = Arc::new(func);
-
-        // Register if registry is enabled (no-op for NoRegistry)
-        self.registry
-            .maybe_register::<Output, BranchOutput, _, _, _>(id, codec.clone(), &func);
-
-        // Create branch using a closure that calls through the Arc
-        let func_clone = Arc::clone(&func);
-        let erased = branch(id, move |input| func_clone(input)).erase(codec);
-        self.branches.push(erased);
-        self
-    }
-
-    /// Join the results from all branches.
-    pub fn join<F, Fut, JoinOutput>(
-        mut self,
-        id: &str,
-        func: F,
-    ) -> WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, R>
-    where
-        F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
-        JoinOutput: Send + 'static,
-        Fut: std::future::Future<Output = Result<JoinOutput, crate::error::BoxError>>
-            + Send
-            + 'static,
-        C: Codec + sealed::EncodeValue<JoinOutput> + Send + Sync + 'static,
-    {
-        let codec = Arc::clone(&self.context.codec);
-        let func = Arc::new(func);
-
-        // Register if registry is enabled (no-op for NoRegistry)
-        self.registry
-            .maybe_register_join::<JoinOutput, _, _, _>(id, codec.clone(), &func);
-
-        let join_task_fn = to_heterogeneous_join_task_arc(func, codec);
-
-        let fork_id = WorkflowContinuation::derive_fork_id(
-            &self
-                .branches
-                .iter()
-                .map(|b| b.id.as_str())
-                .collect::<Vec<_>>(),
-        );
-
-        let branch_continuations: Vec<Arc<WorkflowContinuation>> = self
-            .branches
-            .into_iter()
-            .map(|b| {
-                Arc::new(WorkflowContinuation::Task {
-                    id: b.id,
-                    func: Some(b.task),
-                    next: None,
-                })
-            })
-            .collect();
-
-        let join_task = WorkflowContinuation::Task {
-            id: id.to_string(),
-            func: Some(join_task_fn),
-            next: None,
-        };
-
-        let fork_continuation = WorkflowContinuation::Fork {
-            id: fork_id,
-            branches: branch_continuations.into_boxed_slice(),
-            join: Some(Box::new(join_task)),
-        };
-
-        let continuation = self.continuation.append(fork_continuation);
-
-        WorkflowBuilder {
-            continuation,
-            context: self.context,
-            registry: self.registry,
-            last_task_id: Some(id.to_string()),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-/// For `ForkBuilder` methods for referencing pre-registered tasks (only available with `TaskRegistry`).
-impl<C, Input, Output, M, Cont> ForkBuilder<C, Input, Output, M, Cont, TaskRegistry>
-where
-    Cont: ContinuationState,
-{
-    /// Add a pre-registered branch task by ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns `WorkflowError::TaskNotFound` if the task ID is not in the registry.
-    pub fn branch_registered(mut self, id: &str) -> Result<Self, WorkflowError>
-    where
-        Output: Send + 'static,
-    {
-        let task = self
-            .registry
-            .get(id)
-            .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
-
-        self.branches.push(ErasedBranch {
-            id: id.to_string(),
-            task,
-        });
-        Ok(self)
-    }
-
-    /// Join using a pre-registered join task by ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns `WorkflowError::TaskNotFound` if the task ID is not in the registry.
-    pub fn join_registered<JoinOutput>(
-        self,
-        id: &str,
-    ) -> Result<
-        WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, TaskRegistry>,
-        WorkflowError,
-    >
-    where
-        Output: Send + 'static,
-        JoinOutput: Send + 'static,
-    {
-        let join_task_fn = self
-            .registry
-            .get(id)
-            .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
-
-        let fork_id = WorkflowContinuation::derive_fork_id(
-            &self
-                .branches
-                .iter()
-                .map(|b| b.id.as_str())
-                .collect::<Vec<_>>(),
-        );
-
-        let branch_continuations: Vec<Arc<WorkflowContinuation>> = self
-            .branches
-            .into_iter()
-            .map(|b| {
-                Arc::new(WorkflowContinuation::Task {
-                    id: b.id,
-                    func: Some(b.task),
-                    next: None,
-                })
-            })
-            .collect();
-
-        let join_task = WorkflowContinuation::Task {
-            id: id.to_string(),
-            func: Some(join_task_fn),
-            next: None,
-        };
-
-        let fork_continuation = WorkflowContinuation::Fork {
-            id: fork_id,
-            branches: branch_continuations.into_boxed_slice(),
-            join: Some(Box::new(join_task)),
-        };
-
-        let continuation = self.continuation.append(fork_continuation);
-
-        Ok(WorkflowBuilder {
-            continuation,
-            context: self.context,
-            registry: self.registry,
-            last_task_id: Some(id.to_string()),
-            _phantom: PhantomData,
-        })
-    }
+    pub(crate) definition_hash: String,
+    pub(crate) context: WorkflowContext<C, M>,
+    pub(crate) continuation: WorkflowContinuation,
+    pub(crate) _phantom: PhantomData<Input>,
 }
 
 impl<C, Input, M> Workflow<C, Input, M> {
@@ -1228,8 +468,8 @@ impl<C, Input, M> Workflow<C, Input, M> {
 /// let restored = workflow.to_runnable(&deserialized)?;
 /// ```
 pub struct SerializableWorkflow<C, Input, M = ()> {
-    inner: Workflow<C, Input, M>,
-    registry: TaskRegistry,
+    pub(crate) inner: Workflow<C, Input, M>,
+    pub(crate) registry: TaskRegistry,
 }
 
 impl<C, Input, M> SerializableWorkflow<C, Input, M> {
@@ -2003,6 +1243,232 @@ mod tests {
                 assert!(next.is_none());
             }
             _ => panic!("Expected Delay variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod proptests {
+    use super::SerializableContinuation;
+    use proptest::prelude::*;
+
+    /// Strategy for alphanumeric IDs (1..8 chars).
+    fn arb_id() -> impl Strategy<Value = String> {
+        "[a-z0-9]{1,8}"
+    }
+
+    /// Recursive strategy for `SerializableContinuation` with bounded depth.
+    fn arb_continuation(depth: usize) -> BoxedStrategy<SerializableContinuation> {
+        let leaf = arb_id().prop_map(|id| SerializableContinuation::Task { id, next: None });
+
+        if depth == 0 {
+            return leaf.boxed();
+        }
+
+        prop_oneof![
+            // Task with optional next
+            (
+                arb_id(),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, next)| SerializableContinuation::Task { id, next }),
+            // Fork with branches and optional join
+            (
+                arb_id(),
+                prop::collection::vec(arb_continuation(depth - 1), 0..3),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, branches, join)| SerializableContinuation::Fork {
+                    id,
+                    branches,
+                    join,
+                }),
+            // Delay with optional next
+            (
+                arb_id(),
+                any::<u64>(),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, duration_ms, next)| SerializableContinuation::Delay {
+                    id,
+                    duration_ms,
+                    next,
+                }),
+        ]
+        .boxed()
+    }
+
+    /// Strategy for a continuation tree where all IDs are guaranteed unique.
+    ///
+    /// Each node gets an ID formed by its path index to prevent collisions.
+    fn arb_unique_continuation(
+        depth: usize,
+        prefix: &str,
+    ) -> BoxedStrategy<SerializableContinuation> {
+        let id = format!("{prefix}n");
+
+        if depth == 0 {
+            return Just(SerializableContinuation::Task { id, next: None }).boxed();
+        }
+
+        let id_clone = id.clone();
+        prop_oneof![
+            // Task with optional next
+            prop::option::of(
+                arb_unique_continuation(depth - 1, &format!("{prefix}0_")).prop_map(Box::new),
+            )
+            .prop_map(move |next| SerializableContinuation::Task {
+                id: id_clone.clone(),
+                next,
+            }),
+            // Fork with 0..3 branches (each gets unique prefix) and optional join
+            {
+                let id_f = id.clone();
+                let prefix_f = prefix.to_string();
+                (0..3u8)
+                    .prop_flat_map(move |branch_count| {
+                        let id_inner = id_f.clone();
+                        let prefix_inner = prefix_f.clone();
+                        let branches: Vec<BoxedStrategy<SerializableContinuation>> = (0
+                            ..branch_count)
+                            .map(|i| {
+                                arb_unique_continuation(depth - 1, &format!("{prefix_inner}b{i}_"))
+                            })
+                            .collect();
+                        let join = prop::option::of(
+                            arb_unique_continuation(depth - 1, &format!("{prefix_inner}j_"))
+                                .prop_map(Box::new),
+                        );
+                        (branches, join).prop_map(move |(branches, join)| {
+                            SerializableContinuation::Fork {
+                                id: id_inner.clone(),
+                                branches,
+                                join,
+                            }
+                        })
+                    })
+                    .boxed()
+            },
+            // Delay with optional next
+            {
+                let id_d = id;
+                let prefix_d = prefix.to_string();
+                (
+                    any::<u64>(),
+                    prop::option::of(
+                        arb_unique_continuation(depth - 1, &format!("{prefix_d}d_"))
+                            .prop_map(Box::new),
+                    ),
+                )
+                    .prop_map(move |(duration_ms, next)| {
+                        SerializableContinuation::Delay {
+                            id: id_d.clone(),
+                            duration_ms,
+                            next,
+                        }
+                    })
+            },
+        ]
+        .boxed()
+    }
+
+    /// Collect all IDs in a continuation tree.
+    fn collect_ids(cont: &SerializableContinuation) -> Vec<String> {
+        let mut ids = Vec::new();
+        fn walk(c: &SerializableContinuation, out: &mut Vec<String>) {
+            match c {
+                SerializableContinuation::Task { id, next } => {
+                    out.push(id.clone());
+                    if let Some(n) = next {
+                        walk(n, out);
+                    }
+                }
+                SerializableContinuation::Fork { id, branches, join } => {
+                    out.push(id.clone());
+                    for b in branches {
+                        walk(b, out);
+                    }
+                    if let Some(j) = join {
+                        walk(j, out);
+                    }
+                }
+                SerializableContinuation::Delay { id, next, .. } => {
+                    out.push(id.clone());
+                    if let Some(n) = next {
+                        walk(n, out);
+                    }
+                }
+            }
+        }
+        walk(cont, &mut ids);
+        ids
+    }
+
+    /// Inject a duplicate ID into a continuation by replacing the first node's ID.
+    fn inject_duplicate(cont: &SerializableContinuation, dup_id: &str) -> SerializableContinuation {
+        match cont {
+            SerializableContinuation::Task { next, .. } => SerializableContinuation::Task {
+                id: dup_id.to_string(),
+                next: next.clone(),
+            },
+            SerializableContinuation::Fork { branches, join, .. } => {
+                SerializableContinuation::Fork {
+                    id: dup_id.to_string(),
+                    branches: branches.clone(),
+                    join: join.clone(),
+                }
+            }
+            SerializableContinuation::Delay {
+                duration_ms, next, ..
+            } => SerializableContinuation::Delay {
+                id: dup_id.to_string(),
+                duration_ms: *duration_ms,
+                next: next.clone(),
+            },
+        }
+    }
+
+    proptest! {
+        // Property 4: `compute_definition_hash` is deterministic.
+        #[test]
+        fn hash_is_deterministic(cont in arb_continuation(3)) {
+            let h1 = cont.compute_definition_hash();
+            let h2 = cont.compute_definition_hash();
+            prop_assert_eq!(h1, h2);
+        }
+
+        // Property 5: serde roundtrip preserves the definition hash.
+        #[test]
+        fn serde_roundtrip_preserves_hash(cont in arb_continuation(3)) {
+            let original_hash = cont.compute_definition_hash();
+            let json = serde_json::to_string(&cont).unwrap();
+            let recovered: SerializableContinuation = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(original_hash, recovered.compute_definition_hash());
+        }
+
+        // Property 6: a tree with guaranteed-unique IDs has no duplicates.
+        #[test]
+        fn unique_ids_means_none(cont in arb_unique_continuation(3, "r_")) {
+            prop_assert!(cont.find_duplicate_id().is_none());
+        }
+
+        // Property 7: injecting a duplicate ID is always detected.
+        #[test]
+        fn injected_duplicate_is_detected(cont in arb_unique_continuation(3, "r_")) {
+            let ids = collect_ids(&cont);
+            // Need at least 2 nodes to have a meaningful duplicate injection
+            if ids.len() >= 2 {
+                // Pick the second ID and inject it into the root (which has the first ID)
+                let dup_id = &ids[1];
+                let tampered = inject_duplicate(&cont, dup_id);
+                prop_assert!(tampered.find_duplicate_id().is_some());
+            }
         }
     }
 }
