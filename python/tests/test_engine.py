@@ -1,13 +1,10 @@
 """Tests for workflow execution — both simple engine and durable engine."""
 
-import pytest
-
 from sayiir import (
     DurableEngine,
     Flow,
     InMemoryBackend,
     WorkflowEngine,
-    WorkflowStatus,
     run_durable_workflow,
     run_workflow,
     task,

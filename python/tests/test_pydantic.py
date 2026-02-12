@@ -4,9 +4,9 @@ import pytest
 
 pydantic = pytest.importorskip("pydantic")
 
-from pydantic import BaseModel
+from pydantic import BaseModel  # noqa: E402, I001
 
-from sayiir import Flow, run_workflow, task
+from sayiir import Flow, run_workflow, task  # noqa: E402, I001
 
 
 # ── Models ───────────────────────────────────────────────────────

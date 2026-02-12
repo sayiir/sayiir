@@ -4,19 +4,21 @@ import functools
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from ._sayiir import PyFlowBuilder
+from ._sayiir import PyFlowBuilder, PyTaskMetadata
 
 if TYPE_CHECKING:
-    from ._sayiir import PyTaskMetadata, PyWorkflow
+    from ._sayiir import PyWorkflow
 
 
 def _maybe_wrap_pydantic(task_func: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap a task with Pydantic validation if type annotations are BaseModel subclasses.
+    """Wrap a task with Pydantic validation if annotations are models.
 
-    - If ``_input_type`` is a Pydantic model, the raw input is validated via ``model_validate``.
-    - If ``_output_type`` is a Pydantic model and the return value is a model instance,
-      it is serialized via ``model_dump``.
-    - If Pydantic is not installed or annotations are not models, returns the task unchanged.
+    - If ``_input_type`` is a Pydantic model, the raw input is
+      validated via ``model_validate``.
+    - If ``_output_type`` is a Pydantic model and the return value
+      is a model instance, it is serialized via ``model_dump``.
+    - If Pydantic is not installed or annotations are not models,
+      returns the task unchanged.
     """
     try:
         from pydantic import BaseModel
@@ -57,7 +59,11 @@ class Workflow:
     and the Python-side task registry so execution is self-contained.
     """
 
-    def __init__(self, inner: "PyWorkflow", task_registry: dict[str, Callable[..., Any]]):
+    def __init__(
+        self,
+        inner: "PyWorkflow",
+        task_registry: dict[str, Callable[..., Any]],
+    ):
         self._inner = inner
         self._task_registry = task_registry
 
@@ -103,7 +109,7 @@ class ForkBuilder:
         """Join branches with a combining task."""
         task_id = getattr(task_func, "_task_id", task_func.__name__)
         metadata = getattr(task_func, "_metadata", None)
-        branches: list[list[tuple[str, "PyTaskMetadata | None"]]] = [
+        branches: list[list[tuple[str, PyTaskMetadata | None]]] = [
             [(name, None) for name, _ in chain] for chain in self._branches
         ]
         self._flow._task_registry[task_id] = _maybe_wrap_pydantic(task_func)
