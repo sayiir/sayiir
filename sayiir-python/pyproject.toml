@@ -53,6 +53,7 @@ select = ["E", "F", "I", "UP"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingModuleSource = false
+exclude = ["tests"]
 
 [tool.maturin]
 manifest-path = "../sayiir-py/Cargo.toml"
