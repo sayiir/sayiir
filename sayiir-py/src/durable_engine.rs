@@ -8,9 +8,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-use sayiir_core::snapshot::{CancellationRequest, PauseRequest};
+use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_core::workflow::WorkflowStatus;
-use sayiir_persistence::{InMemoryBackend, PersistentBackend};
+use sayiir_persistence::{InMemoryBackend, SignalStore, SnapshotStore};
 use sayiir_runtime::{
     execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
     ResumeOutcome,
@@ -167,12 +167,11 @@ impl PyDurableEngine {
         cancelled_by: Option<String>,
     ) -> PyResult<()> {
         self.runtime
-            .block_on(
-                self.backend.request_cancellation(
-                    &instance_id,
-                    CancellationRequest::new(reason, cancelled_by),
-                ),
-            )
+            .block_on(self.backend.store_signal(
+                &instance_id,
+                SignalKind::Cancel,
+                SignalRequest::new(reason, cancelled_by),
+            ))
             .map_err(backend_err_to_py)
     }
 
@@ -185,10 +184,11 @@ impl PyDurableEngine {
         paused_by: Option<String>,
     ) -> PyResult<()> {
         self.runtime
-            .block_on(
-                self.backend
-                    .request_pause(&instance_id, PauseRequest::new(reason, paused_by)),
-            )
+            .block_on(self.backend.store_signal(
+                &instance_id,
+                SignalKind::Pause,
+                SignalRequest::new(reason, paused_by),
+            ))
             .map_err(backend_err_to_py)
     }
 

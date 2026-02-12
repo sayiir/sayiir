@@ -1,41 +1,28 @@
-//! In-memory implementation of PersistentBackend.
+//! In-memory implementation of the persistence traits.
 //!
 //! This is a simple implementation that stores snapshots in a HashMap.
 //! Useful for testing and as a reference implementation.
 
-use crate::backend::{BackendError, PersistentBackend};
-use async_trait::async_trait;
+use crate::backend::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
 use chrono::{Duration, Utc};
 use sayiir_core::snapshot::{
-    CancellationRequest, ExecutionPosition, PauseRequest, WorkflowSnapshot, WorkflowSnapshotState,
+    ExecutionPosition, PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot,
+    WorkflowSnapshotState,
 };
-use sayiir_core::task_claim::AvailableTask;
-use sayiir_core::task_claim::TaskClaim;
+use sayiir_core::task_claim::{AvailableTask, TaskClaim};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// In-memory backend that stores snapshots in a HashMap.
 ///
 /// This implementation is thread-safe and suitable for testing.
-/// For production use, consider implementing PersistentBackend for
+/// For production use, consider implementing the persistence traits for
 /// a more durable storage backend (Redis, PostgreSQL, etc.).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use sayiir_persistence::{InMemoryBackend, PersistentBackend};
-/// use sayiir_core::snapshot::WorkflowSnapshot;
-///
-/// let backend = InMemoryBackend::new();
-/// let snapshot = WorkflowSnapshot::new("instance-123".to_string(), "hash-abc".to_string());
-/// backend.save_snapshot(&snapshot).await?;
-/// ```
 #[derive(Clone, Default)]
 pub struct InMemoryBackend {
     snapshots: Arc<RwLock<HashMap<String, WorkflowSnapshot>>>,
     claims: Arc<RwLock<HashMap<String, TaskClaim>>>, // Key: "{instance_id}:{task_id}"
-    cancellation_requests: Arc<RwLock<HashMap<String, CancellationRequest>>>, // Key: instance_id
-    pause_requests: Arc<RwLock<HashMap<String, PauseRequest>>>, // Key: instance_id
+    signals: Arc<RwLock<HashMap<String, HashMap<SignalKind, SignalRequest>>>>,
 }
 
 impl InMemoryBackend {
@@ -54,8 +41,11 @@ impl InMemoryBackend {
     }
 }
 
-#[async_trait]
-impl PersistentBackend for InMemoryBackend {
+// ---------------------------------------------------------------------------
+// SnapshotStore
+// ---------------------------------------------------------------------------
+
+impl SnapshotStore for InMemoryBackend {
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots.insert(snapshot.instance_id.clone(), snapshot.clone());
@@ -98,7 +88,201 @@ impl PersistentBackend for InMemoryBackend {
         let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         Ok(snapshots.keys().cloned().collect())
     }
+}
 
+// ---------------------------------------------------------------------------
+// SignalStore (overrides default composites for lock efficiency)
+// ---------------------------------------------------------------------------
+
+impl SignalStore for InMemoryBackend {
+    async fn store_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+        request: SignalRequest,
+    ) -> Result<(), BackendError> {
+        // Validate that the workflow exists and is in a signalable state
+        {
+            let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+            let snapshot = snapshots
+                .get(instance_id)
+                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+            match kind {
+                SignalKind::Cancel => {
+                    if snapshot.state.is_completed() {
+                        return Err(BackendError::CannotCancel("Completed".to_string()));
+                    }
+                    if snapshot.state.is_failed() {
+                        return Err(BackendError::CannotCancel("Failed".to_string()));
+                    }
+                    if snapshot.state.is_cancelled() {
+                        return Ok(()); // idempotent
+                    }
+                }
+                SignalKind::Pause => {
+                    if snapshot.state.is_completed() {
+                        return Err(BackendError::CannotPause("Completed".to_string()));
+                    }
+                    if snapshot.state.is_failed() {
+                        return Err(BackendError::CannotPause("Failed".to_string()));
+                    }
+                    if snapshot.state.is_cancelled() {
+                        return Err(BackendError::CannotPause("Cancelled".to_string()));
+                    }
+                    if snapshot.state.is_paused() {
+                        return Ok(()); // idempotent
+                    }
+                }
+            }
+        }
+
+        let mut signals = self.signals.write().map_err(Self::lock_error)?;
+        signals
+            .entry(instance_id.to_string())
+            .or_default()
+            .insert(kind, request);
+        Ok(())
+    }
+
+    async fn get_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+    ) -> Result<Option<SignalRequest>, BackendError> {
+        let signals = self.signals.read().map_err(Self::lock_error)?;
+        Ok(signals.get(instance_id).and_then(|m| m.get(&kind)).cloned())
+    }
+
+    async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
+        let mut signals = self.signals.write().map_err(Self::lock_error)?;
+        if let Some(inner) = signals.get_mut(instance_id) {
+            inner.remove(&kind);
+            if inner.is_empty() {
+                signals.remove(instance_id);
+            }
+        }
+        Ok(())
+    }
+
+    // Override check_and_cancel for more efficient locking (avoids load+save round-trip).
+    async fn check_and_cancel(
+        &self,
+        instance_id: &str,
+        interrupted_at_task: Option<&str>,
+    ) -> Result<bool, BackendError> {
+        let request = {
+            let signals = self.signals.read().map_err(Self::lock_error)?;
+            match signals
+                .get(instance_id)
+                .and_then(|m| m.get(&SignalKind::Cancel))
+            {
+                Some(req) => req.clone(),
+                None => return Ok(false),
+            }
+        };
+
+        {
+            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+            let snapshot = snapshots
+                .get_mut(instance_id)
+                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+            if !snapshot.state.is_in_progress() {
+                return Ok(false);
+            }
+            snapshot.mark_cancelled(
+                request.reason,
+                request.requested_by,
+                interrupted_at_task.map(String::from),
+            );
+        }
+
+        {
+            let mut signals = self.signals.write().map_err(Self::lock_error)?;
+            if let Some(inner) = signals.get_mut(instance_id) {
+                inner.remove(&SignalKind::Cancel);
+                if inner.is_empty() {
+                    signals.remove(instance_id);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    // Override check_and_pause for more efficient locking.
+    async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError> {
+        let request = {
+            let signals = self.signals.read().map_err(Self::lock_error)?;
+            match signals
+                .get(instance_id)
+                .and_then(|m| m.get(&SignalKind::Pause))
+            {
+                Some(req) => req.clone(),
+                None => return Ok(false),
+            }
+        };
+
+        {
+            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+            let snapshot = snapshots
+                .get_mut(instance_id)
+                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+            if !snapshot.state.is_in_progress() {
+                return Ok(false);
+            }
+            let pause_request: PauseRequest = request.into();
+            snapshot.mark_paused(&pause_request);
+        }
+
+        {
+            let mut signals = self.signals.write().map_err(Self::lock_error)?;
+            if let Some(inner) = signals.get_mut(instance_id) {
+                inner.remove(&SignalKind::Pause);
+                if inner.is_empty() {
+                    signals.remove(instance_id);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    // Override unpause for more efficient locking.
+    async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
+        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+
+        let snapshot = snapshots
+            .get_mut(instance_id)
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+        if !snapshot.state.is_paused() {
+            return Err(BackendError::CannotPause(format!(
+                "Workflow is not paused (current state: {:?})",
+                if snapshot.state.is_in_progress() {
+                    "InProgress"
+                } else if snapshot.state.is_completed() {
+                    "Completed"
+                } else if snapshot.state.is_failed() {
+                    "Failed"
+                } else if snapshot.state.is_cancelled() {
+                    "Cancelled"
+                } else {
+                    "Unknown"
+                }
+            )));
+        }
+
+        snapshot.mark_unpaused();
+        Ok(snapshot.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskClaimStore
+// ---------------------------------------------------------------------------
+
+impl TaskClaimStore for InMemoryBackend {
     async fn claim_task(
         &self,
         instance_id: &str,
@@ -172,6 +356,7 @@ impl PersistentBackend for InMemoryBackend {
                     claim.worker_id
                 )));
             }
+
             if let Some(expires_at) = claim.expires_at {
                 let expires_datetime = chrono::DateTime::from_timestamp(expires_at as i64, 0)
                     .ok_or_else(|| BackendError::Backend("Invalid timestamp".to_string()))?;
@@ -206,21 +391,22 @@ impl PersistentBackend for InMemoryBackend {
 
         {
             let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
-            let cancellation_requests = self
-                .cancellation_requests
-                .read()
-                .map_err(Self::lock_error)?;
-
-            let pause_requests = self.pause_requests.read().map_err(Self::lock_error)?;
+            let signals = self.signals.read().map_err(Self::lock_error)?;
 
             for (instance_id, snapshot) in snapshots.iter() {
                 if !snapshot.state.is_in_progress() {
                     continue;
                 }
-                if cancellation_requests.contains_key(instance_id) {
+                if signals
+                    .get(instance_id.as_str())
+                    .is_some_and(|m| m.contains_key(&SignalKind::Cancel))
+                {
                     continue;
                 }
-                if pause_requests.contains_key(instance_id) {
+                if signals
+                    .get(instance_id.as_str())
+                    .is_some_and(|m| m.contains_key(&SignalKind::Pause))
+                {
                     continue;
                 }
                 if let WorkflowSnapshotState::InProgress {
@@ -236,10 +422,8 @@ impl PersistentBackend for InMemoryBackend {
                     && Utc::now() >= *wake_at
                 {
                     if let Some(next_id) = next_task_id {
-                        // Delay expired, need to advance to next task
                         delay_advances.push((instance_id.clone(), next_id.clone()));
                     } else {
-                        // Delay was the last node — mark workflow completed
                         delay_completions.push((instance_id.clone(), delay_id.clone()));
                     }
                 }
@@ -266,10 +450,7 @@ impl PersistentBackend for InMemoryBackend {
 
         let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         let claims = self.claims.read().map_err(Self::lock_error)?;
-        let cancellation_requests = self
-            .cancellation_requests
-            .read()
-            .map_err(Self::lock_error)?;
+        let signals = self.signals.read().map_err(Self::lock_error)?;
 
         let mut available = Vec::new();
 
@@ -278,14 +459,14 @@ impl PersistentBackend for InMemoryBackend {
                 continue;
             }
 
-            // Skip workflows with pending cancellation requests
-            if cancellation_requests.contains_key(instance_id) {
+            // Skip workflows with pending cancellation or pause requests
+            if let Some(instance_signals) = signals.get(instance_id.as_str())
+                && (instance_signals.contains_key(&SignalKind::Cancel)
+                    || instance_signals.contains_key(&SignalKind::Pause))
+            {
                 continue;
             }
 
-            // This is a simplified version - in a real implementation, we'd need
-            // to traverse the workflow continuation to find ready tasks.
-            // For now, we'll return tasks that are not completed and not claimed.
             if let WorkflowSnapshotState::InProgress {
                 completed_tasks,
                 position: ExecutionPosition::AtTask { task_id },
@@ -297,7 +478,6 @@ impl PersistentBackend for InMemoryBackend {
                 let is_completed = completed_tasks.contains_key(task_id);
 
                 if !is_completed && !is_claimed {
-                    // Find input for this task using deterministic last task output
                     let input = if completed_tasks.is_empty() {
                         snapshot.initial_input_bytes()
                     } else {
@@ -322,231 +502,13 @@ impl PersistentBackend for InMemoryBackend {
 
         Ok(available)
     }
-
-    async fn request_cancellation(
-        &self,
-        instance_id: &str,
-        request: CancellationRequest,
-    ) -> Result<(), BackendError> {
-        // Check if workflow exists and is in a cancellable state
-        {
-            let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
-
-            let snapshot = snapshots
-                .get(instance_id)
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
-
-            // Cannot cancel workflows in terminal states
-            if snapshot.state.is_completed() {
-                return Err(BackendError::CannotCancel("Completed".to_string()));
-            }
-            if snapshot.state.is_failed() {
-                return Err(BackendError::CannotCancel("Failed".to_string()));
-            }
-            if snapshot.state.is_cancelled() {
-                // Already cancelled - idempotent success
-                return Ok(());
-            }
-        }
-
-        // Store the cancellation request
-        let mut cancellation_requests = self
-            .cancellation_requests
-            .write()
-            .map_err(Self::lock_error)?;
-
-        cancellation_requests.insert(instance_id.to_string(), request);
-        Ok(())
-    }
-
-    async fn get_cancellation_request(
-        &self,
-        instance_id: &str,
-    ) -> Result<Option<CancellationRequest>, BackendError> {
-        let cancellation_requests = self
-            .cancellation_requests
-            .read()
-            .map_err(Self::lock_error)?;
-
-        Ok(cancellation_requests.get(instance_id).cloned())
-    }
-
-    async fn clear_cancellation_request(&self, instance_id: &str) -> Result<(), BackendError> {
-        let mut cancellation_requests = self
-            .cancellation_requests
-            .write()
-            .map_err(Self::lock_error)?;
-
-        cancellation_requests.remove(instance_id);
-        Ok(())
-    }
-
-    async fn check_and_cancel(
-        &self,
-        instance_id: &str,
-        interrupted_at_task: Option<&str>,
-    ) -> Result<bool, BackendError> {
-        // Get cancellation request
-        let request = {
-            let cancellation_requests = self
-                .cancellation_requests
-                .read()
-                .map_err(Self::lock_error)?;
-
-            match cancellation_requests.get(instance_id) {
-                Some(req) => req.clone(),
-                None => return Ok(false),
-            }
-        };
-
-        // Update snapshot to cancelled state
-        {
-            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
-
-            let snapshot = snapshots
-                .get_mut(instance_id)
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
-
-            // Only cancel if still in progress
-            if !snapshot.state.is_in_progress() {
-                return Ok(false);
-            }
-
-            snapshot.mark_cancelled(
-                request.reason,
-                request.requested_by,
-                interrupted_at_task.map(String::from),
-            );
-        }
-
-        // Clear the cancellation request
-        {
-            let mut cancellation_requests = self
-                .cancellation_requests
-                .write()
-                .map_err(Self::lock_error)?;
-
-            cancellation_requests.remove(instance_id);
-        }
-
-        Ok(true)
-    }
-
-    async fn request_pause(
-        &self,
-        instance_id: &str,
-        request: PauseRequest,
-    ) -> Result<(), BackendError> {
-        // Check if workflow exists and is in a pausable state
-        {
-            let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
-
-            let snapshot = snapshots
-                .get(instance_id)
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
-
-            if snapshot.state.is_completed() {
-                return Err(BackendError::CannotPause("Completed".to_string()));
-            }
-            if snapshot.state.is_failed() {
-                return Err(BackendError::CannotPause("Failed".to_string()));
-            }
-            if snapshot.state.is_cancelled() {
-                return Err(BackendError::CannotPause("Cancelled".to_string()));
-            }
-            if snapshot.state.is_paused() {
-                // Already paused — idempotent success
-                return Ok(());
-            }
-        }
-
-        let mut pause_requests = self.pause_requests.write().map_err(Self::lock_error)?;
-        pause_requests.insert(instance_id.to_string(), request);
-        Ok(())
-    }
-
-    async fn get_pause_request(
-        &self,
-        instance_id: &str,
-    ) -> Result<Option<PauseRequest>, BackendError> {
-        let pause_requests = self.pause_requests.read().map_err(Self::lock_error)?;
-        Ok(pause_requests.get(instance_id).cloned())
-    }
-
-    async fn clear_pause_request(&self, instance_id: &str) -> Result<(), BackendError> {
-        let mut pause_requests = self.pause_requests.write().map_err(Self::lock_error)?;
-        pause_requests.remove(instance_id);
-        Ok(())
-    }
-
-    async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError> {
-        // Get pause request
-        let request = {
-            let pause_requests = self.pause_requests.read().map_err(Self::lock_error)?;
-
-            match pause_requests.get(instance_id) {
-                Some(req) => req.clone(),
-                None => return Ok(false),
-            }
-        };
-
-        // Update snapshot to paused state
-        {
-            let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
-
-            let snapshot = snapshots
-                .get_mut(instance_id)
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
-
-            // Only pause if still in progress
-            if !snapshot.state.is_in_progress() {
-                return Ok(false);
-            }
-
-            snapshot.mark_paused(&request);
-        }
-
-        // Clear the pause request
-        {
-            let mut pause_requests = self.pause_requests.write().map_err(Self::lock_error)?;
-            pause_requests.remove(instance_id);
-        }
-
-        Ok(true)
-    }
-
-    async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
-        let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
-
-        let snapshot = snapshots
-            .get_mut(instance_id)
-            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
-
-        if !snapshot.state.is_paused() {
-            return Err(BackendError::CannotPause(format!(
-                "Workflow is not paused (current state: {:?})",
-                if snapshot.state.is_in_progress() {
-                    "InProgress"
-                } else if snapshot.state.is_completed() {
-                    "Completed"
-                } else if snapshot.state.is_failed() {
-                    "Failed"
-                } else if snapshot.state.is_cancelled() {
-                    "Cancelled"
-                } else {
-                    "Unknown"
-                }
-            )));
-        }
-
-        snapshot.mark_unpaused();
-        Ok(snapshot.clone())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::SignalStore;
+    use sayiir_core::snapshot::SignalKind;
 
     #[tokio::test]
     async fn test_save_and_load() {
@@ -854,35 +816,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_cancellation_success() {
+    async fn test_store_signal_cancel_success() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_cancellation(
+            .store_signal(
                 "test-123",
-                CancellationRequest::new(
+                SignalKind::Cancel,
+                SignalRequest::new(
                     Some("User requested".to_string()),
                     Some("admin".to_string()),
                 ),
             )
             .await;
-        assert!(result.is_ok(), "request_cancellation should succeed");
+        assert!(result.is_ok(), "store_signal should succeed");
 
-        let stored = backend.get_cancellation_request("test-123").await.unwrap();
-        assert!(stored.is_some(), "cancellation request should be stored");
+        let stored = backend
+            .get_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap();
+        assert!(stored.is_some(), "cancel signal should be stored");
         let stored = stored.unwrap();
         assert_eq!(stored.reason, Some("User requested".to_string()));
         assert_eq!(stored.requested_by, Some("admin".to_string()));
     }
 
     #[tokio::test]
-    async fn test_request_cancellation_not_found() {
+    async fn test_store_signal_cancel_not_found() {
         let backend = InMemoryBackend::new();
 
         let result = backend
-            .request_cancellation("nonexistent", CancellationRequest::new(None, None))
+            .store_signal(
+                "nonexistent",
+                SignalKind::Cancel,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::NotFound(_))),
@@ -891,14 +861,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_cancellation_completed_workflow() {
+    async fn test_store_signal_cancel_completed_workflow() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_completed(bytes::Bytes::from("result"));
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_cancellation("test-123", CancellationRequest::new(None, None))
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::CannotCancel(_))),
@@ -907,14 +881,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_cancellation_failed_workflow() {
+    async fn test_store_signal_cancel_failed_workflow() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_failed("Some error".to_string());
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_cancellation("test-123", CancellationRequest::new(None, None))
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::CannotCancel(_))),
@@ -923,16 +901,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_cancellation_already_cancelled_idempotent() {
+    async fn test_store_signal_cancel_already_cancelled_idempotent() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_cancelled(Some("First cancel".to_string()), None, None);
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_cancellation(
+            .store_signal(
                 "test-123",
-                CancellationRequest::new(Some("Second cancel".to_string()), None),
+                SignalKind::Cancel,
+                SignalRequest::new(Some("Second cancel".to_string()), None),
             )
             .await;
         assert!(
@@ -942,63 +921,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_cancellation_request_none() {
+    async fn test_get_signal_cancel_none() {
         let backend = InMemoryBackend::new();
 
-        let result = backend.get_cancellation_request("test-123").await.unwrap();
+        let result = backend
+            .get_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap();
         assert!(
             result.is_none(),
-            "should return None when no cancellation request exists"
+            "should return None when no cancellation signal exists"
         );
     }
 
     #[tokio::test]
-    async fn test_clear_cancellation_request() {
+    async fn test_clear_signal_cancel() {
         let backend = InMemoryBackend::new();
         let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         backend.save_snapshot(&snapshot).await.unwrap();
 
         backend
-            .request_cancellation(
+            .store_signal(
                 "test-123",
-                CancellationRequest::new(Some("Test".to_string()), None),
+                SignalKind::Cancel,
+                SignalRequest::new(Some("Test".to_string()), None),
             )
             .await
             .unwrap();
 
         assert!(
             backend
-                .get_cancellation_request("test-123")
+                .get_signal("test-123", SignalKind::Cancel)
                 .await
                 .unwrap()
                 .is_some(),
-            "cancellation request should exist before clearing"
+            "cancel signal should exist before clearing"
         );
 
         backend
-            .clear_cancellation_request("test-123")
+            .clear_signal("test-123", SignalKind::Cancel)
             .await
             .unwrap();
 
         assert!(
             backend
-                .get_cancellation_request("test-123")
+                .get_signal("test-123", SignalKind::Cancel)
                 .await
                 .unwrap()
                 .is_none(),
-            "cancellation request should be gone after clearing"
+            "cancel signal should be gone after clearing"
         );
     }
 
     #[tokio::test]
-    async fn test_request_pause_completed_workflow() {
+    async fn test_store_signal_pause_completed_workflow() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_completed(bytes::Bytes::from("result"));
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_pause("test-123", PauseRequest::new(None, None))
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::CannotPause(_))),
@@ -1007,14 +994,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_pause_failed_workflow() {
+    async fn test_store_signal_pause_failed_workflow() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_failed("Some error".to_string());
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_pause("test-123", PauseRequest::new(None, None))
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::CannotPause(_))),
@@ -1023,14 +1014,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_pause_cancelled_workflow() {
+    async fn test_store_signal_pause_cancelled_workflow() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_cancelled(Some("done".to_string()), None, None);
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_pause("test-123", PauseRequest::new(None, None))
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::CannotPause(_))),
@@ -1039,16 +1034,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_pause_already_paused_idempotent() {
+    async fn test_store_signal_pause_already_paused_idempotent() {
         let backend = InMemoryBackend::new();
         let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
         snapshot.mark_paused(&PauseRequest::new(Some("first".to_string()), None));
         backend.save_snapshot(&snapshot).await.unwrap();
 
         let result = backend
-            .request_pause(
+            .store_signal(
                 "test-123",
-                PauseRequest::new(Some("second".to_string()), None),
+                SignalKind::Pause,
+                SignalRequest::new(Some("second".to_string()), None),
             )
             .await;
         assert!(
@@ -1058,10 +1054,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_request_pause_not_found() {
+    async fn test_store_signal_pause_not_found() {
         let backend = InMemoryBackend::new();
         let result = backend
-            .request_pause("nonexistent", PauseRequest::new(None, None))
+            .store_signal(
+                "nonexistent",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
             .await;
         assert!(
             matches!(result, Err(BackendError::NotFound(_))),
@@ -1076,9 +1076,10 @@ mod tests {
         backend.save_snapshot(&snapshot).await.unwrap();
 
         backend
-            .request_cancellation(
+            .store_signal(
                 "test-123",
-                CancellationRequest::new(Some("Timeout".to_string()), Some("system".to_string())),
+                SignalKind::Cancel,
+                SignalRequest::new(Some("Timeout".to_string()), Some("system".to_string())),
             )
             .await
             .unwrap();
@@ -1113,11 +1114,11 @@ mod tests {
 
         assert!(
             backend
-                .get_cancellation_request("test-123")
+                .get_signal("test-123", SignalKind::Cancel)
                 .await
                 .unwrap()
                 .is_none(),
-            "cancellation request should be cleared after check_and_cancel"
+            "cancel signal should be cleared after check_and_cancel"
         );
     }
 
@@ -1147,10 +1148,13 @@ mod tests {
         snapshot.mark_completed(bytes::Bytes::from("done"));
         backend.save_snapshot(&snapshot).await.unwrap();
 
-        // Add a cancellation request directly (bypassing state check)
+        // Add a cancel signal directly (bypassing state check)
         {
-            let mut requests = backend.cancellation_requests.write().unwrap();
-            requests.insert("test-123".to_string(), CancellationRequest::new(None, None));
+            let mut signals = backend.signals.write().unwrap();
+            signals
+                .entry("test-123".to_string())
+                .or_default()
+                .insert(SignalKind::Cancel, SignalRequest::new(None, None));
         }
 
         let result = backend.check_and_cancel("test-123", None).await.unwrap();
@@ -1183,7 +1187,11 @@ mod tests {
         backend.save_snapshot(&snapshot2).await.unwrap();
 
         backend
-            .request_cancellation("workflow-1", CancellationRequest::new(None, None))
+            .store_signal(
+                "workflow-1",
+                SignalKind::Cancel,
+                SignalRequest::new(None, None),
+            )
             .await
             .unwrap();
 
@@ -1192,6 +1200,435 @@ mod tests {
         assert!(
             !tasks.iter().any(|t| t.instance_id == "workflow-1"),
             "workflow with pending cancellation should be skipped"
+        );
+    }
+
+    // ========================================================================
+    // check_and_pause tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_check_and_pause_success() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(Some("maintenance".to_string()), Some("ops".to_string())),
+            )
+            .await
+            .unwrap();
+
+        let result = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            result,
+            "check_and_pause should return true when pause pending"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(snapshot.state.is_paused(), "workflow should be paused");
+
+        let WorkflowSnapshotState::Paused {
+            reason, paused_by, ..
+        } = &snapshot.state
+        else {
+            panic!("Expected Paused state");
+        };
+        assert_eq!(reason, &Some("maintenance".to_string()));
+        assert_eq!(paused_by, &Some("ops".to_string()));
+
+        assert!(
+            backend
+                .get_signal("test-123", SignalKind::Pause)
+                .await
+                .unwrap()
+                .is_none(),
+            "pause signal should be cleared after check_and_pause"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_pause_no_request() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            !result,
+            "check_and_pause should return false when no pause pending"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_in_progress(),
+            "workflow should still be in progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_pause_not_in_progress() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_completed(bytes::Bytes::from("done"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Add a pause signal directly (bypassing state check)
+        {
+            let mut signals = backend.signals.write().unwrap();
+            signals
+                .entry("test-123".to_string())
+                .or_default()
+                .insert(SignalKind::Pause, SignalRequest::new(None, None));
+        }
+
+        let result = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            !result,
+            "check_and_pause should return false for non-in-progress workflow"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(
+            snapshot.state.is_completed(),
+            "workflow should still be completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_and_pause_preserves_position() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-3".to_string(),
+        });
+        snapshot.mark_task_completed("task-1".to_string(), bytes::Bytes::from("out1"));
+        snapshot.mark_task_completed("task-2".to_string(), bytes::Bytes::from("out2"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
+            .await
+            .unwrap();
+
+        backend.check_and_pause("test-123").await.unwrap();
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        let WorkflowSnapshotState::Paused {
+            completed_tasks,
+            position,
+            last_completed_task_id,
+            ..
+        } = &snapshot.state
+        else {
+            panic!("Expected Paused state");
+        };
+
+        assert_eq!(completed_tasks.len(), 2);
+        assert!(completed_tasks.contains_key("task-1"));
+        assert!(completed_tasks.contains_key("task-2"));
+        assert!(matches!(
+            position,
+            ExecutionPosition::AtTask { task_id } if task_id == "task-3"
+        ));
+        assert_eq!(last_completed_task_id, &Some("task-2".to_string()));
+    }
+
+    // ========================================================================
+    // unpause tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_unpause_success() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-2".to_string(),
+        });
+        snapshot.mark_task_completed("task-1".to_string(), bytes::Bytes::from("out1"));
+        snapshot.mark_paused(&PauseRequest::new(
+            Some("maintenance".to_string()),
+            Some("ops".to_string()),
+        ));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.unpause("test-123").await.unwrap();
+
+        assert!(
+            result.state.is_in_progress(),
+            "unpaused workflow should be in progress"
+        );
+
+        // Verify position and tasks were restored
+        let WorkflowSnapshotState::InProgress {
+            position,
+            completed_tasks,
+            last_completed_task_id,
+        } = &result.state
+        else {
+            panic!("Expected InProgress state");
+        };
+        assert!(matches!(
+            position,
+            ExecutionPosition::AtTask { task_id } if task_id == "task-2"
+        ));
+        assert!(completed_tasks.contains_key("task-1"));
+        assert_eq!(last_completed_task_id, &Some("task-1".to_string()));
+
+        // Verify persisted state matches
+        let loaded = backend.load_snapshot("test-123").await.unwrap();
+        assert!(loaded.state.is_in_progress());
+    }
+
+    #[tokio::test]
+    async fn test_unpause_not_paused_errors() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.unpause("test-123").await;
+        assert!(
+            matches!(result, Err(BackendError::CannotPause(_))),
+            "unpause on in-progress workflow should error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpause_completed_errors() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        snapshot.mark_completed(bytes::Bytes::from("done"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.unpause("test-123").await;
+        assert!(
+            matches!(result, Err(BackendError::CannotPause(_))),
+            "unpause on completed workflow should error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unpause_not_found() {
+        let backend = InMemoryBackend::new();
+        let result = backend.unpause("nonexistent").await;
+        assert!(matches!(result, Err(BackendError::NotFound(_))));
+    }
+
+    // ========================================================================
+    // Concurrent signals tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_cancel_and_pause_simultaneously_cancel_wins() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Store both signals
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("cancel reason".to_string()), None),
+            )
+            .await
+            .unwrap();
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(Some("pause reason".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        // check_and_cancel should process the cancel signal
+        let cancelled = backend
+            .check_and_cancel("test-123", Some("task-1"))
+            .await
+            .unwrap();
+        assert!(cancelled, "cancel should succeed");
+
+        // Now check_and_pause — workflow is already cancelled (not in progress)
+        let paused = backend.check_and_pause("test-123").await.unwrap();
+        assert!(
+            !paused,
+            "pause should return false since workflow is already cancelled"
+        );
+
+        let snapshot = backend.load_snapshot("test-123").await.unwrap();
+        assert!(snapshot.state.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_signal_independent_of_pause_signal() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Store both signals
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("cancel".to_string()), None),
+            )
+            .await
+            .unwrap();
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Pause,
+                SignalRequest::new(Some("pause".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        // Clear only cancel
+        backend
+            .clear_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap();
+
+        // Cancel should be gone, pause should remain
+        assert!(
+            backend
+                .get_signal("test-123", SignalKind::Cancel)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            backend
+                .get_signal("test-123", SignalKind::Pause)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // ========================================================================
+    // find_available_tasks + pause signal
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_find_available_tasks_skips_paused_workflows() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot1 = WorkflowSnapshot::with_initial_input(
+            "workflow-1".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![1]),
+        );
+        snapshot1.update_position(ExecutionPosition::AtTask {
+            task_id: "task-1".to_string(),
+        });
+        backend.save_snapshot(&snapshot1).await.unwrap();
+
+        let mut snapshot2 = WorkflowSnapshot::with_initial_input(
+            "workflow-2".to_string(),
+            "hash-abc".to_string(),
+            bytes::Bytes::from(vec![2]),
+        );
+        snapshot2.update_position(ExecutionPosition::AtTask {
+            task_id: "task-2".to_string(),
+        });
+        backend.save_snapshot(&snapshot2).await.unwrap();
+
+        // Pause workflow-1
+        backend
+            .store_signal(
+                "workflow-1",
+                SignalKind::Pause,
+                SignalRequest::new(None, None),
+            )
+            .await
+            .unwrap();
+
+        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+
+        assert!(
+            !tasks.iter().any(|t| t.instance_id == "workflow-1"),
+            "workflow with pending pause should be skipped"
+        );
+        assert!(
+            tasks.iter().any(|t| t.instance_id == "workflow-2"),
+            "workflow without signals should be available"
+        );
+    }
+
+    // ========================================================================
+    // Orphaned signals
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delete_snapshot_leaves_orphaned_signals() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("reason".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        // Delete the snapshot
+        backend.delete_snapshot("test-123").await.unwrap();
+
+        // Signal is still there (orphaned) — this documents current behavior
+        let signal = backend
+            .get_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap();
+        assert!(
+            signal.is_some(),
+            "signal persists after snapshot deletion (orphaned)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_signal_overwrites_previous() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("test-123".to_string(), "hash-abc".to_string());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("first".to_string()), None),
+            )
+            .await
+            .unwrap();
+        backend
+            .store_signal(
+                "test-123",
+                SignalKind::Cancel,
+                SignalRequest::new(Some("second".to_string()), None),
+            )
+            .await
+            .unwrap();
+
+        let signal = backend
+            .get_signal("test-123", SignalKind::Cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            signal.reason,
+            Some("second".to_string()),
+            "latest signal should overwrite previous"
         );
     }
 

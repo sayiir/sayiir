@@ -1,13 +1,21 @@
-//! Persistent backend trait for storing and retrieving workflow snapshots.
+//! Persistent backend traits for storing and retrieving workflow snapshots.
 //!
-//! This trait abstracts the storage mechanism, allowing implementations
-//! for various backends (in-memory, Redis, PostgreSQL, etc.).
+//! The trait hierarchy is decomposed into focused sub-traits:
+//!
+//! - [`SnapshotStore`]: Core CRUD for workflow snapshots (5 methods).
+//! - [`SignalStore`]: Cancel + pause signal primitives with default composite
+//!   implementations (3 required + 3 default methods).
+//! - [`TaskClaimStore`]: Distributed task claiming (4 methods, opt-in).
+//! - [`PersistentBackend`]: Supertrait = `SnapshotStore + SignalStore`, blanket-implemented.
+//!
+//! A minimal backend only needs to implement `SnapshotStore` + 3 `SignalStore` primitives
+//! (8 methods total) to satisfy `PersistentBackend`.
 
-use async_trait::async_trait;
 use chrono::Duration;
-use sayiir_core::snapshot::{CancellationRequest, PauseRequest, WorkflowSnapshot};
-use sayiir_core::task_claim::AvailableTask;
-use sayiir_core::task_claim::TaskClaim;
+use sayiir_core::snapshot::{
+    PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot, WorkflowSnapshotState,
+};
+use sayiir_core::task_claim::{AvailableTask, TaskClaim};
 
 /// Error type for backend operations.
 #[derive(Debug, thiserror::Error)]
@@ -29,258 +37,220 @@ pub enum BackendError {
     CannotPause(String),
 }
 
-/// Trait for persistent storage of workflow snapshots.
+// ---------------------------------------------------------------------------
+// SnapshotStore — core CRUD, every backend implements this
+// ---------------------------------------------------------------------------
+
+/// Core snapshot CRUD operations.
 ///
-/// Implementations of this trait provide the storage layer for distributed
-/// workflow execution. Snapshots are saved after each task completion,
-/// enabling recovery and resumption of workflows.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use sayiir_persistence::{PersistentBackend, InMemoryBackend};
-/// use sayiir_core::snapshot::WorkflowSnapshot;
-///
-/// let backend = InMemoryBackend::new();
-/// let snapshot = WorkflowSnapshot::new("instance-123".to_string(), "hash-abc".to_string());
-/// backend.save_snapshot(&snapshot).await?;
-/// let restored = backend.load_snapshot("instance-123").await?;
-/// ```
-#[async_trait]
-pub trait PersistentBackend: Send + Sync {
+/// Every persistent backend must implement these 5 methods.
+pub trait SnapshotStore: Send + Sync {
     /// Save a workflow snapshot.
     ///
     /// If a snapshot with the same instance_id already exists, it should be overwritten.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError` if the snapshot cannot be saved.
-    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError>;
+    fn save_snapshot(
+        &self,
+        snapshot: &WorkflowSnapshot,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Save a single task result atomically.
     ///
     /// This is more granular than `save_snapshot` and allows concurrent task
     /// completions (e.g., in fork branches) without overwriting each other.
-    /// The implementation should atomically add/update the task result within
-    /// the snapshot's completed_tasks map.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    /// - `task_id`: The task that completed
-    /// - `output`: The serialized task output
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if no snapshot exists for the instance.
-    async fn save_task_result(
+    fn save_task_result(
         &self,
         instance_id: &str,
         task_id: &str,
         output: bytes::Bytes,
-    ) -> Result<(), BackendError>;
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Load a workflow snapshot by instance ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if no snapshot exists for the given instance ID.
-    async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError>;
+    fn load_snapshot(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<WorkflowSnapshot, BackendError>> + Send;
 
     /// Delete a workflow snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if no snapshot exists for the given instance ID.
-    async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError>;
+    fn delete_snapshot(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// List all snapshot instance IDs.
-    ///
-    /// Returns an empty vector if no snapshots exist.
-    async fn list_snapshots(&self) -> Result<Vec<String>, BackendError>;
+    fn list_snapshots(&self) -> impl Future<Output = Result<Vec<String>, BackendError>> + Send;
+}
 
+// ---------------------------------------------------------------------------
+// SignalStore — cancel + pause via SignalKind
+// ---------------------------------------------------------------------------
+
+/// Signal storage for cancel and pause workflows.
+///
+/// Backends implement the 3 primitives (`store_signal`, `get_signal`,
+/// `clear_signal`). The 3 composite methods (`check_and_cancel`,
+/// `check_and_pause`, `unpause`) have default implementations built from
+/// the primitives + `SnapshotStore`. Backends may override them for atomicity.
+pub trait SignalStore: SnapshotStore {
+    // --- 3 primitives (backend must implement) ---
+
+    /// Store a signal (cancel or pause) for a workflow instance.
+    fn store_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+        request: SignalRequest,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
+
+    /// Get the pending signal of the given kind, if any.
+    fn get_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+    ) -> impl Future<Output = Result<Option<SignalRequest>, BackendError>> + Send;
+
+    /// Clear the signal of the given kind.
+    fn clear_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
+
+    // --- 3 composites with default impls (overridable for atomicity) ---
+
+    /// Atomically check for cancellation and transition to cancelled state.
+    ///
+    /// Returns `true` if the workflow was cancelled, `false` if no cancellation
+    /// was pending.
+    fn check_and_cancel(
+        &self,
+        instance_id: &str,
+        interrupted_at_task: Option<&str>,
+    ) -> impl Future<Output = Result<bool, BackendError>> + Send {
+        async move {
+            let Some(request) = self.get_signal(instance_id, SignalKind::Cancel).await? else {
+                return Ok(false);
+            };
+            let mut snapshot = self.load_snapshot(instance_id).await?;
+            if !snapshot.state.is_in_progress() {
+                return Ok(false);
+            }
+            snapshot.mark_cancelled(
+                request.reason,
+                request.requested_by,
+                interrupted_at_task.map(String::from),
+            );
+            self.save_snapshot(&snapshot).await?;
+            self.clear_signal(instance_id, SignalKind::Cancel).await?;
+            Ok(true)
+        }
+    }
+
+    /// Atomically check for a pause request and transition to paused state.
+    ///
+    /// Returns `true` if the workflow was paused, `false` if no pause was pending.
+    fn check_and_pause(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<bool, BackendError>> + Send {
+        async move {
+            let Some(request) = self.get_signal(instance_id, SignalKind::Pause).await? else {
+                return Ok(false);
+            };
+            let mut snapshot = self.load_snapshot(instance_id).await?;
+            if !snapshot.state.is_in_progress() {
+                return Ok(false);
+            }
+            let pause_request: PauseRequest = request.into();
+            snapshot.mark_paused(&pause_request);
+            self.save_snapshot(&snapshot).await?;
+            self.clear_signal(instance_id, SignalKind::Pause).await?;
+            Ok(true)
+        }
+    }
+
+    /// Transition a paused workflow back to in-progress and return the updated snapshot.
+    fn unpause(
+        &self,
+        instance_id: &str,
+    ) -> impl Future<Output = Result<WorkflowSnapshot, BackendError>> + Send {
+        async move {
+            let mut snapshot = self.load_snapshot(instance_id).await?;
+            if !snapshot.state.is_paused() {
+                let state_name = match &snapshot.state {
+                    WorkflowSnapshotState::InProgress { .. } => "InProgress",
+                    WorkflowSnapshotState::Completed { .. } => "Completed",
+                    WorkflowSnapshotState::Failed { .. } => "Failed",
+                    WorkflowSnapshotState::Cancelled { .. } => "Cancelled",
+                    WorkflowSnapshotState::Paused { .. } => "Paused",
+                };
+                return Err(BackendError::CannotPause(format!(
+                    "Workflow is not paused (current state: {state_name:?})"
+                )));
+            }
+            snapshot.mark_unpaused();
+            self.save_snapshot(&snapshot).await?;
+            Ok(snapshot)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskClaimStore — only for distributed workers
+// ---------------------------------------------------------------------------
+
+/// Task claiming for distributed multi-worker execution.
+///
+/// Only needed when using [`PooledWorker`](crate). Single-process backends
+/// (used with `CheckpointingRunner`) do not need to implement this.
+pub trait TaskClaimStore: Send + Sync {
     /// Claim a task for execution by a worker node.
     ///
-    /// This atomically claims a task, preventing other nodes from executing it.
-    /// Returns `Ok(Some(claim))` if the claim was successful, `Ok(None)` if the
-    /// task is already claimed or not available, and `Err` on backend errors.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    /// - `task_id`: The task ID to claim
-    /// - `worker_id`: The ID of the worker node claiming the task
-    /// - `ttl`: Optional time-to-live duration for the claim
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError` if the operation fails.
-    async fn claim_task(
+    /// Returns `Ok(Some(claim))` if successful, `Ok(None)` if already claimed.
+    fn claim_task(
         &self,
         instance_id: &str,
         task_id: &str,
         worker_id: &str,
         ttl: Option<Duration>,
-    ) -> Result<Option<TaskClaim>, BackendError>;
+    ) -> impl Future<Output = Result<Option<TaskClaim>, BackendError>> + Send;
 
     /// Release a task claim.
-    ///
-    /// This releases a claim, making the task available for other workers.
-    /// Only the worker that owns the claim can release it.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if the claim doesn't exist or doesn't belong to the worker.
-    async fn release_task_claim(
+    fn release_task_claim(
         &self,
         instance_id: &str,
         task_id: &str,
         worker_id: &str,
-    ) -> Result<(), BackendError>;
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Extend a task claim's expiration time.
-    ///
-    /// Useful for long-running tasks to prevent expiration.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if the claim doesn't exist or doesn't belong to the worker.
-    async fn extend_task_claim(
+    fn extend_task_claim(
         &self,
         instance_id: &str,
         task_id: &str,
         worker_id: &str,
         additional_duration: Duration,
-    ) -> Result<(), BackendError>;
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Find available tasks across all workflow instances.
-    ///
-    /// Returns tasks that are ready to execute (dependencies met, not claimed).
-    /// This is used by worker nodes to discover work.
-    ///
-    /// # Parameters
-    ///
-    /// - `worker_id`: The worker node ID (for filtering if needed)
-    /// - `limit`: Maximum number of tasks to return
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError` if the operation fails.
-    async fn find_available_tasks(
+    fn find_available_tasks(
         &self,
         worker_id: &str,
         limit: usize,
-    ) -> Result<Vec<AvailableTask>, BackendError>;
-
-    /// Request cancellation of a workflow.
-    ///
-    /// This stores a cancellation request that workers will check at task boundaries.
-    /// The workflow transitions to `Cancelled` state when a worker processes the request.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    /// - `request`: The cancellation request details
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if no snapshot exists for the instance.
-    /// Returns `BackendError::CannotCancel` if the workflow is in a terminal state.
-    async fn request_cancellation(
-        &self,
-        instance_id: &str,
-        request: CancellationRequest,
-    ) -> Result<(), BackendError>;
-
-    /// Get the pending cancellation request for a workflow, if any.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError` if the operation fails.
-    async fn get_cancellation_request(
-        &self,
-        instance_id: &str,
-    ) -> Result<Option<CancellationRequest>, BackendError>;
-
-    /// Clear the cancellation request for a workflow.
-    ///
-    /// Called after the workflow has been successfully cancelled.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError` if the operation fails.
-    async fn clear_cancellation_request(&self, instance_id: &str) -> Result<(), BackendError>;
-
-    /// Atomically check for cancellation and transition to cancelled state.
-    ///
-    /// This is a convenience method that combines checking for a cancellation request
-    /// and updating the snapshot state in one atomic operation.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    /// - `interrupted_at_task`: Optional task ID that was being executed when cancelled
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the workflow was cancelled, `false` if no cancellation was pending.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError` if the operation fails.
-    async fn check_and_cancel(
-        &self,
-        instance_id: &str,
-        interrupted_at_task: Option<&str>,
-    ) -> Result<bool, BackendError>;
-
-    /// Request pausing of a workflow.
-    ///
-    /// This stores a pause request that workers will check at task boundaries.
-    /// The workflow transitions to `Paused` state when a worker processes the request.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID
-    /// - `request`: The pause request details
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if no snapshot exists for the instance.
-    /// Returns `BackendError::CannotPause` if the workflow is in a terminal or paused state.
-    async fn request_pause(
-        &self,
-        instance_id: &str,
-        request: PauseRequest,
-    ) -> Result<(), BackendError>;
-
-    /// Get the pending pause request for a workflow, if any.
-    async fn get_pause_request(
-        &self,
-        instance_id: &str,
-    ) -> Result<Option<PauseRequest>, BackendError>;
-
-    /// Clear the pause request for a workflow.
-    async fn clear_pause_request(&self, instance_id: &str) -> Result<(), BackendError>;
-
-    /// Atomically check for a pause request and transition to paused state.
-    ///
-    /// Returns `true` if the workflow was paused, `false` if no pause was pending.
-    async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError>;
-
-    /// Transition a paused workflow back to in-progress and return the updated snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BackendError::NotFound` if no snapshot exists.
-    /// Returns `BackendError::CannotPause` if the workflow is not in `Paused` state.
-    async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError>;
+    ) -> impl Future<Output = Result<Vec<AvailableTask>, BackendError>> + Send;
 }
+
+// ---------------------------------------------------------------------------
+// PersistentBackend — supertrait + blanket impl
+// ---------------------------------------------------------------------------
+
+/// Supertrait combining [`SnapshotStore`] and [`SignalStore`].
+///
+/// This is the bound used by `CheckpointingRunner` and most of the runtime.
+/// It is blanket-implemented for any type that implements both sub-traits,
+/// so backends never need to implement it directly.
+pub trait PersistentBackend: SnapshotStore + SignalStore {}
+
+impl<T: SnapshotStore + SignalStore> PersistentBackend for T {}
+
+// Re-export Future so the trait method return types resolve.
+use std::future::Future;

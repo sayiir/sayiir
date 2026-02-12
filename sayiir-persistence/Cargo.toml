@@ -16,7 +16,6 @@ path = "src/lib.rs"
 
 [dependencies]
 sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
-async-trait = "0.1"
 thiserror = "2"
 bytes = { workspace = true }
 chrono = { workspace = true }

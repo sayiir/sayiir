@@ -103,6 +103,81 @@ impl PauseRequest {
     }
 }
 
+/// Kind of signal that can be sent to a running workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SignalKind {
+    /// Request cancellation.
+    Cancel,
+    /// Request pause.
+    Pause,
+}
+
+/// A unified signal request that covers both cancel and pause.
+///
+/// Old `CancellationRequest`/`PauseRequest` types remain for snapshot state
+/// serialization. `SignalRequest` is the type used by the `SignalStore` trait.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalRequest {
+    /// Optional reason for the signal.
+    pub reason: Option<String>,
+    /// Optional identifier of who sent the signal.
+    pub requested_by: Option<String>,
+    /// Timestamp when the signal was sent.
+    pub requested_at: DateTime<Utc>,
+}
+
+impl SignalRequest {
+    /// Create a new signal request with the current timestamp.
+    #[must_use]
+    pub fn new(reason: Option<String>, requested_by: Option<String>) -> Self {
+        Self {
+            reason,
+            requested_by,
+            requested_at: Utc::now(),
+        }
+    }
+}
+
+impl From<CancellationRequest> for SignalRequest {
+    fn from(r: CancellationRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
+impl From<PauseRequest> for SignalRequest {
+    fn from(r: PauseRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
+impl From<SignalRequest> for CancellationRequest {
+    fn from(r: SignalRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
+impl From<SignalRequest> for PauseRequest {
+    fn from(r: SignalRequest) -> Self {
+        Self {
+            reason: r.reason,
+            requested_by: r.requested_by,
+            requested_at: r.requested_at,
+        }
+    }
+}
+
 /// State of a workflow snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSnapshotState {
@@ -703,6 +778,80 @@ mod tests {
         assert!(snapshot.created_at > 0);
         assert!(snapshot.updated_at > 0);
         assert_eq!(snapshot.created_at, snapshot.updated_at);
+    }
+
+    // ========================================================================
+    // From conversion tests
+    // ========================================================================
+
+    #[test]
+    fn test_cancellation_request_to_signal_request() {
+        let cr = CancellationRequest::new(Some("timeout".into()), Some("admin".into()));
+        let ts = cr.requested_at;
+        let sr: SignalRequest = cr.into();
+        assert_eq!(sr.reason, Some("timeout".into()));
+        assert_eq!(sr.requested_by, Some("admin".into()));
+        assert_eq!(sr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_pause_request_to_signal_request() {
+        let pr = PauseRequest::new(Some("maintenance".into()), Some("ops".into()));
+        let ts = pr.requested_at;
+        let sr: SignalRequest = pr.into();
+        assert_eq!(sr.reason, Some("maintenance".into()));
+        assert_eq!(sr.requested_by, Some("ops".into()));
+        assert_eq!(sr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_signal_request_to_cancellation_request() {
+        let sr = SignalRequest::new(Some("done".into()), Some("user".into()));
+        let ts = sr.requested_at;
+        let cr: CancellationRequest = sr.into();
+        assert_eq!(cr.reason, Some("done".into()));
+        assert_eq!(cr.requested_by, Some("user".into()));
+        assert_eq!(cr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_signal_request_to_pause_request() {
+        let sr = SignalRequest::new(Some("scaling".into()), Some("system".into()));
+        let ts = sr.requested_at;
+        let pr: PauseRequest = sr.into();
+        assert_eq!(pr.reason, Some("scaling".into()));
+        assert_eq!(pr.requested_by, Some("system".into()));
+        assert_eq!(pr.requested_at, ts);
+    }
+
+    #[test]
+    fn test_cancellation_request_roundtrip() {
+        let original = CancellationRequest::new(Some("reason".into()), Some("who".into()));
+        let ts = original.requested_at;
+        let signal: SignalRequest = original.into();
+        let back: CancellationRequest = signal.into();
+        assert_eq!(back.reason, Some("reason".into()));
+        assert_eq!(back.requested_by, Some("who".into()));
+        assert_eq!(back.requested_at, ts);
+    }
+
+    #[test]
+    fn test_pause_request_roundtrip() {
+        let original = PauseRequest::new(Some("reason".into()), Some("who".into()));
+        let ts = original.requested_at;
+        let signal: SignalRequest = original.into();
+        let back: PauseRequest = signal.into();
+        assert_eq!(back.reason, Some("reason".into()));
+        assert_eq!(back.requested_by, Some("who".into()));
+        assert_eq!(back.requested_at, ts);
+    }
+
+    #[test]
+    fn test_from_conversion_with_none_fields() {
+        let sr = SignalRequest::new(None, None);
+        let cr: CancellationRequest = sr.into();
+        assert!(cr.reason.is_none());
+        assert!(cr.requested_by.is_none());
     }
 }
 
