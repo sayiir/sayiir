@@ -217,7 +217,8 @@ where
             return Ok(status);
         }
 
-        if let WorkflowSnapshotState::InProgress {
+        // Extract delay/fork fields into owned locals before any mutation.
+        let delay_info = if let WorkflowSnapshotState::InProgress {
             position:
                 ExecutionPosition::AtDelay {
                     wake_at,
@@ -228,9 +229,12 @@ where
             ..
         } = &snapshot.state
         {
-            let wake_at = *wake_at;
-            let delay_id = delay_id.clone();
+            Some((*wake_at, delay_id.clone(), next_task_id.clone()))
+        } else {
+            None
+        };
 
+        if let Some((wake_at, delay_id, next_task_id)) = delay_info {
             tracing::debug!(instance_id, %delay_id, "checking cancellation at delay on resume");
             if self
                 .backend
@@ -253,7 +257,7 @@ where
                 return Ok(WorkflowStatus::Waiting { wake_at, delay_id });
             }
             tracing::info!(instance_id, %delay_id, "delay expired, advancing execution");
-            if let Some(next_id) = next_task_id.clone() {
+            if let Some(next_id) = next_task_id {
                 snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
             } else {
                 tracing::info!(instance_id, %delay_id, "delay was last node, completing workflow");
@@ -268,16 +272,19 @@ where
         }
 
         // Handle AtFork: branches hit delays and the fork was parked.
-        if let WorkflowSnapshotState::InProgress {
+        let fork_info = if let WorkflowSnapshotState::InProgress {
             position: ExecutionPosition::AtFork {
                 fork_id, wake_at, ..
             },
             ..
         } = &snapshot.state
         {
-            let wake_at = *wake_at;
-            let fork_id = fork_id.clone();
+            Some((*wake_at, fork_id.clone()))
+        } else {
+            None
+        };
 
+        if let Some((wake_at, fork_id)) = fork_info {
             tracing::debug!(instance_id, %fork_id, "checking cancellation at fork on resume");
             if self
                 .backend
