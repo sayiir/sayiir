@@ -144,13 +144,14 @@ where
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // Lock and load the snapshot
-        let row =
-            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
-                .bind(instance_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(PgError)?
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        let row = sqlx::query(
+            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(PgError)?
+        .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         let raw: &[u8] = row.get("data");
         let mut snapshot = self.decode(raw)?;

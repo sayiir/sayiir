@@ -31,12 +31,13 @@ where
     ) -> Result<(), BackendError> {
         tracing::debug!(instance_id, kind = %kind.as_ref(), "storing signal");
         // Validate workflow state first
-        let row = sqlx::query("SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = $1")
-            .bind(instance_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(PgError)?
-            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        let row =
+            sqlx::query("SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = $1")
+                .bind(instance_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(PgError)?
+                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         let status: String = row.get("status");
         validate_signal_allowed(&status, &kind)?;
@@ -122,12 +123,13 @@ where
         };
 
         // Lock and load the snapshot
-        let snap_row =
-            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
-                .bind(instance_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(PgError)?;
+        let snap_row = sqlx::query(
+            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PgError)?;
 
         let raw: &[u8] = snap_row.get("data");
         let mut snapshot = self.decode(raw)?;
@@ -210,12 +212,13 @@ where
         };
 
         // Lock and load the snapshot
-        let snap_row =
-            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
-                .bind(instance_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(PgError)?;
+        let snap_row = sqlx::query(
+            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PgError)?;
 
         let raw: &[u8] = snap_row.get("data");
         let mut snapshot = self.decode(raw)?;
@@ -272,13 +275,14 @@ where
         tracing::debug!(instance_id, "unpausing workflow");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
-        let row =
-            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
-                .bind(instance_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(PgError)?
-                .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        let row = sqlx::query(
+            "SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE",
+        )
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(PgError)?
+        .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         let raw: &[u8] = row.get("data");
         let mut snapshot = self.decode(raw)?;

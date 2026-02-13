@@ -20,7 +20,11 @@ async fn setup() -> (
     PostgresBackend<JsonCodec>,
     String,
 ) {
-    let container = Postgres::default().with_tag("17-alpine").start().await.unwrap();
+    let container = Postgres::default()
+        .with_tag("17-alpine")
+        .start()
+        .await
+        .unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPool::connect(&url).await.unwrap();

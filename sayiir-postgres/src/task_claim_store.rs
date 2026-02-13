@@ -149,10 +149,12 @@ where
     ) -> Result<Vec<AvailableTask>, BackendError> {
         tracing::debug!(worker_id, limit, "finding available tasks");
         // Step 1: Clean expired claims
-        sqlx::query("DELETE FROM sayiir_task_claims WHERE expires_at IS NOT NULL AND expires_at < now()")
-            .execute(&self.pool)
-            .await
-            .map_err(PgError)?;
+        sqlx::query(
+            "DELETE FROM sayiir_task_claims WHERE expires_at IS NOT NULL AND expires_at < now()",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(PgError)?;
 
         // Step 2: Fetch candidate workflows via SQL bulk filter
         let rows = sqlx::query(
