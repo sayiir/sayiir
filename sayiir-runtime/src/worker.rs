@@ -457,7 +457,7 @@ where
                 {
                     match self.execute_task(workflow.as_ref(), task).await {
                         Err(ref e) if e.is_timeout() => {
-                            tracing::info!(
+                            tracing::error!(
                                 worker_id = %self.worker_id,
                                 error = %e,
                                 "Task timed out — worker shutting down"

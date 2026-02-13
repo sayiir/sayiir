@@ -12,18 +12,16 @@ use std::collections::HashMap;
 /// A persisted deadline for a running task.
 ///
 /// When a task with a timeout starts, the absolute wall-clock deadline is
-/// computed and stored in the snapshot. On crash recovery, an expired deadline
-/// causes immediate `TaskTimedOut` without re-executing the task.
+/// computed and stored in the snapshot. This is a **durable** timeout: the
+/// deadline survives process crashes and is checked on resume before
+/// re-executing the task.
 ///
-/// # Cancellation behaviour
+/// When the deadline expires mid-execution, the task future is dropped
+/// (cooperative cancellation) and the workflow is marked `Failed`. In the
+/// distributed worker, the deadline is checked on every heartbeat tick. In
+/// single-process runners, a periodic interval checks the persisted deadline.
 ///
-/// When a deadline expires, the workflow is marked as `Failed`, which prevents
-/// other workers from picking up further tasks for that instance.
-///
-/// All runners use `tokio::select!` to race the task future against a sleep
-/// until the deadline. When the deadline fires first, the task future is
-/// **dropped** (active cancellation). In the distributed worker, the heartbeat
-/// loop provides an additional check during the tick interval.
+/// See the `sayiir-runtime` README for full timeout documentation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDeadline {
     /// The task this deadline applies to.
