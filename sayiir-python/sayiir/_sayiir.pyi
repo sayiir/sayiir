@@ -5,13 +5,13 @@ from typing import Any
 class PyRetryPolicy:
     """Retry policy for tasks."""
 
-    max_attempts: int
+    max_retries: int
     initial_delay_secs: float
     backoff_multiplier: float
 
     def __init__(
         self,
-        max_attempts: int = 3,
+        max_retries: int = 2,
         initial_delay_secs: float = 1.0,
         backoff_multiplier: float = 2.0,
     ) -> None: ...

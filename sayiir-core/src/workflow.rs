@@ -1,6 +1,6 @@
 use crate::context::WorkflowContext;
 use crate::error::WorkflowError;
-use crate::task::UntypedCoreTask;
+use crate::task::{RetryPolicy, UntypedCoreTask};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::marker::PhantomData;
@@ -53,6 +53,8 @@ pub enum WorkflowContinuation {
         func: Option<UntypedCoreTask>,
         /// Maximum time the task is allowed to run before being cancelled.
         timeout: Option<std::time::Duration>,
+        /// Retry policy for failed task executions.
+        retry_policy: Option<RetryPolicy>,
         next: Option<Box<WorkflowContinuation>>,
     },
     Fork {
@@ -144,6 +146,65 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Set the retry policy on a specific task node found by ID.
+    ///
+    /// Same traversal pattern as `set_task_timeout`.
+    pub fn set_task_retry_policy(&mut self, target_id: &str, policy: Option<RetryPolicy>) {
+        match self {
+            WorkflowContinuation::Task {
+                id,
+                retry_policy,
+                next,
+                ..
+            } => {
+                if id == target_id {
+                    *retry_policy = policy;
+                } else if let Some(next) = next {
+                    next.set_task_retry_policy(target_id, policy);
+                }
+            }
+            WorkflowContinuation::Delay { next, .. } => {
+                if let Some(next) = next {
+                    next.set_task_retry_policy(target_id, policy);
+                }
+            }
+            WorkflowContinuation::Fork { join, .. } => {
+                if let Some(join) = join {
+                    join.set_task_retry_policy(target_id, policy);
+                }
+            }
+        }
+    }
+
+    /// Look up the retry policy configured on a specific task by ID.
+    #[must_use]
+    pub fn get_task_retry_policy(&self, task_id: &str) -> Option<&RetryPolicy> {
+        match self {
+            WorkflowContinuation::Task {
+                id,
+                retry_policy,
+                next,
+                ..
+            } => {
+                if id == task_id {
+                    return retry_policy.as_ref();
+                }
+                next.as_ref().and_then(|n| n.get_task_retry_policy(task_id))
+            }
+            WorkflowContinuation::Delay { next, .. } => {
+                next.as_ref().and_then(|n| n.get_task_retry_policy(task_id))
+            }
+            WorkflowContinuation::Fork { branches, join, .. } => {
+                for branch in branches {
+                    if let Some(p) = branch.get_task_retry_policy(task_id) {
+                        return Some(p);
+                    }
+                }
+                join.as_ref().and_then(|j| j.get_task_retry_policy(task_id))
+            }
+        }
+    }
+
     /// Look up the timeout configured on a specific task by ID.
     ///
     /// Recursively traverses the continuation tree (Task → Delay → Fork branches/join)
@@ -180,10 +241,15 @@ impl WorkflowContinuation {
         match self {
             #[allow(clippy::cast_possible_truncation)] // Durations > u64::MAX ms are not realistic
             WorkflowContinuation::Task {
-                id, timeout, next, ..
+                id,
+                timeout,
+                retry_policy,
+                next,
+                ..
             } => SerializableContinuation::Task {
                 id: id.clone(),
                 timeout_ms: timeout.map(|d| d.as_millis() as u64),
+                retry_policy: retry_policy.clone(),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
             WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
@@ -208,7 +274,30 @@ impl WorkflowContinuation {
 ///
 /// # Serialization
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use sayiir_core::prelude::*;
+/// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+/// # use sayiir_core::workflow::SerializableContinuation;
+/// # use bytes::Bytes;
+/// # use std::sync::Arc;
+/// # struct MyCodec;
+/// # impl Encoder for MyCodec {}
+/// # impl Decoder for MyCodec {}
+/// # impl<T> sealed::EncodeValue<T> for MyCodec {
+/// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+/// # }
+/// # impl<T> sealed::DecodeValue<T> for MyCodec {
+/// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+/// # }
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let codec = Arc::new(MyCodec);
+/// # let ctx = WorkflowContext::new("wf", codec.clone(), Arc::new(()));
+/// # let workflow = WorkflowBuilder::new(ctx)
+/// #     .with_registry()
+/// #     .then("step1", |i: u32| async move { Ok(i + 1) })
+/// #     .build()?;
+/// # let mut registry = TaskRegistry::new();
+/// # registry.register_fn("step1", codec, |i: u32| async move { Ok(i + 1) });
 /// // Serialize a workflow
 /// let serializable = workflow.continuation().to_serializable();
 /// let json = serde_json::to_string(&serializable)?;
@@ -216,6 +305,8 @@ impl WorkflowContinuation {
 /// // Deserialize and convert to runnable
 /// let serializable: SerializableContinuation = serde_json::from_str(&json)?;
 /// let continuation = serializable.to_runnable(&registry)?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SerializableContinuation {
@@ -223,6 +314,8 @@ pub enum SerializableContinuation {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_policy: Option<RetryPolicy>,
         next: Option<Box<SerializableContinuation>>,
     },
     Fork {
@@ -272,6 +365,7 @@ impl SerializableContinuation {
             SerializableContinuation::Task {
                 id,
                 timeout_ms,
+                retry_policy,
                 next,
             } => {
                 let func = registry
@@ -285,6 +379,7 @@ impl SerializableContinuation {
                     id: id.clone(),
                     func: Some(func),
                     timeout: timeout_ms.map(std::time::Duration::from_millis),
+                    retry_policy: retry_policy.clone(),
                     next,
                 })
             }
@@ -364,6 +459,7 @@ impl SerializableContinuation {
                 SerializableContinuation::Task {
                     id,
                     timeout_ms,
+                    retry_policy,
                     next,
                 } => {
                     hasher.update(b"T:"); // Tag for Task
@@ -371,6 +467,14 @@ impl SerializableContinuation {
                     if let Some(ms) = timeout_ms {
                         hasher.update(b":t:");
                         hasher.update(ms.to_string().as_bytes());
+                    }
+                    if let Some(rp) = retry_policy {
+                        hasher.update(b":r:");
+                        hasher.update(rp.max_retries.to_string().as_bytes());
+                        hasher.update(b":");
+                        hasher.update(rp.initial_delay.as_millis().to_string().as_bytes());
+                        hasher.update(b":");
+                        hasher.update(rp.backoff_multiplier.to_string().as_bytes());
                     }
                     hasher.update(b";");
                     if let Some(n) = next {
@@ -534,13 +638,30 @@ impl<C, Input, M> Workflow<C, Input, M> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// // Build a serializable workflow (closures must be Clone)
+/// ```rust
+/// # use sayiir_core::prelude::*;
+/// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+/// # use sayiir_core::workflow::SerializedWorkflowState;
+/// # use bytes::Bytes;
+/// # use std::sync::Arc;
+/// # struct MyCodec;
+/// # impl Encoder for MyCodec {}
+/// # impl Decoder for MyCodec {}
+/// # impl<T> sealed::EncodeValue<T> for MyCodec {
+/// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+/// # }
+/// # impl<T> sealed::DecodeValue<T> for MyCodec {
+/// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+/// # }
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let codec = Arc::new(MyCodec);
+/// # let ctx = WorkflowContext::new("my-workflow", codec, Arc::new(()));
+/// // Build a serializable workflow
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .with_registry()  // Enable serialization
 ///     .then("step1", |i: u32| async move { Ok(i + 1) })
 ///     .then("step2", |i: u32| async move { Ok(i * 2) })
-///     .build("my-workflow")?;
+///     .build()?;
 ///
 /// // Serialize
 /// let serialized = workflow.to_serializable();
@@ -549,6 +670,8 @@ impl<C, Input, M> Workflow<C, Input, M> {
 /// // Deserialize (uses internal registry)
 /// let deserialized: SerializedWorkflowState = serde_json::from_str(&json)?;
 /// let restored = workflow.to_runnable(&deserialized)?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SerializableWorkflow<C, Input, M = ()> {
     pub(crate) inner: Workflow<C, Input, M>,
@@ -1062,9 +1185,11 @@ mod tests {
         let tampered = SerializableContinuation::Task {
             id: "step1".to_string(),
             timeout_ms: None,
+            retry_policy: None,
             next: Some(Box::new(SerializableContinuation::Task {
                 id: "step1".to_string(), // Duplicate!
                 timeout_ms: None,
+                retry_policy: None,
                 next: None,
             })),
         };
@@ -1453,6 +1578,7 @@ mod proptests {
         let leaf = arb_id().prop_map(|id| SerializableContinuation::Task {
             id,
             timeout_ms: None,
+            retry_policy: None,
             next: None,
         });
 
@@ -1470,6 +1596,7 @@ mod proptests {
                 .prop_map(|(id, timeout_ms, next)| SerializableContinuation::Task {
                     id,
                     timeout_ms,
+                    retry_policy: None,
                     next,
                 }),
             // Fork with branches and optional join
@@ -1511,6 +1638,7 @@ mod proptests {
             return Just(SerializableContinuation::Task {
                 id,
                 timeout_ms: None,
+                retry_policy: None,
                 next: None,
             })
             .boxed();
@@ -1525,6 +1653,7 @@ mod proptests {
             .prop_map(move |next| SerializableContinuation::Task {
                 id: id_clone.clone(),
                 timeout_ms: None,
+                retry_policy: None,
                 next,
             }),
             // Fork with 0..3 branches (each gets unique prefix) and optional join
@@ -1614,10 +1743,14 @@ mod proptests {
     fn inject_duplicate(cont: &SerializableContinuation, dup_id: &str) -> SerializableContinuation {
         match cont {
             SerializableContinuation::Task {
-                timeout_ms, next, ..
+                timeout_ms,
+                retry_policy,
+                next,
+                ..
             } => SerializableContinuation::Task {
                 id: dup_id.to_string(),
                 timeout_ms: *timeout_ms,
+                retry_policy: retry_policy.clone(),
                 next: next.clone(),
             },
             SerializableContinuation::Fork { branches, join, .. } => {

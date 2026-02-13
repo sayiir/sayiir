@@ -151,8 +151,24 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::TaskMetadata;
+    /// ```rust
+    /// # use sayiir_core::prelude::*;
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let codec = Arc::new(MyCodec);
+    /// # let metadata = Arc::new(());
+    /// use sayiir_core::prelude::*;
     /// use std::time::Duration;
     ///
     /// let ctx = WorkflowContext::new("my-workflow", codec, metadata);
@@ -165,6 +181,8 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     ///         ..Default::default()
     ///     })
     ///     .build()?;  // Returns SerializableWorkflow
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_registry(
@@ -184,7 +202,24 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use sayiir_core::prelude::*;
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use sayiir_core::workflow::SerializableContinuation;
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let codec = Arc::new(MyCodec);
+    /// # let metadata = Arc::new(());
     /// // Shared function for building registry (called on both sides)
     /// fn build_registry(codec: Arc<MyCodec>) -> TaskRegistry {
     ///     let mut registry = TaskRegistry::new();
@@ -195,14 +230,17 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// // Build workflow
     /// let registry = build_registry(codec.clone());
     /// let ctx = WorkflowContext::new("my-workflow", codec.clone(), metadata);
-    /// let workflow = WorkflowBuilder::new(ctx)
+    /// let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
-    ///     .then_registered::<u32>("step1")
+    ///     .then_registered::<u32>("step1")?
     ///     .build()?;
     ///
     /// // Deserialize (on another side): rebuild registry, then convert to runnable
     /// let registry = build_registry(codec.clone());
-    /// let runnable = serialized_continuation.to_runnable(&registry)?;
+    /// let serializable = workflow.continuation().to_serializable();
+    /// let runnable = serializable.to_runnable(&registry)?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_existing_registry(
@@ -253,6 +291,7 @@ where
             id: id.to_string(),
             func: Some(task),
             timeout: None,
+            retry_policy: None,
             next: None,
         };
 
@@ -319,13 +358,29 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::TaskMetadata;
+    /// ```rust
+    /// # use sayiir_core::prelude::*;
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let codec = Arc::new(MyCodec);
+    /// # let ctx = WorkflowContext::new("my-workflow", codec.clone(), Arc::new(()));
+    /// use sayiir_core::prelude::*;
     ///
     /// let mut registry = TaskRegistry::new();
     /// registry.register_fn("double", codec.clone(), |i: u32| async move { Ok(i * 2) });
     ///
-    /// let workflow = WorkflowBuilder::new(ctx)
+    /// let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
     ///     .then_registered::<u32>("double")?
     ///     .with_metadata(TaskMetadata {
@@ -333,6 +388,8 @@ where
     ///         ..Default::default()
     ///     })
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn then_registered<NewOutput>(
         self,
@@ -349,12 +406,18 @@ where
             .registry
             .get(id)
             .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
-        let timeout = self.registry.get_metadata(id).and_then(|m| m.timeout);
+        let meta = self.registry.get_metadata(id);
+        let timeout = meta.and_then(|m| m.timeout);
+        let retry_policy = self
+            .registry
+            .get_metadata(id)
+            .and_then(|m| m.retries.clone());
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(func),
             timeout,
+            retry_policy,
             next: None,
         };
 
@@ -379,8 +442,25 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::{TaskMetadata, RetryPolicy};
+    /// ```rust
+    /// # use sayiir_core::prelude::*;
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let codec = Arc::new(MyCodec);
+    /// # let ctx = WorkflowContext::new("my-workflow", codec, Arc::new(()));
+    /// use sayiir_core::prelude::*;
+    /// use sayiir_core::task::RetryPolicy;
     /// use std::time::Duration;
     ///
     /// let workflow = WorkflowBuilder::new(ctx)
@@ -393,15 +473,19 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     ///     })
     ///     .then("add_ten", |i: u32| async move { Ok(i + 10) })
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_metadata(mut self, metadata: crate::task::TaskMetadata) -> Self {
         if let Some(ref id) = self.last_task_id {
             let timeout = metadata.timeout;
+            let retry_policy = metadata.retries.clone();
             self.registry.set_metadata(id, metadata);
-            // Also update the timeout on the continuation node so it's available
-            // for direct execution (not just the serializable roundtrip path).
+            // Also update the timeout and retry policy on the continuation node
+            // so they're available for direct execution (not just the serializable roundtrip path).
             self.continuation.set_task_timeout(id, timeout);
+            self.continuation.set_task_retry_policy(id, retry_policy);
         }
         self
     }
@@ -689,15 +773,19 @@ where
                     id: b.id,
                     func: Some(b.task),
                     timeout: None,
+                    retry_policy: None,
                     next: None,
                 })
             })
             .collect();
 
+        //
+
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(join_task_fn),
             timeout: None,
+            retry_policy: None,
             next: None,
         };
 
@@ -779,20 +867,31 @@ where
             .branches
             .into_iter()
             .map(|b| {
-                let timeout = self.registry.get_metadata(&b.id).and_then(|m| m.timeout);
+                let meta = self.registry.get_metadata(&b.id);
+                let timeout = meta.and_then(|m| m.timeout);
+                let retry_policy = self
+                    .registry
+                    .get_metadata(&b.id)
+                    .and_then(|m| m.retries.clone());
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
                     func: Some(b.task),
                     timeout,
+                    retry_policy,
                     next: None,
                 })
             })
             .collect();
 
+        let join_retry_policy = self
+            .registry
+            .get_metadata(id)
+            .and_then(|m| m.retries.clone());
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(join_task_fn),
             timeout: join_timeout,
+            retry_policy: join_retry_policy,
             next: None,
         };
 

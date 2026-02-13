@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::task::RetryPolicy;
+
 /// A persisted deadline for a running task.
 ///
 /// When a task with a timeout starts, the absolute wall-clock deadline is
@@ -30,6 +32,25 @@ pub struct TaskDeadline {
     pub deadline: DateTime<Utc>,
     /// Original configured timeout in milliseconds (for error reporting).
     pub timeout_ms: u64,
+}
+
+/// Durable retry state for a task that has failed and is pending retry.
+///
+/// Stored in the snapshot so that retry state survives process crashes.
+/// When a task with a `RetryPolicy` fails, the runner records the attempt
+/// here and computes the next retry time via exponential backoff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRetryState {
+    /// Number of retry attempts so far (starts at 1 after the first failure).
+    pub attempts: u32,
+    /// The retry policy governing this task (stored so state is self-contained on resume).
+    pub policy: RetryPolicy,
+    /// Error message from the last failure.
+    pub last_error: String,
+    /// Worker ID that last failed the task (for soft worker-bias on retry).
+    pub last_failed_worker: Option<String>,
+    /// Absolute wall-clock time after which the next retry may begin.
+    pub next_retry_at: DateTime<Utc>,
 }
 
 /// Represents the position in workflow execution.
@@ -390,6 +411,9 @@ pub struct WorkflowSnapshot {
     /// Active task deadline (set when a task with a timeout starts executing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_deadline: Option<TaskDeadline>,
+    /// Retry state for tasks that have failed and are pending retry.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub task_retries: HashMap<String, TaskRetryState>,
 }
 
 impl WorkflowSnapshot {
@@ -415,6 +439,7 @@ impl WorkflowSnapshot {
             updated_at: now,
             initial_input: None,
             task_deadline: None,
+            task_retries: HashMap::new(),
         }
     }
 
@@ -437,6 +462,7 @@ impl WorkflowSnapshot {
             updated_at: now,
             initial_input: Some(initial_input),
             task_deadline: None,
+            task_retries: HashMap::new(),
         }
     }
 
@@ -565,9 +591,73 @@ impl WorkflowSnapshot {
         })
     }
 
+    /// Record a retry attempt for a failed task.
+    ///
+    /// Upserts the retry state entry, increments the attempt counter, and
+    /// computes `next_retry_at` via exponential backoff:
+    /// `delay = initial_delay * backoff_multiplier^(attempt - 1)`
+    ///
+    /// Returns the scheduled `next_retry_at` time.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn record_retry(
+        &mut self,
+        task_id: &str,
+        policy: &RetryPolicy,
+        error: &str,
+        worker_id: Option<&str>,
+    ) -> DateTime<Utc> {
+        let entry = self
+            .task_retries
+            .entry(task_id.to_string())
+            .or_insert_with(|| TaskRetryState {
+                attempts: 0,
+                policy: policy.clone(),
+                last_error: String::new(),
+                last_failed_worker: None,
+                next_retry_at: Utc::now(),
+            });
+        entry.attempts += 1;
+        entry.last_error = error.to_string();
+        entry.last_failed_worker = worker_id.map(ToString::to_string);
+        entry.policy = policy.clone();
+
+        let exponent = entry.attempts.saturating_sub(1);
+        #[allow(clippy::cast_possible_wrap)]
+        let multiplier = policy.backoff_multiplier.powi(exponent as i32);
+        #[allow(clippy::cast_precision_loss)]
+        let delay_ms = (policy.initial_delay.as_millis() as f64 * f64::from(multiplier)) as i64;
+        let delay = chrono::Duration::milliseconds(delay_ms);
+        entry.next_retry_at = Utc::now() + delay;
+
+        self.updated_at = Self::current_timestamp();
+        entry.next_retry_at
+    }
+
+    /// Get the retry state for a task, if any.
+    #[must_use]
+    pub fn get_retry_state(&self, task_id: &str) -> Option<&TaskRetryState> {
+        self.task_retries.get(task_id)
+    }
+
+    /// Clear retry state for a task (e.g. on success).
+    pub fn clear_retry_state(&mut self, task_id: &str) {
+        self.task_retries.remove(task_id);
+    }
+
+    /// Check whether retries are exhausted for a task.
+    ///
+    /// Returns `true` if retry state exists and `attempts >= policy.max_retries`.
+    #[must_use]
+    pub fn retries_exhausted(&self, task_id: &str) -> bool {
+        self.task_retries
+            .get(task_id)
+            .is_some_and(|rs| rs.attempts >= rs.policy.max_retries)
+    }
+
     /// Mark the workflow as completed with a final output.
     pub fn mark_completed(&mut self, final_output: Bytes) {
         self.task_deadline = None;
+        self.task_retries.clear();
         self.state = WorkflowSnapshotState::Completed { final_output };
         self.updated_at = Self::current_timestamp();
     }
@@ -575,6 +665,7 @@ impl WorkflowSnapshot {
     /// Mark the workflow as failed with an error.
     pub fn mark_failed(&mut self, error: String) {
         self.task_deadline = None;
+        self.task_retries.clear();
         self.state = WorkflowSnapshotState::Failed { error };
         self.updated_at = Self::current_timestamp();
     }

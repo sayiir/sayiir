@@ -2,7 +2,10 @@
 
 **Durable workflows that feel like writing normal code.**
 
+[![CI](https://github.com/sayiir/sayiir/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sayiir/sayiir/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-edition_2024-93450a.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
 
 > **Early Stage Project** — Sayiir is under active development. Core functionality works but APIs may change. We welcome contributors, maintainers, and sponsors.
@@ -233,6 +236,7 @@ After studying these solutions, the pattern is clear:
 | Panic-safe execution           | Stable |
 | Pluggable storage backends     | Stable |
 | Durable timers/delays          | Stable |
+| Automatic retries with backoff | Stable |
 | Distributed worker pools       | Stable |
 | Claim-based task distribution  | Stable |
 | Zero-copy serialization (rkyv) | Stable |
@@ -356,6 +360,25 @@ workflow = (
 status = run_durable_workflow(workflow, "job-1", "https://api.example.com")
 ```
 
+**Automatic retries with exponential backoff:**
+
+```python
+from sayiir import task, Flow, RetryPolicy, run_durable_workflow
+
+@task(timeout_secs=10, retries=RetryPolicy(max_retries=2, initial_delay_secs=1.0, backoff_multiplier=2.0))
+def call_api(url: str) -> dict:
+    return requests.get(url).json()  # retries on failure or timeout: 1s, 2s, 4s
+
+@task
+def process(data: dict) -> str:
+    return f"processed {len(data)} items"
+
+workflow = Flow("resilient").then(call_api).then(process).build()
+status = run_durable_workflow(workflow, "job-1", "https://api.example.com/data")
+```
+
+Retries are durable — if the process crashes mid-backoff, the retry count and next-retry time are recovered from the checkpoint. Timeouts also trigger retries: a task that times out is treated the same as a task that throws an error.
+
 **Parallel execution (fork/join):**
 
 ```python
@@ -465,6 +488,33 @@ let workflow = WorkflowBuilder::new(ctx)
     })
     .build();
 ```
+
+**Automatic retries with exponential backoff:**
+
+```rust
+use sayiir_core::task::{TaskMetadata, RetryPolicy};
+
+let workflow = WorkflowBuilder::new(ctx)
+    .with_registry()
+    .then("call_api", |url: String| async move {
+        Ok(reqwest::get(&url).await?.json::<serde_json::Value>().await?)
+    })
+    .with_metadata(TaskMetadata {
+        timeout: Some(Duration::from_secs(10)),
+        retries: Some(RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+        }),
+        ..Default::default()
+    })
+    .then("process", |data: serde_json::Value| async move {
+        Ok(format!("processed {} keys", data.as_object().map_or(0, |o| o.len())))
+    })
+    .build()?;
+```
+
+Retries use exponential backoff (`delay = initial_delay * multiplier^attempt`). The retry count and next-retry time are persisted in the snapshot, so retries survive crashes. Timeouts also trigger retries — a timed-out task is retried the same as a failed one.
 
 **DAG workflows (fork/join):**
 
@@ -633,6 +683,28 @@ Designed to scale to **hundreds of thousands of concurrent activities**:
 - **Minimal coordination** — workers claim tasks independently
 - **Per-task checkpointing** — fine-grained durability
 - **No global locks** — optimistic concurrency
+
+---
+
+## Distributed Retry Resilience
+
+When a task fails in distributed mode, Sayiir uses **soft worker affinity** to prefer retrying on a different worker. This improves resilience against worker-local failures — corrupted caches, unhealthy dependencies, resource exhaustion, or environment-specific bugs.
+
+### How it works
+
+1. A worker executes a task and it fails (error, timeout, or panic)
+2. The worker records the retry in the snapshot, tagging itself as the `last_failed_worker`
+3. The task claim is released, making the task available for any worker to pick up
+4. When workers poll for available tasks, the backend sorts results so that tasks which did **not** fail on the requesting worker come first
+
+This is a **soft bias**, not a hard exclusion. If the failed worker is the only one available, it will still pick up the task — no work is left stranded. But when multiple workers are polling, tasks naturally migrate away from the worker that failed them.
+
+### Why soft affinity over hard exclusion
+
+- **No starvation** — A single-worker deployment still retries normally
+- **Self-healing** — Transient worker issues resolve without manual intervention; the task moves to a healthy worker while the original recovers
+- **No configuration** — The bias is automatic; no retry routing rules to maintain
+- **Distributed fault isolation** — If Worker A has a bad network path to an external service, retries on Worker B bypass the issue entirely without any operator awareness
 
 ---
 

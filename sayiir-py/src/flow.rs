@@ -159,6 +159,7 @@ impl PyFlowBuilder {
                     id: task_id.clone(),
                     func: None,
                     timeout: metadata.timeout,
+                    retry_policy: metadata.retries.clone(),
                     next: current.map(Box::new),
                 },
                 BuilderTask::Delay {
@@ -190,6 +191,7 @@ impl PyFlowBuilder {
                                     id: id.clone(),
                                     func: None,
                                     timeout: metadata.timeout,
+                                    retry_policy: metadata.retries.clone(),
                                     next: branch_current.map(Box::new),
                                 });
                             }
@@ -205,6 +207,7 @@ impl PyFlowBuilder {
                         id: join_id.clone(),
                         func: None,
                         timeout: join_metadata.timeout,
+                        retry_policy: join_metadata.retries.clone(),
                         next: current.map(Box::new),
                     };
 
