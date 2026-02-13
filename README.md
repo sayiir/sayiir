@@ -1,6 +1,6 @@
 # Sayiir
 
-**Durable workflows that feel like writing normal code.**
+**Durable workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
 
 [![CI](https://github.com/sayiir/sayiir/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sayiir/sayiir/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
