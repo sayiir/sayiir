@@ -17,9 +17,16 @@
 //!   table for debugging, auditing, and future replay.
 //! - **Observability-ready**: Indexed metadata columns (`status`, `current_task_id`,
 //!   `completed_task_count`, `error`, timestamps) plus a denormalised
-//!   `workflow_tasks` table enable monitoring without deserialising blobs.
+//!   `sayiir_workflow_tasks` table enable monitoring without deserialising blobs.
 //! - **Distributed task claiming**: `TaskClaimStore` with TTL-based claims,
 //!   expired-claim replacement, and soft worker bias.
+//!
+//! # PostgreSQL version support
+//!
+//! Minimum supported version: **PostgreSQL 13**. The schema uses
+//! `INSERT … ON CONFLICT DO UPDATE` (9.5+) and `ALTER TABLE … ADD COLUMN IF NOT
+//! EXISTS` (9.6+); 13 is the floor because it is the oldest major release still
+//! receiving security patches. Integration tests run against both 13 and 17.
 //!
 //! # Quick start
 //!

@@ -1,0 +1,17 @@
+[package]
+name = "sayiir-integration-tests"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dev-dependencies]
+sayiir-core = { path = "../../sayiir-core" }
+sayiir-persistence = { path = "../../sayiir-persistence" }
+sayiir-postgres = { path = "../../sayiir-postgres" }
+sayiir-runtime = { path = "../../sayiir-runtime", features = ["json"] }
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+testcontainers = "0.26"
+testcontainers-modules = { version = "0.14", features = ["postgres"] }

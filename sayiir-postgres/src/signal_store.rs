@@ -29,8 +29,9 @@ where
         kind: SignalKind,
         request: SignalRequest,
     ) -> Result<(), BackendError> {
+        tracing::debug!(instance_id, kind = %kind.as_ref(), "storing signal");
         // Validate workflow state first
-        let row = sqlx::query("SELECT status FROM workflow_snapshots WHERE instance_id = $1")
+        let row = sqlx::query("SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = $1")
             .bind(instance_id)
             .fetch_optional(&self.pool)
             .await
@@ -41,7 +42,7 @@ where
         validate_signal_allowed(&status, &kind)?;
 
         sqlx::query(
-            "INSERT INTO workflow_signals (instance_id, kind, reason, requested_by)
+            "INSERT INTO sayiir_workflow_signals (instance_id, kind, reason, requested_by)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (instance_id, kind) DO UPDATE SET
                 reason = $3, requested_by = $4, created_at = now()",
@@ -62,9 +63,10 @@ where
         instance_id: &str,
         kind: SignalKind,
     ) -> Result<Option<SignalRequest>, BackendError> {
+        tracing::debug!(instance_id, kind = %kind.as_ref(), "getting signal");
         let row = sqlx::query(
             "SELECT reason, requested_by, created_at
-             FROM workflow_signals
+             FROM sayiir_workflow_signals
              WHERE instance_id = $1 AND kind = $2",
         )
         .bind(instance_id)
@@ -81,7 +83,8 @@ where
     }
 
     async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
-        sqlx::query("DELETE FROM workflow_signals WHERE instance_id = $1 AND kind = $2")
+        tracing::debug!(instance_id, kind = %kind.as_ref(), "clearing signal");
+        sqlx::query("DELETE FROM sayiir_workflow_signals WHERE instance_id = $1 AND kind = $2")
             .bind(instance_id)
             .bind(kind.as_ref())
             .execute(&self.pool)
@@ -97,12 +100,13 @@ where
         instance_id: &str,
         interrupted_at_task: Option<&str>,
     ) -> Result<bool, BackendError> {
+        tracing::debug!(instance_id, "checking for cancel signal");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // Check for cancel signal (lock the row)
         let signal_row = sqlx::query(
             "SELECT reason, requested_by
-             FROM workflow_signals
+             FROM sayiir_workflow_signals
              WHERE instance_id = $1 AND kind = $2
              FOR UPDATE",
         )
@@ -119,7 +123,7 @@ where
 
         // Lock and load the snapshot
         let snap_row =
-            sqlx::query("SELECT data FROM workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
+            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
                 .bind(instance_id)
                 .fetch_one(&mut *tx)
                 .await
@@ -144,7 +148,7 @@ where
         let wake_at = delay_wake_at(&snapshot);
 
         sqlx::query(
-            "UPDATE workflow_snapshots
+            "UPDATE sayiir_workflow_snapshots
              SET data = $1, status = $2, error = $3,
                  position_kind = $4, delay_wake_at = $5,
                  completed_at = now(), updated_at = now()
@@ -162,7 +166,7 @@ where
 
         // Mark any still-active tasks as cancelled
         sqlx::query(
-            "UPDATE workflow_tasks SET status = 'cancelled', completed_at = now()
+            "UPDATE sayiir_workflow_tasks SET status = 'cancelled', completed_at = now()
              WHERE instance_id = $1 AND status = 'active'",
         )
         .bind(instance_id)
@@ -171,7 +175,7 @@ where
         .map_err(PgError)?;
 
         // Clear the signal
-        sqlx::query("DELETE FROM workflow_signals WHERE instance_id = $1 AND kind = $2")
+        sqlx::query("DELETE FROM sayiir_workflow_signals WHERE instance_id = $1 AND kind = $2")
             .bind(instance_id)
             .bind(SignalKind::Cancel.as_ref())
             .execute(&mut *tx)
@@ -179,16 +183,18 @@ where
             .map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
+        tracing::info!(instance_id, "workflow cancelled");
         Ok(true)
     }
 
     async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError> {
+        tracing::debug!(instance_id, "checking for pause signal");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // Check for pause signal (lock the row)
         let signal_row = sqlx::query(
             "SELECT reason, requested_by
-             FROM workflow_signals
+             FROM sayiir_workflow_signals
              WHERE instance_id = $1 AND kind = $2
              FOR UPDATE",
         )
@@ -205,7 +211,7 @@ where
 
         // Lock and load the snapshot
         let snap_row =
-            sqlx::query("SELECT data FROM workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
+            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
                 .bind(instance_id)
                 .fetch_one(&mut *tx)
                 .await
@@ -232,7 +238,7 @@ where
         let wake_at = delay_wake_at(&snapshot);
 
         sqlx::query(
-            "UPDATE workflow_snapshots
+            "UPDATE sayiir_workflow_snapshots
              SET data = $1, status = $2, current_task_id = $3,
                  completed_task_count = $4, position_kind = $5,
                  delay_wake_at = $6, updated_at = now()
@@ -250,7 +256,7 @@ where
         .map_err(PgError)?;
 
         // Clear the signal
-        sqlx::query("DELETE FROM workflow_signals WHERE instance_id = $1 AND kind = $2")
+        sqlx::query("DELETE FROM sayiir_workflow_signals WHERE instance_id = $1 AND kind = $2")
             .bind(instance_id)
             .bind(SignalKind::Pause.as_ref())
             .execute(&mut *tx)
@@ -258,14 +264,16 @@ where
             .map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
+        tracing::info!(instance_id, "workflow paused");
         Ok(true)
     }
 
     async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
+        tracing::debug!(instance_id, "unpausing workflow");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         let row =
-            sqlx::query("SELECT data FROM workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
+            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
                 .bind(instance_id)
                 .fetch_optional(&mut *tx)
                 .await
@@ -292,7 +300,7 @@ where
         let wake_at = delay_wake_at(&snapshot);
 
         sqlx::query(
-            "UPDATE workflow_snapshots
+            "UPDATE sayiir_workflow_snapshots
              SET data = $1, status = $2, current_task_id = $3,
                  completed_task_count = $4, position_kind = $5,
                  delay_wake_at = $6, updated_at = now()
@@ -310,6 +318,7 @@ where
         .map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
+        tracing::info!(instance_id, "workflow unpaused");
         Ok(snapshot)
     }
 }

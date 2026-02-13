@@ -85,14 +85,21 @@ The Python SDK is the first language binding and the template for all future bin
 
 The features every team needs before they'll trust Sayiir with real workloads.
 
-### PostgreSQL Backend
+### PostgreSQL Backend ✅
 
-The #1 blocker for production adoption. Nobody ships with InMemory.
+Production-grade persistence backend. Requires PostgreSQL 13+.
 
-- [ ] Schema design (workflows, snapshots, claims, heartbeats)
-- [ ] Connection pooling (deadpool-postgres or sqlx)
-- [ ] Migration tooling (embedded migrations via refinery or sqlx)
-- [ ] Expose to Python bindings
+- [x] Schema design (workflows, snapshots, claims, signals, history)
+- [x] Connection pooling via sqlx
+- [x] Embedded migrations (sqlx::migrate)
+- [x] ACID transactions for composite signal operations (check_and_cancel, check_and_pause, unpause)
+- [x] Snapshot history (append-only audit log)
+- [x] Observability columns (status, position_kind, delay_wake_at — queryable without deserializing blobs)
+- [x] Distributed task claiming with TTL, expired-claim replacement, and soft worker bias
+- [x] Codec-generic (JsonCodec for debuggability, rkyv for performance)
+- [x] Minimum version enforcement (rejects PostgreSQL < 13 at init)
+- [x] Integration tests via testcontainers (Postgres 13 and 17)
+- [x] Expose to Python bindings
 
 ### Retry Policies
 

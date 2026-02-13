@@ -68,6 +68,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 | Distributed worker pools       | Stable |
 | Claim-based task distribution  | Stable |
 | Zero-copy serialization (rkyv) | Stable |
+| PostgreSQL backend (13+)       | Stable |
 
 ### Python Bindings
 
@@ -107,7 +108,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 | sayiir-runtime       | Stable      |
 | sayiir-persistence   | Stable      |
 | Python bindings      | Stable      |
-| PostgreSQL backend   | In Progress |
+| PostgreSQL backend   | Stable (requires PostgreSQL 13+) |
 | Cloudflare Workers   | In Progress |
 | Node.js bindings     | Planned     |
 | Enterprise server    | Planned     |

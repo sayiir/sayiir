@@ -3,9 +3,12 @@
 use sayiir_core::codec::{self, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::error::PgError;
+
+/// Minimum supported PostgreSQL major version.
+const MIN_PG_MAJOR_VERSION: u32 = 13;
 
 /// PostgreSQL persistence backend for Sayiir workflows.
 ///
@@ -54,10 +57,14 @@ where
     }
 
     async fn init(pool: PgPool) -> Result<Self, BackendError> {
+        check_pg_version(&pool).await?;
+
+        tracing::info!("running postgres migrations");
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
             .map_err(|e| BackendError::Backend(format!("migration failed: {e}")))?;
+        tracing::info!("postgres backend ready");
         Ok(Self {
             pool,
             codec: C::default(),
@@ -88,4 +95,33 @@ where
             .decode(bytes::Bytes::copy_from_slice(data))
             .map_err(|e| BackendError::Serialization(e.to_string()))
     }
+}
+
+/// Query `SHOW server_version_num` and reject versions below [`MIN_PG_MAJOR_VERSION`].
+///
+/// PostgreSQL encodes its version as a single integer: major * 10000 + minor.
+/// For example 130005 = 13.5, 170001 = 17.1.
+async fn check_pg_version(pool: &PgPool) -> Result<(), BackendError> {
+    let row = sqlx::query("SHOW server_version_num")
+        .fetch_one(pool)
+        .await
+        .map_err(PgError)?;
+
+    let version_str: &str = row.get("server_version_num");
+    let version_num: u32 = version_str.parse().map_err(|e| {
+        BackendError::Backend(format!(
+            "failed to parse server_version_num '{version_str}': {e}"
+        ))
+    })?;
+
+    let major = version_num / 10000;
+    tracing::info!(pg_version = major, "connected to PostgreSQL {major}");
+
+    if major < MIN_PG_MAJOR_VERSION {
+        return Err(BackendError::Backend(format!(
+            "PostgreSQL {major} is not supported (minimum: {MIN_PG_MAJOR_VERSION})"
+        )));
+    }
+
+    Ok(())
 }

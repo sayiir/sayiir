@@ -24,15 +24,16 @@ where
         worker_id: &str,
         ttl: Option<Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
+        tracing::debug!(instance_id, task_id, worker_id, "claiming task");
         let expires_at = ttl.and_then(|d| Utc::now().checked_add_signed(d));
 
         // Insert claim; on conflict only replace if the existing claim has expired.
         let row = sqlx::query(
-            "INSERT INTO task_claims (instance_id, task_id, worker_id, expires_at)
+            "INSERT INTO sayiir_task_claims (instance_id, task_id, worker_id, expires_at)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (instance_id, task_id) DO UPDATE
                 SET worker_id = $3, claimed_at = now(), expires_at = $4
-                WHERE task_claims.expires_at IS NOT NULL AND task_claims.expires_at < now()
+                WHERE sayiir_task_claims.expires_at IS NOT NULL AND sayiir_task_claims.expires_at < now()
              RETURNING instance_id, task_id, worker_id,
                        EXTRACT(EPOCH FROM claimed_at)::BIGINT AS claimed_epoch,
                        EXTRACT(EPOCH FROM expires_at)::BIGINT AS expires_epoch",
@@ -60,9 +61,10 @@ where
         task_id: &str,
         worker_id: &str,
     ) -> Result<(), BackendError> {
+        tracing::debug!(instance_id, task_id, worker_id, "releasing task claim");
         // Check ownership first
         let row = sqlx::query(
-            "SELECT worker_id FROM task_claims WHERE instance_id = $1 AND task_id = $2",
+            "SELECT worker_id FROM sayiir_task_claims WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
         .bind(task_id)
@@ -79,7 +81,7 @@ where
         }
 
         sqlx::query(
-            "DELETE FROM task_claims
+            "DELETE FROM sayiir_task_claims
              WHERE instance_id = $1 AND task_id = $2 AND worker_id = $3",
         )
         .bind(instance_id)
@@ -99,8 +101,9 @@ where
         worker_id: &str,
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
+        tracing::debug!(instance_id, task_id, worker_id, "extending task claim");
         let row = sqlx::query(
-            "SELECT worker_id, expires_at FROM task_claims
+            "SELECT worker_id, expires_at FROM sayiir_task_claims
              WHERE instance_id = $1 AND task_id = $2",
         )
         .bind(instance_id)
@@ -125,7 +128,7 @@ where
                 .ok_or_else(|| BackendError::Backend("Time overflow".to_string()))?;
 
             sqlx::query(
-                "UPDATE task_claims SET expires_at = $1
+                "UPDATE sayiir_task_claims SET expires_at = $1
                  WHERE instance_id = $2 AND task_id = $3",
             )
             .bind(new_exp)
@@ -144,8 +147,9 @@ where
         worker_id: &str,
         limit: usize,
     ) -> Result<Vec<AvailableTask>, BackendError> {
+        tracing::debug!(worker_id, limit, "finding available tasks");
         // Step 1: Clean expired claims
-        sqlx::query("DELETE FROM task_claims WHERE expires_at IS NOT NULL AND expires_at < now()")
+        sqlx::query("DELETE FROM sayiir_task_claims WHERE expires_at IS NOT NULL AND expires_at < now()")
             .execute(&self.pool)
             .await
             .map_err(PgError)?;
@@ -153,16 +157,16 @@ where
         // Step 2: Fetch candidate workflows via SQL bulk filter
         let rows = sqlx::query(
             "SELECT s.instance_id, s.data
-             FROM workflow_snapshots s
+             FROM sayiir_workflow_snapshots s
              WHERE s.status = 'InProgress'
                AND NOT EXISTS (
-                   SELECT 1 FROM task_claims c
+                   SELECT 1 FROM sayiir_task_claims c
                    WHERE c.instance_id = s.instance_id
                      AND c.task_id = s.current_task_id
                      AND (c.expires_at IS NULL OR c.expires_at > now())
                )
                AND NOT EXISTS (
-                   SELECT 1 FROM workflow_signals sig
+                   SELECT 1 FROM sayiir_workflow_signals sig
                    WHERE sig.instance_id = s.instance_id
                )
              ORDER BY s.updated_at ASC
@@ -246,10 +250,7 @@ where
             }
         }
 
-        // Ordering is already by updated_at from SQL.
-        // For full worker bias, snapshots would need to be retained in the loop
-        // above — this can be added when needed.
-
+        tracing::debug!(worker_id, count = available.len(), "available tasks found");
         Ok(available)
     }
 }

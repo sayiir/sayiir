@@ -7,14 +7,27 @@ use sayiir_persistence::{BackendError, SignalStore, SnapshotStore, TaskClaimStor
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 use sqlx::PgPool;
+use testcontainers::ImageExt;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
-async fn setup() -> (
+/// Minimum supported PostgreSQL version.
+///
+/// The schema requires `ALTER TABLE … ADD COLUMN IF NOT EXISTS` (9.6+) and
+/// `INSERT … ON CONFLICT DO UPDATE` (9.5+). We set the floor at PostgreSQL 13,
+/// which is the oldest major version still receiving security patches.
+const MIN_PG_VERSION: &str = "13-alpine";
+
+/// Default PostgreSQL version used by most tests.
+const DEFAULT_PG_VERSION: &str = "17-alpine";
+
+async fn setup_with(
+    tag: &str,
+) -> (
     testcontainers::ContainerAsync<Postgres>,
     PostgresBackend<JsonCodec>,
 ) {
-    let container = Postgres::default().start().await.unwrap();
+    let container = Postgres::default().with_tag(tag).start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPool::connect(&url).await.unwrap();
@@ -22,6 +35,13 @@ async fn setup() -> (
         .await
         .unwrap();
     (container, backend)
+}
+
+async fn setup() -> (
+    testcontainers::ContainerAsync<Postgres>,
+    PostgresBackend<JsonCodec>,
+) {
+    setup_with(DEFAULT_PG_VERSION).await
 }
 
 // ─── SnapshotStore ───────────────────────────────────────────────────────────
@@ -370,11 +390,13 @@ async fn claim_task_already_claimed() {
 async fn claim_task_expired_claim_replaced() {
     let (_c, backend) = setup().await;
 
-    // Claim with 0-second TTL (immediately expired)
+    // Claim with 1-second TTL then wait for it to expire
     backend
-        .claim_task("wf-1", "task-1", "worker-1", Some(Duration::seconds(0)))
+        .claim_task("wf-1", "task-1", "worker-1", Some(Duration::seconds(1)))
         .await
         .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Second claim should succeed because first is expired
     let claim2 = backend
@@ -543,4 +565,74 @@ async fn find_available_tasks_skips_completed() {
 
     let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
     assert!(tasks.is_empty());
+}
+
+// ─── Minimum Postgres version ────────────────────────────────────────────────
+
+/// Verify that migrations and core operations work on the minimum supported
+/// PostgreSQL version (currently 13).
+#[tokio::test]
+async fn works_on_minimum_pg_version() {
+    let (_c, backend) = setup_with(MIN_PG_VERSION).await;
+
+    // Snapshot CRUD
+    let snapshot = WorkflowSnapshot::new("min-pg-1".into(), "hash".into());
+    backend.save_snapshot(&snapshot).await.unwrap();
+    let loaded = backend.load_snapshot("min-pg-1").await.unwrap();
+    assert_eq!(loaded.instance_id, "min-pg-1");
+    backend.delete_snapshot("min-pg-1").await.unwrap();
+
+    // Signals
+    let snapshot = WorkflowSnapshot::new("min-pg-2".into(), "hash".into());
+    backend.save_snapshot(&snapshot).await.unwrap();
+    backend
+        .store_signal(
+            "min-pg-2",
+            SignalKind::Cancel,
+            SignalRequest::new(Some("test".into()), None),
+        )
+        .await
+        .unwrap();
+    let cancelled = backend
+        .check_and_cancel("min-pg-2", Some("task-1"))
+        .await
+        .unwrap();
+    assert!(cancelled);
+
+    // Task claims
+    let claim = backend
+        .claim_task(
+            "min-pg-3",
+            "task-1",
+            "worker-1",
+            Some(Duration::seconds(60)),
+        )
+        .await
+        .unwrap();
+    assert!(claim.is_some());
+}
+
+/// `connect_with` must reject PostgreSQL versions below the minimum (13).
+#[tokio::test]
+async fn rejects_unsupported_pg_version() {
+    let container = Postgres::default()
+        .with_tag("12-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgresql://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPool::connect(&url).await.unwrap();
+
+    let result = PostgresBackend::<JsonCodec>::connect_with(pool).await;
+    match result {
+        Ok(_) => panic!("expected version rejection, but connect succeeded"),
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not supported"),
+                "expected version rejection, got: {msg}"
+            );
+        }
+    }
 }

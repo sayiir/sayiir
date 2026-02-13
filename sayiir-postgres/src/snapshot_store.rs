@@ -20,6 +20,11 @@ where
         + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
+        tracing::debug!(
+            instance_id = %snapshot.instance_id,
+            status = %status_str(&snapshot.state),
+            "saving snapshot"
+        );
         let data = self.encode(snapshot)?;
         let status = status_str(&snapshot.state);
         let task_id = current_task_id(snapshot).map(ToString::to_string);
@@ -33,7 +38,7 @@ where
 
         // Upsert current state
         sqlx::query(
-            "INSERT INTO workflow_snapshots
+            "INSERT INTO sayiir_workflow_snapshots
                 (instance_id, status, definition_hash, current_task_id,
                  completed_task_count, data, error, position_kind, delay_wake_at,
                  completed_at, updated_at)
@@ -48,7 +53,7 @@ where
                 error = $7,
                 position_kind = $9,
                 delay_wake_at = $10,
-                completed_at = CASE WHEN $8 THEN now() ELSE workflow_snapshots.completed_at END,
+                completed_at = CASE WHEN $8 THEN now() ELSE sayiir_workflow_snapshots.completed_at END,
                 updated_at = now()",
         )
         .bind(&snapshot.instance_id) // $1
@@ -67,12 +72,12 @@ where
 
         // Append to history
         sqlx::query(
-            "INSERT INTO workflow_snapshot_history
+            "INSERT INTO sayiir_workflow_snapshot_history
                 (instance_id, version, status, current_task_id, data)
              VALUES (
                 $1,
                 (SELECT COALESCE(MAX(version), 0) + 1
-                 FROM workflow_snapshot_history WHERE instance_id = $1),
+                 FROM sayiir_workflow_snapshot_history WHERE instance_id = $1),
                 $2, $3, $4
              )",
         )
@@ -84,19 +89,19 @@ where
         .await
         .map_err(PgError)?;
 
-        // --- Maintain workflow_tasks lifecycle ---
+        // --- Maintain sayiir_workflow_tasks lifecycle ---
 
         // If at a task, mark it as active
         if let Some(ref tid) = task_id {
             sqlx::query(
-                "INSERT INTO workflow_tasks (instance_id, task_id, status, started_at)
+                "INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, started_at)
                  VALUES ($1, $2, 'active', now())
                  ON CONFLICT (instance_id, task_id) DO UPDATE SET
                     status = CASE
-                        WHEN workflow_tasks.status = 'completed' THEN workflow_tasks.status
+                        WHEN sayiir_workflow_tasks.status = 'completed' THEN sayiir_workflow_tasks.status
                         ELSE 'active'
                     END,
-                    started_at = COALESCE(workflow_tasks.started_at, now())",
+                    started_at = COALESCE(sayiir_workflow_tasks.started_at, now())",
             )
             .bind(&snapshot.instance_id)
             .bind(tid)
@@ -113,7 +118,7 @@ where
                 _ => "completed",
             };
             sqlx::query(
-                "UPDATE workflow_tasks SET status = $1, completed_at = now(), error = $2
+                "UPDATE sayiir_workflow_tasks SET status = $1, completed_at = now(), error = $2
                  WHERE instance_id = $3 AND status = 'active'",
             )
             .bind(terminal_status)
@@ -125,6 +130,7 @@ where
         }
 
         tx.commit().await.map_err(PgError)?;
+        tracing::debug!(instance_id = %snapshot.instance_id, "snapshot saved");
         Ok(())
     }
 
@@ -134,11 +140,12 @@ where
         task_id: &str,
         output: bytes::Bytes,
     ) -> Result<(), BackendError> {
+        tracing::debug!(instance_id, task_id, "saving task result");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // Lock and load the snapshot
         let row =
-            sqlx::query("SELECT data FROM workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
+            sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1 FOR UPDATE")
                 .bind(instance_id)
                 .fetch_optional(&mut *tx)
                 .await
@@ -155,7 +162,7 @@ where
         let task_count = completed_task_count(&snapshot);
 
         sqlx::query(
-            "UPDATE workflow_snapshots
+            "UPDATE sayiir_workflow_snapshots
              SET data = $1, status = $2, current_task_id = $3,
                  completed_task_count = $4, updated_at = now()
              WHERE instance_id = $5",
@@ -169,9 +176,9 @@ where
         .await
         .map_err(PgError)?;
 
-        // Mark task as completed in workflow_tasks
+        // Mark task as completed in sayiir_workflow_tasks
         sqlx::query(
-            "INSERT INTO workflow_tasks (instance_id, task_id, status, completed_at)
+            "INSERT INTO sayiir_workflow_tasks (instance_id, task_id, status, completed_at)
              VALUES ($1, $2, 'completed', now())
              ON CONFLICT (instance_id, task_id) DO UPDATE SET
                 status = 'completed', completed_at = now(), error = NULL",
@@ -183,11 +190,13 @@ where
         .map_err(PgError)?;
 
         tx.commit().await.map_err(PgError)?;
+        tracing::debug!(instance_id, task_id, "task result saved");
         Ok(())
     }
 
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
-        let row = sqlx::query("SELECT data FROM workflow_snapshots WHERE instance_id = $1")
+        tracing::debug!(instance_id, "loading snapshot");
+        let row = sqlx::query("SELECT data FROM sayiir_workflow_snapshots WHERE instance_id = $1")
             .bind(instance_id)
             .fetch_optional(&self.pool)
             .await
@@ -199,7 +208,8 @@ where
     }
 
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
-        let result = sqlx::query("DELETE FROM workflow_snapshots WHERE instance_id = $1")
+        tracing::debug!(instance_id, "deleting snapshot");
+        let result = sqlx::query("DELETE FROM sayiir_workflow_snapshots WHERE instance_id = $1")
             .bind(instance_id)
             .execute(&self.pool)
             .await
@@ -212,7 +222,8 @@ where
     }
 
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
-        let rows = sqlx::query("SELECT instance_id FROM workflow_snapshots")
+        tracing::debug!("listing snapshots");
+        let rows = sqlx::query("SELECT instance_id FROM sayiir_workflow_snapshots")
             .fetch_all(&self.pool)
             .await
             .map_err(PgError)?;

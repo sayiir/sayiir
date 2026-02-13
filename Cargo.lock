@@ -2179,6 +2179,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sayiir-integration-tests"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "sayiir-core",
+ "sayiir-persistence",
+ "sayiir-postgres",
+ "sayiir-runtime",
+ "serde_json",
+ "sqlx",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+]
+
+[[package]]
 name = "sayiir-macros"
 version = "0.1.0"
 dependencies = [
