@@ -83,10 +83,16 @@ class PyInMemoryBackend:
 
     def __init__(self) -> None: ...
 
+class PyPostgresBackend:
+    """PostgreSQL persistence backend for workflow snapshots."""
+
+    def __init__(self, url: str) -> None: ...
+    def __repr__(self) -> str: ...
+
 class PyDurableEngine:
     """Durable workflow engine with checkpointing, cancellation, and resume."""
 
-    def __init__(self, backend: PyInMemoryBackend) -> None: ...
+    def __init__(self, backend: PyInMemoryBackend | PyPostgresBackend) -> None: ...
     def run(
         self,
         workflow: PyWorkflow,
