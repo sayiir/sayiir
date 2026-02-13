@@ -403,9 +403,6 @@ where
 
     /// The actor loop: poll for tasks, execute them, respond to shutdown.
     ///
-    /// This is the core loop that runs inside the spawned task. It uses
-    /// `tokio::select!` with biased polling to ensure shutdown commands are
-    /// never starved by rapid task availability.
     async fn run_actor_loop<C, Input, M>(
         &self,
         poll_interval: Duration,
