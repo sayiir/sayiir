@@ -1,6 +1,6 @@
 # Sayiir
 
-**Durable workflows that feel like writing normal code.**
+**Durable workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
 
 [![CI](https://github.com/sayiir/sayiir/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sayiir/sayiir/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -15,6 +15,7 @@
 ## Why Sayiir?
 
 Most workflow engines force you to learn their mental model, their DSL, their way of thinking. You end up writing code *for the engine* instead of writing code *for your business*.
+
 
 **Sayiir is different.** Write async Rust or plain Python. That's it. Your existing code, your existing patterns, your existing tests — they all just work.
 
