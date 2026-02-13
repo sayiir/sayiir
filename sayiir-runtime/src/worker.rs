@@ -635,6 +635,48 @@ where
         }
     }
 
+    /// Try to schedule a retry for a failed task.
+    ///
+    /// Looks up the retry policy on the continuation. If retries are available,
+    /// records the retry state on the snapshot, clears the deadline, saves the
+    /// snapshot, releases the claim, and returns `Ok(Some(InProgress))`.
+    /// Otherwise returns `Ok(None)` (caller falls through to existing error handling).
+    async fn try_schedule_retry(
+        &self,
+        continuation: &WorkflowContinuation,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        error_msg: &str,
+    ) -> Result<Option<WorkflowStatus>, crate::error::RuntimeError> {
+        let Some(policy) = continuation.get_task_retry_policy(&available_task.task_id) else {
+            return Ok(None);
+        };
+
+        if snapshot.retries_exhausted(&available_task.task_id) {
+            return Ok(None);
+        }
+
+        let next_retry_at = snapshot.record_retry(
+            &available_task.task_id,
+            policy,
+            error_msg,
+            Some(&self.worker_id),
+        );
+        snapshot.clear_task_deadline();
+        let _ = self.backend.save_snapshot(snapshot).await;
+
+        tracing::info!(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            attempt = snapshot.get_retry_state(&available_task.task_id).map_or(0, |rs| rs.attempts),
+            max_attempts = policy.max_attempts,
+            %next_retry_at,
+            "Scheduling retry"
+        );
+
+        Ok(Some(WorkflowStatus::InProgress))
+    }
+
     /// Settle the outcome of task execution: persist results or errors, release claim.
     async fn settle_execution_result<C, Input, M>(
         &self,
@@ -651,6 +693,19 @@ where
     {
         match outcome {
             ExecutionOutcome::Timeout(err) => {
+                if let Ok(Some(status)) = self
+                    .try_schedule_retry(
+                        workflow.continuation(),
+                        available_task,
+                        snapshot,
+                        &err.to_string(),
+                    )
+                    .await
+                {
+                    claim.release_quietly().await;
+                    return Ok(status);
+                }
+
                 tracing::warn!(
                     instance_id = %available_task.instance_id,
                     task_id = %available_task.task_id,
@@ -664,6 +719,20 @@ where
             }
             ExecutionOutcome::Panic(panic_payload) => {
                 let panic_msg = extract_panic_message(&panic_payload);
+
+                if let Ok(Some(status)) = self
+                    .try_schedule_retry(
+                        workflow.continuation(),
+                        available_task,
+                        snapshot,
+                        &panic_msg,
+                    )
+                    .await
+                {
+                    claim.release_quietly().await;
+                    return Ok(status);
+                }
+
                 tracing::error!(
                     instance_id = %available_task.instance_id,
                     task_id = %available_task.task_id,
@@ -674,6 +743,19 @@ where
                 Err(WorkflowError::TaskPanicked(panic_msg).into())
             }
             ExecutionOutcome::TaskError(e) => {
+                if let Ok(Some(status)) = self
+                    .try_schedule_retry(
+                        workflow.continuation(),
+                        available_task,
+                        snapshot,
+                        &e.to_string(),
+                    )
+                    .await
+                {
+                    claim.release_quietly().await;
+                    return Ok(status);
+                }
+
                 tracing::error!(
                     instance_id = %available_task.instance_id,
                     task_id = %available_task.task_id,
@@ -684,6 +766,7 @@ where
                 Err(e)
             }
             ExecutionOutcome::Success(output) => {
+                snapshot.clear_retry_state(&available_task.task_id);
                 self.commit_task_result(
                     workflow.continuation(),
                     available_task,
@@ -1144,6 +1227,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::serialization::JsonCodec;
@@ -1232,7 +1316,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), join_handle)
             .await
             .ok()
-            .and_then(|r| r.ok());
+            .and_then(Result::ok);
         assert!(
             result.is_some(),
             "Worker should exit when all handles are dropped"

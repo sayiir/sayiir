@@ -17,6 +17,7 @@ pub mod builder;
 pub mod codec;
 pub mod context;
 pub mod error;
+pub mod prelude;
 pub mod registry;
 pub mod snapshot;
 pub mod task;

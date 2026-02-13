@@ -114,7 +114,7 @@ mod tests {
         let status = runner.run(&workflow, 1u32).await.unwrap();
         match status {
             WorkflowStatus::Failed(e) => {
-                assert!(e.to_string().contains("intentional failure"));
+                assert!(e.contains("intentional failure"));
             }
             _ => panic!("Expected Failed status"),
         }
@@ -157,7 +157,7 @@ mod tests {
         let status = runner.run(&workflow, 1u32).await.unwrap();
         match status {
             WorkflowStatus::Failed(e) => {
-                assert!(e.to_string().contains("step2 failed"));
+                assert!(e.contains("step2 failed"));
             }
             _ => panic!("Expected Failed status"),
         }

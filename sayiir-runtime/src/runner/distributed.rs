@@ -15,18 +15,17 @@ use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
 use sayiir_core::context::{WorkflowContext, with_context};
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::{
-    ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot, WorkflowSnapshotState,
-};
+use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
 use crate::execution::{
-    ForkBranchOutcome, check_guards, check_parked_position, collect_cached_branches,
-    execute_or_skip_task, finalize_execution, get_resume_input, park_at_delay, park_at_fork,
-    save_join_position, serialize_branch_results,
+    ForkBranchOutcome, JoinResolution, ResumeParkedPosition, branch_execute_or_skip_task,
+    check_guards, collect_cached_branches, execute_or_skip_task, finalize_execution,
+    get_resume_input, park_at_delay, park_branch_at_delay, resolve_join, retry_with_checkpoint,
+    set_deadline_if_needed, settle_fork_outcome,
 };
 
 /// A single-process workflow runner with checkpointing for crash recovery.
@@ -257,66 +256,13 @@ where
             return Ok(status);
         }
 
-        // Extract delay/fork fields into owned locals before any mutation.
-        let delay_info = if let WorkflowSnapshotState::InProgress {
-            position:
-                ExecutionPosition::AtDelay {
-                    wake_at,
-                    delay_id,
-                    next_task_id,
-                    ..
-                },
-            ..
-        } = &snapshot.state
+        // Resolve any parked position (delay / fork) before resuming.
+        let parked = ResumeParkedPosition::extract(&snapshot);
+        if let Some(status) = parked
+            .resolve(&mut snapshot, instance_id, self.backend.as_ref())
+            .await?
         {
-            Some((*wake_at, delay_id.clone(), next_task_id.clone()))
-        } else {
-            None
-        };
-
-        if let Some((wake_at, delay_id, next_task_id)) = delay_info {
-            let result =
-                check_parked_position(self.backend.as_ref(), instance_id, &delay_id, wake_at)
-                    .await?;
-            if let Some(status) = result.into_status() {
-                return Ok(status);
-            }
-            tracing::info!(instance_id, %delay_id, "delay expired, advancing execution");
-            if let Some(next_id) = next_task_id {
-                snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
-            } else {
-                tracing::info!(instance_id, %delay_id, "delay was last node, completing workflow");
-                let output = snapshot
-                    .get_task_result_bytes(&delay_id)
-                    .unwrap_or_default();
-                snapshot.mark_completed(output);
-                self.backend.save_snapshot(&snapshot).await?;
-                return Ok(WorkflowStatus::Completed);
-            }
-            self.backend.save_snapshot(&snapshot).await?;
-        }
-
-        // Handle AtFork: branches hit delays and the fork was parked.
-        let fork_info = if let WorkflowSnapshotState::InProgress {
-            position: ExecutionPosition::AtFork {
-                fork_id, wake_at, ..
-            },
-            ..
-        } = &snapshot.state
-        {
-            Some((*wake_at, fork_id.clone()))
-        } else {
-            None
-        };
-
-        if let Some((wake_at, fork_id)) = fork_info {
-            let result =
-                check_parked_position(self.backend.as_ref(), instance_id, &fork_id, wake_at)
-                    .await?;
-            if let Some(status) = result.into_status() {
-                return Ok(status);
-            }
-            tracing::info!(instance_id, %fork_id, "fork delays expired, resuming execution");
+            return Ok(status);
         }
 
         // Resume execution
@@ -367,20 +313,25 @@ where
                     id,
                     func: Some(func),
                     timeout,
+                    retry_policy,
                     next,
                 } => {
                     check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+                    set_deadline_if_needed(id, timeout.as_ref(), snapshot, backend.as_ref())
+                        .await?;
 
-                    // Set deadline before execution (persisted for crash recovery)
-                    if snapshot.get_task_result(id).is_none()
-                        && let Some(d) = timeout
-                    {
-                        snapshot.set_task_deadline(id.clone(), *d);
-                        backend.save_snapshot(snapshot).await?;
-                    }
-
-                    let output =
-                        execute_or_skip_task(id, current_input, |i| func.run(i), snapshot).await?;
+                    let output = retry_with_checkpoint(
+                        id,
+                        retry_policy.as_ref(),
+                        timeout.as_ref(),
+                        snapshot,
+                        Some(backend.as_ref()),
+                        async |snap| {
+                            execute_or_skip_task(id, current_input.clone(), |i| func.run(i), snap)
+                                .await
+                        },
+                    )
+                    .await?;
 
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
@@ -406,8 +357,8 @@ where
 
                     if snapshot.get_task_result(id).is_some() {
                         match next {
-                            Some(n) => {
-                                current = n;
+                            Some(next_continuation) => {
+                                current = next_continuation;
                                 continue;
                             }
                             None => return Ok(current_input),
@@ -443,42 +394,22 @@ where
                                 &context,
                             )
                             .await?;
-                            {
-                                if let Some(wake_at) = outcome.max_wake_at {
-                                    return Err(park_at_fork(
-                                        fork_id,
-                                        &outcome.results,
-                                        wake_at,
-                                        snapshot,
-                                        backend.as_ref(),
-                                    )
-                                    .await);
-                                }
-                                check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
-                                save_join_position(
-                                    &outcome.results,
-                                    join.as_deref(),
-                                    snapshot,
-                                    backend.as_ref(),
-                                )
-                                .await?;
-                                outcome.results
-                            }
+                            settle_fork_outcome(
+                                fork_id,
+                                outcome,
+                                join.as_deref(),
+                                snapshot,
+                                backend.as_ref(),
+                            )
+                            .await?
                         };
 
-                    // Proceed to join or return
-                    match join {
-                        Some(join_continuation) => {
-                            let join_input = serialize_branch_results(&branch_results)?;
-                            current = join_continuation;
-                            current_input = join_input;
+                    match resolve_join(join.as_deref(), &branch_results)? {
+                        JoinResolution::Continue { next, input } => {
+                            current = next;
+                            current_input = input;
                         }
-                        None => {
-                            return branch_results
-                                .last()
-                                .map(|(_, b)| b.clone())
-                                .ok_or_else(|| WorkflowError::EmptyFork.into());
-                        }
+                        JoinResolution::Done(output) => return Ok(output),
                     }
                 }
             }
@@ -552,6 +483,52 @@ where
         })
     }
 
+    /// Execute nested fork branches in parallel within a branch.
+    ///
+    /// Spawns each branch as a tokio task, collects all results, and propagates
+    /// errors (including `JoinError`).
+    async fn execute_nested_fork_branches<C, M>(
+        branches: &[Arc<WorkflowContinuation>],
+        input: &Bytes,
+        backend: &Arc<B>,
+        instance_id: &str,
+        context: &WorkflowContext<C, M>,
+    ) -> Result<Vec<(String, Bytes)>, RuntimeError>
+    where
+        B: 'static,
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
+    {
+        let mut set: tokio::task::JoinSet<Result<(String, Bytes), RuntimeError>> =
+            tokio::task::JoinSet::new();
+        for branch in branches {
+            let id = branch.id().to_string();
+            let branch = Arc::clone(branch);
+            let branch_input = input.clone();
+            let branch_backend = Arc::clone(backend);
+            let branch_instance_id = instance_id.to_string();
+            let ctx_for_work = context.clone();
+
+            set.spawn(with_context(context.clone(), || async move {
+                let result = Self::execute_branch_with_checkpoint(
+                    &branch,
+                    branch_input,
+                    branch_backend,
+                    branch_instance_id,
+                    ctx_for_work,
+                )
+                .await?;
+                Ok((id, result))
+            }));
+        }
+
+        let mut branch_results: Vec<(String, Bytes)> = Vec::with_capacity(set.len());
+        while let Some(res) = set.join_next().await {
+            branch_results.push(res??);
+        }
+        Ok(branch_results)
+    }
+
     /// Execute branch continuation with per-task checkpointing (iterative, no boxing).
     ///
     /// Unlike `execute_with_checkpointing`, this doesn't update position tracking
@@ -586,36 +563,53 @@ where
                         id,
                         func,
                         timeout,
+                        retry_policy,
                         next,
                     } => {
-                        // Skip if already cached in snapshot (resume case)
-                        let output = if let Some(result) = snapshot.get_task_result(id) {
-                            result.output.clone()
-                        } else {
-                            let func = func
-                                .as_ref()
-                                .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
-                            // Set in-memory deadline for post-execution check
-                            if let Some(d) = timeout {
-                                snapshot.set_task_deadline(id.clone(), *d);
+                        let func = func
+                            .as_ref()
+                            .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
+
+                        let output = loop {
+                            match branch_execute_or_skip_task(
+                                id,
+                                current_input.clone(),
+                                |i| func.run(i),
+                                timeout.as_ref(),
+                                &mut snapshot,
+                                &instance_id,
+                                backend.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(output) => {
+                                    snapshot.clear_retry_state(id);
+                                    break output;
+                                }
+                                Err(e) => {
+                                    if let Some(rp) = retry_policy
+                                        && !snapshot.retries_exhausted(id)
+                                    {
+                                        let next_retry_at =
+                                            snapshot.record_retry(id, rp, &e.to_string(), None);
+                                        snapshot.clear_task_deadline();
+                                        tracing::info!(
+                                            task_id = %id,
+                                            attempt = snapshot.get_retry_state(id).map_or(0, |rs| rs.attempts),
+                                            max_attempts = rp.max_attempts,
+                                            %next_retry_at,
+                                            error = %e,
+                                            "Retrying task (branch)"
+                                        );
+                                        let delay = (next_retry_at - chrono::Utc::now())
+                                            .to_std()
+                                            .unwrap_or_default();
+                                        tokio::time::sleep(delay).await;
+                                        continue;
+                                    }
+                                    return Err(e);
+                                }
                             }
-                            let output =
-                                func.run(current_input).await.map_err(RuntimeError::from)?;
-                            // Post-execution deadline check
-                            if let Some((tid, t)) = snapshot.expired_task_deadline() {
-                                let err = WorkflowError::TaskTimedOut {
-                                    task_id: tid.to_string(),
-                                    timeout: t,
-                                };
-                                snapshot.clear_task_deadline();
-                                return Err(err.into());
-                            }
-                            snapshot.clear_task_deadline();
-                            // Checkpoint: save task result directly to backend
-                            backend
-                                .save_task_result(&instance_id, id, output.clone())
-                                .await?;
-                            output
                         };
 
                         match next {
@@ -640,61 +634,31 @@ where
                             }
                         }
 
-                        // Park at delay: save pass-through and return Waiting
-                        tracing::info!(delay_id = %id, ?duration, "parking branch at delay");
-                        let now = chrono::Utc::now();
-                        let wake_at = match chrono::Duration::from_std(*duration) {
-                            Ok(d) => now + d,
-                            Err(e) => return Err(WorkflowError::ResumeError(e.to_string()).into()),
-                        };
-                        backend
-                            .save_task_result(&instance_id, id, current_input)
-                            .await?;
-                        return Err(WorkflowError::Waiting { wake_at }.into());
+                        return Err(park_branch_at_delay(
+                            id,
+                            duration,
+                            current_input,
+                            &instance_id,
+                            backend.as_ref(),
+                        )
+                        .await);
                     }
                     WorkflowContinuation::Fork { branches, join, .. } => {
-                        // Nested fork within a branch
-                        let mut set: tokio::task::JoinSet<Result<(String, Bytes), RuntimeError>> =
-                            tokio::task::JoinSet::new();
-                        for branch in branches {
-                            let id = branch.id().to_string();
-                            let branch = Arc::clone(branch);
-                            let branch_input = current_input.clone();
-                            let branch_backend = Arc::clone(&backend);
-                            let branch_instance_id = instance_id.clone();
-                            let ctx_for_work = context.clone();
+                        let branch_results = Self::execute_nested_fork_branches(
+                            branches,
+                            &current_input,
+                            &backend,
+                            &instance_id,
+                            &context,
+                        )
+                        .await?;
 
-                            set.spawn(with_context(context.clone(), || async move {
-                                let result = Self::execute_branch_with_checkpoint(
-                                    &branch,
-                                    branch_input,
-                                    branch_backend,
-                                    branch_instance_id,
-                                    ctx_for_work,
-                                )
-                                .await?;
-                                Ok((id, result))
-                            }));
-                        }
-
-                        let mut branch_results: Vec<(String, Bytes)> =
-                            Vec::with_capacity(set.len());
-                        while let Some(res) = set.join_next().await {
-                            branch_results.push(res??);
-                        }
-
-                        match join {
-                            Some(join_continuation) => {
-                                let join_input = serialize_branch_results(&branch_results)?;
-                                current = join_continuation;
-                                current_input = join_input;
+                        match resolve_join(join.as_deref(), &branch_results)? {
+                            JoinResolution::Continue { next, input } => {
+                                current = next;
+                                current_input = input;
                             }
-                            None => {
-                                return branch_results
-                                    .last()
-                                    .map(|(_, b)| b.clone())
-                                    .ok_or_else(|| WorkflowError::EmptyFork.into());
-                            }
+                            JoinResolution::Done(output) => return Ok(output),
                         }
                     }
                 }
@@ -717,6 +681,7 @@ mod tests {
     use sayiir_core::codec::Encoder;
     use sayiir_core::context::WorkflowContext;
     use sayiir_core::error::BoxError;
+    use sayiir_core::snapshot::WorkflowSnapshotState;
     use sayiir_core::task::BranchOutputs;
     use sayiir_core::workflow::WorkflowBuilder;
     use sayiir_persistence::InMemoryBackend;
@@ -798,7 +763,7 @@ mod tests {
         let status = runner.run(&workflow, "inst-1", 1u32).await.unwrap();
         match status {
             WorkflowStatus::Failed(e) => {
-                assert!(e.to_string().contains("intentional failure"));
+                assert!(e.contains("intentional failure"));
             }
             _ => panic!("Expected Failed status"),
         }
@@ -1057,7 +1022,7 @@ mod tests {
         let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
         match status {
             WorkflowStatus::Failed(e) => {
-                assert!(e.to_string().contains("mid-chain failure"));
+                assert!(e.contains("mid-chain failure"));
             }
             _ => panic!("Expected Failed"),
         }

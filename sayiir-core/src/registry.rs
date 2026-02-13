@@ -9,7 +9,25 @@
 //! Both the serializing and deserializing sides must build the same registry from code.
 //! This is the standard pattern in workflow engines.
 //!
-//! ```rust,ignore
+//! ```rust
+//! # use sayiir_core::codec::{Encoder, Decoder, sealed};
+//! # use bytes::Bytes;
+//! use sayiir_core::prelude::*;
+//! use sayiir_core::workflow::SerializableContinuation;
+//! use std::sync::Arc;
+//! # struct MyCodec;
+//! # impl Encoder for MyCodec {}
+//! # impl Decoder for MyCodec {}
+//! # impl<T> sealed::EncodeValue<T> for MyCodec {
+//! #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+//! # }
+//! # impl<T> sealed::DecodeValue<T> for MyCodec {
+//! #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+//! # }
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let codec = Arc::new(MyCodec);
+//! # let ctx = WorkflowContext::new("my-workflow", codec.clone(), Arc::new(()));
+//!
 //! // Shared function - called on both sides (serializer and deserializer)
 //! fn build_task_registry(codec: Arc<MyCodec>) -> TaskRegistry {
 //!     TaskRegistry::with_codec(codec)
@@ -20,17 +38,20 @@
 //!
 //! // === Serialization side ===
 //! let registry = build_task_registry(codec.clone());
-//! let workflow = WorkflowBuilder::new(ctx)
+//! let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
 //!     .with_existing_registry(registry)
-//!     .then_registered::<u32>("double")
-//!     .then_registered::<u32>("add_ten")
+//!     .then_registered::<u32>("double")?
+//!     .then_registered::<u32>("add_ten")?
 //!     .build()?;
-//! let serialized = serde_json::to_string(&workflow.to_serializable())?;
+//! let serializable = workflow.continuation().to_serializable();
+//! let serialized = serde_json::to_string(&serializable)?;
 //!
 //! // === Deserialization side (possibly different process) ===
 //! let registry = build_task_registry(codec.clone());  // Rebuild same registry
 //! let continuation: SerializableContinuation = serde_json::from_str(&serialized)?;
 //! let runnable = continuation.to_runnable(&registry)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::codec::{Codec, sealed};
@@ -93,9 +114,35 @@ impl TaskRegistry {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use sayiir_core::task::fn_task;
+    /// ```rust
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// use sayiir_core::prelude::*;
+    /// use std::pin::Pin;
+    /// use std::future::Future;
     ///
+    /// struct DoubleTask;
+    /// impl CoreTask for DoubleTask {
+    ///     type Input = u32;
+    ///     type Output = u32;
+    ///     type Future = Pin<Box<dyn Future<Output = Result<u32, BoxError>> + Send>>;
+    ///     fn run(&self, input: u32) -> Self::Future {
+    ///         Box::pin(async move { Ok(input * 2) })
+    ///     }
+    /// }
+    ///
+    /// # let mut registry = TaskRegistry::new();
+    /// # let codec = Arc::new(MyCodec);
     /// // Register a struct implementing CoreTask
     /// registry.register("struct_task", codec.clone(), DoubleTask);
     ///
@@ -163,7 +210,22 @@ impl TaskRegistry {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use sayiir_core::prelude::*;
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// # let mut registry = TaskRegistry::new();
+    /// # let codec = Arc::new(MyCodec);
     /// registry.register_fn("double", codec.clone(), |input: u32| async move { Ok(input * 2) });
     /// ```
     pub fn register_fn<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: F)
@@ -350,7 +412,21 @@ impl TaskRegistry {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use sayiir_core::prelude::*;
+    /// # use sayiir_core::codec::{Encoder, Decoder, sealed};
+    /// # use bytes::Bytes;
+    /// # use std::sync::Arc;
+    /// # struct MyCodec;
+    /// # impl Encoder for MyCodec {}
+    /// # impl Decoder for MyCodec {}
+    /// # impl<T> sealed::EncodeValue<T> for MyCodec {
+    /// #     fn encode_value(&self, _: &T) -> Result<Bytes, BoxError> { Ok(Bytes::new()) }
+    /// # }
+    /// # impl<T> sealed::DecodeValue<T> for MyCodec {
+    /// #     fn decode_value(&self, _: Bytes) -> Result<T, BoxError> { Err("dummy".into()) }
+    /// # }
+    /// # let codec = Arc::new(MyCodec);
     /// let registry = TaskRegistry::with_codec(codec)
     ///     .register_fn("double", |i: u32| async move { Ok(i * 2) })
     ///     .register_fn("add_ten", |i: u32| async move { Ok(i + 10) })

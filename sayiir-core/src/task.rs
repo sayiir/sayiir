@@ -120,9 +120,8 @@ impl<C: Codec> BranchOutputs<C> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use sayiir_core::task::CoreTask;
-/// use sayiir_core::error::BoxError;
+/// ```rust
+/// use sayiir_core::prelude::*;
 /// use std::pin::Pin;
 /// use std::future::Future;
 ///

@@ -376,7 +376,7 @@ impl TaskClaimStore for InMemoryBackend {
 
     async fn find_available_tasks(
         &self,
-        _worker_id: &str,
+        worker_id: &str,
         limit: usize,
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Clean up expired claims first
@@ -478,6 +478,13 @@ impl TaskClaimStore for InMemoryBackend {
                 let is_completed = completed_tasks.contains_key(task_id);
 
                 if !is_completed && !is_claimed {
+                    // Skip tasks whose retry backoff has not elapsed yet
+                    if let Some(rs) = snapshot.task_retries.get(task_id)
+                        && Utc::now() < rs.next_retry_at
+                    {
+                        continue;
+                    }
+
                     let input = if completed_tasks.is_empty() {
                         snapshot.initial_input_bytes()
                     } else {
@@ -499,6 +506,16 @@ impl TaskClaimStore for InMemoryBackend {
                 }
             }
         }
+
+        // Soft worker bias: tasks that did NOT fail on this worker come first.
+        // `false < true`, so non-failed-on-this-worker tasks are sorted first.
+        available.sort_by_key(|t| {
+            snapshots
+                .get(&t.instance_id)
+                .and_then(|s| s.task_retries.get(&t.task_id))
+                .and_then(|rs| rs.last_failed_worker.as_deref())
+                .is_some_and(|w| w == worker_id)
+        });
 
         Ok(available)
     }

@@ -4,7 +4,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any, TypeVar, get_type_hints, overload
 
-from ._sayiir import PyTaskMetadata
+from ._sayiir import PyRetryPolicy, PyTaskMetadata
 
 T = TypeVar("T")
 
@@ -19,6 +19,7 @@ def task(
     *,
     name: str | None = None,
     timeout_secs: float | None = None,
+    retries: PyRetryPolicy | None = None,
     tags: list[str] | None = None,
     description: str | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]: ...
@@ -29,6 +30,7 @@ def task(
     *,
     name: str | None = None,
     timeout_secs: float | None = None,
+    retries: PyRetryPolicy | None = None,
     tags: list[str] | None = None,
     description: str | None = None,
 ) -> Callable[..., T] | Callable[[Callable[..., T]], Callable[..., T]]:
@@ -41,7 +43,7 @@ def task(
         def process(x: int) -> int:
             return x * 2
 
-        @task(name="custom_name", timeout_secs=30)
+        @task(name="custom_name", timeout_secs=30, retries=RetryPolicy())
         def slow_task(x: int) -> int:
             return x * 2
     """
@@ -53,6 +55,7 @@ def task(
             display_name=task_id,
             description=description,
             timeout_secs=timeout_secs,
+            retries=retries,
             tags=tags,
         )
 

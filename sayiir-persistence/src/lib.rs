@@ -20,10 +20,11 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use sayiir_persistence::{InMemoryBackend, PersistentBackend, SnapshotStore};
+//! ```rust,no_run
+//! use sayiir_persistence::{InMemoryBackend, SnapshotStore};
 //! use sayiir_core::snapshot::WorkflowSnapshot;
 //!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a backend (could be Redis, PostgreSQL, etc.)
 //! let backend = InMemoryBackend::new();
 //!
@@ -33,6 +34,8 @@
 //!
 //! // Load it back
 //! let loaded = backend.load_snapshot("instance-123").await?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod backend;
