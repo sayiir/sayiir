@@ -32,6 +32,7 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engine::PyWorkflowEngine>()?;
     m.add_class::<engine::PyWorkflowStatus>()?;
     m.add_class::<backend::PyInMemoryBackend>()?;
+    m.add_class::<backend::PyPostgresBackend>()?;
     m.add_class::<durable_engine::PyDurableEngine>()?;
 
     // Register exception types

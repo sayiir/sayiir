@@ -56,7 +56,7 @@ pub struct TaskRetryState {
 /// Represents the position in workflow execution.
 ///
 /// This tracks which tasks have been completed and where execution should resume.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, strum::AsRefStr)]
 pub enum ExecutionPosition {
     /// Workflow has not started yet.
     NotStarted,
@@ -148,7 +148,7 @@ impl PauseRequest {
 }
 
 /// Kind of signal that can be sent to a running workflow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::AsRefStr)]
 pub enum SignalKind {
     /// Request cancellation.
     Cancel,
@@ -223,7 +223,9 @@ impl From<SignalRequest> for PauseRequest {
 }
 
 /// State of a workflow snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, strum::AsRefStr, strum::EnumDiscriminants)]
+#[strum_discriminants(name(SnapshotStatus))]
+#[strum_discriminants(derive(strum::EnumString, strum::AsRefStr))]
 pub enum WorkflowSnapshotState {
     /// Workflow is in progress.
     InProgress {

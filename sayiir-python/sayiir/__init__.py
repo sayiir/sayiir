@@ -7,6 +7,7 @@ from ._sayiir import BackendError, TaskError, WorkflowError
 from ._sayiir import PyDurableEngine as DurableEngine
 from ._sayiir import PyFlowBuilder as FlowBuilder
 from ._sayiir import PyInMemoryBackend as InMemoryBackend
+from ._sayiir import PyPostgresBackend as PostgresBackend
 from ._sayiir import PyRetryPolicy as RetryPolicy
 from ._sayiir import PyTaskMetadata as TaskMetadata
 from ._sayiir import PyWorkflowEngine as WorkflowEngine
@@ -28,6 +29,7 @@ __all__ = [
     "Flow",
     "FlowBuilder",
     "InMemoryBackend",
+    "PostgresBackend",
     "RetryPolicy",
     "TaskError",
     "TaskMetadata",

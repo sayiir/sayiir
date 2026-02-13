@@ -3,7 +3,10 @@
 ## Installation
 
 ```bash
-cd python && pip install -e ".[dev]"
+cd sayiir-python
+uv venv && source .venv/bin/activate
+maturin develop
+pip install -e ".[dev]"
 ```
 
 ---
@@ -44,6 +47,30 @@ workflow = Flow("order").then(process_order).then(send_confirmation).build()
 
 # Checkpoints after each task — resume from last checkpoint on crash
 status = run_durable_workflow(workflow, "order-123", 42)
+print(status.output)
+```
+
+### With Postgres
+
+Pass a `PostgresBackend` to persist workflow state in PostgreSQL — everything
+else stays the same.
+
+```python
+from sayiir import task, Flow, run_durable_workflow, PostgresBackend
+
+@task(timeout_secs=30)
+def process_order(order_id: int) -> dict:
+    return {"order_id": order_id, "status": "processed"}
+
+@task
+def send_confirmation(order: dict) -> str:
+    return f"Confirmed order {order['order_id']}"
+
+workflow = Flow("order").then(process_order).then(send_confirmation).build()
+
+# Connects and runs migrations automatically
+backend = PostgresBackend("postgresql://localhost/sayiir")
+status = run_durable_workflow(workflow, "order-123", 42, backend=backend)
 print(status.output)
 ```
 

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 /// let decoded: i32 = codec.decode(encoded).unwrap();
 /// assert_eq!(decoded, value);
 /// ```
+#[derive(Default)]
 pub struct JsonCodec;
 
 impl Encoder for JsonCodec {}

@@ -25,6 +25,35 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+## Core Concepts
+
+### Workflow Definition vs Workflow Instance
+
+A **workflow definition** is the blueprint — the chain of tasks, forks, delays, and retries you build with `Flow` or `WorkflowBuilder`. It has a **definition hash** (auto-computed from its structure) that uniquely identifies the shape of the workflow.
+
+A **workflow instance** is a single execution of that definition. When you call `engine.run(workflow, "order-123", ...)`, `"order-123"` is the **instance ID** — a user-provided string that uniquely identifies this run. The same definition can have thousands of concurrent instances, each with its own instance ID and independent state.
+
+```
+Definition: fetch_user → send_email         (definition_hash = "a1b2c3")
+Instance 1: instance_id = "order-123"       (InProgress, at send_email)
+Instance 2: instance_id = "order-456"       (Completed)
+Instance 3: instance_id = "order-789"       (Failed)
+```
+
+The `instance_id` is the primary key for all persistence — snapshots, signals, task claims. You choose it, so it can be meaningful to your domain (order IDs, user IDs, idempotency keys).
+
+### What is a Run?
+
+A **run** is a single invocation of `engine.run()` or `engine.resume()`. It executes tasks sequentially from the current position until the workflow completes, fails, pauses, or parks at a delay.
+
+In **single-process mode** (`CheckpointingRunner` / `DurableEngine`), a run executes all tasks in one process. After each task, the snapshot is checkpointed. If the process crashes, call `resume()` to continue from the last checkpoint.
+
+In **distributed mode** (`PooledWorker`), a run is split across multiple workers. Each worker polls for available tasks, claims one, executes it, checkpoints the result, and releases the claim. The next available worker picks up the following task. No single process owns the full execution — workers collaborate through the persistence layer.
+
+Both modes use the same workflow definition, the same persistence traits, and the same snapshot format. The only difference is who drives the execution loop.
+
+---
+
 **One problem, solved well.** Sayiir is an orchestrator, not a compute engine. It coordinates steps, handles retries, and checkpoints progress — while the actual heavy lifting (ETL, data pipelines, GPU training, API calls) runs in external systems you call from your tasks. We don't try to be a platform, a UI, or a kitchen sink. We make your workflows durable and let you focus on your business logic.
 
 **Why Rust?** The core runtime is written in Rust for safety, performance, and correctness — the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Python bindings are available today, with TypeScript and Go planned — so you get Rust's reliability without leaving your ecosystem. The binding is a thin layer: you write task functions in your language, Rust handles all orchestration, checkpointing, and execution.
