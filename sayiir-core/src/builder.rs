@@ -779,6 +779,8 @@ where
             })
             .collect();
 
+        //
+
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(join_task_fn),
