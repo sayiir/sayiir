@@ -106,10 +106,13 @@ fn build_task_registry(codec: Arc<JsonCodec>) -> TaskRegistry {
     r
 }
 
-// Build the workflow using registered tasks
+// Build the workflow — you can mix registered tasks and inline closures
 let workflow = WorkflowBuilder::new(ctx)
     .with_existing_registry(build_task_registry(codec.clone()))
-    .then_registered::<String>("step_1")
+    .then_registered::<String>("step_1")           // from the registry
+    .then("step_2", |data: String| async move {    // ad-hoc inline task
+        Ok(data.to_uppercase())
+    })
     .build()?;
 
 // WorkflowRegistry: map definition hashes to workflow definitions
