@@ -89,8 +89,11 @@ let worker = PooledWorker::new("worker-1", backend, registry)
     .with_claim_ttl(Some(Duration::from_secs(5 * 60)))
     .with_heartbeat_interval(Some(Duration::from_secs(2 * 60)));
 
-// Start polling for tasks
-worker.start_polling(Duration::from_secs(1), workflows).await?;
+// Spawn the worker and get a handle for lifecycle control
+let handle = worker.spawn(Duration::from_secs(1), workflows);
+// ... later, shut down gracefully ...
+handle.shutdown();
+handle.join().await?;
 ```
 
 ---
@@ -170,6 +173,105 @@ sequenceDiagram
 - `batch_size` controls fetch count, not claim count
 
 With `batch_size=1` (default), each worker fetches one task, executes it, then polls again. This minimizes stale task IDs while keeping polling overhead low.
+
+---
+
+## Task Timeouts
+
+Tasks can have a configured timeout duration. When a task exceeds its timeout, the workflow is marked as `Failed` and the task future is cancelled.
+
+### How it works
+
+Timeouts are enforced through **durable deadlines** — an absolute wall-clock timestamp persisted in the workflow snapshot, not an ephemeral in-process timer.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant B as Backend
+
+    W->>B: set_task_deadline(now + timeout)
+    W->>B: save_snapshot
+
+    Note over W: Start executing task
+
+    loop Heartbeat (every TTL/2)
+        W->>W: Utc::now() >= deadline?
+        W->>B: extend_claim
+    end
+
+    alt Deadline expired
+        W->>W: Drop task future (cancel)
+        W->>B: mark_failed + save_snapshot
+        W->>B: release_claim
+        Note over W: Worker shuts down
+    else Task completes in time
+        W->>B: save result + clear deadline
+    end
+```
+
+### Enforcement by runner
+
+| Runner | Mechanism | Cancellation |
+|--------|-----------|-------------|
+| `PooledWorker` | Heartbeat checks persisted deadline | Active — future dropped mid-execution |
+| `CheckpointingRunner` | Periodic check of persisted deadline | Active — future dropped mid-execution |
+| `InProcessRunner` | `tokio::select!` with sleep | Active — future dropped mid-execution |
+
+### Durable deadline lifecycle
+
+1. **Before execution**: Compute `deadline = now + timeout`, persist in snapshot, save to backend
+2. **Deadline refresh**: Right before actual execution starts, recompute `deadline = now + timeout` so snapshot-save I/O doesn't eat into the time budget
+3. **During execution**: Periodically check `Utc::now() >= deadline` (piggybacks on heartbeat in distributed mode)
+4. **On completion**: Clear deadline from snapshot
+5. **On timeout**: Drop future, mark workflow `Failed`, worker shuts down
+
+### Crash recovery
+
+If the process crashes while a task with a deadline is running:
+
+- The deadline is persisted in the snapshot (survives the crash)
+- On resume, the expired deadline is detected **before** re-executing the task
+- The workflow fails immediately with `TaskTimedOut` — no wasted re-execution
+
+### Cancellation semantics
+
+Cancellation is **cooperative** (standard async Rust). Dropping the task future means:
+
+- The future stops being polled — it won't resume past its current `.await` point
+- Drop handlers run, resources are released
+- Spawned sub-tasks (`tokio::spawn`) are **not** cancelled — they run independently
+- CPU-bound work between `.await` points runs to completion
+
+For typical async tasks (HTTP calls, DB queries, message sends), this provides effective mid-flight cancellation.
+
+### Worker shutdown on timeout
+
+In `PooledWorker`, a task timeout triggers worker shutdown:
+
+1. Heartbeat detects expired deadline
+2. Task future is dropped (cancelled)
+3. Workflow marked `Failed`, snapshot saved, claim released
+4. `execute_task` returns `Err(TaskTimedOut)`
+5. Actor loop detects `is_timeout()` and exits gracefully
+6. Other workers see `Failed` state and skip the workflow
+
+### Performance
+
+The deadline check is a zero-cost in-memory timestamp comparison (`Utc::now() >= deadline`) that piggybacks on the existing heartbeat timer. No additional I/O is required — the heartbeat already calls `extend_task_claim` on each tick regardless of timeouts. With the default 5-minute claim TTL, the heartbeat fires every 2.5 minutes.
+
+### Configuration
+
+```rust
+// Set timeout on a task via the builder
+let workflow = WorkflowBuilder::new(ctx)
+    .with_registry()
+    .then("my_task", |i: u32| async move { Ok(i + 1) })
+    .with_metadata(TaskMetadata {
+        timeout: Some(Duration::from_secs(300)), // 5 minutes
+        ..Default::default()
+    })
+    .build()?;
+```
 
 ---
 

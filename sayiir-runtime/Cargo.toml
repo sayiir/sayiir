@@ -22,7 +22,7 @@ sayiir-macros = { version = "0.1.0", path = "../sayiir-macros" }
 tracing = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "sync"] }
 thiserror = { workspace = true }
 futures = "0.3"
 chrono = { workspace = true }

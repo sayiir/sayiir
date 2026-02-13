@@ -252,6 +252,7 @@ where
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(task),
+            timeout: None,
             next: None,
         };
 
@@ -348,10 +349,12 @@ where
             .registry
             .get(id)
             .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
+        let timeout = self.registry.get_metadata(id).and_then(|m| m.timeout);
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(func),
+            timeout,
             next: None,
         };
 
@@ -365,7 +368,10 @@ where
             _phantom: PhantomData,
         })
     }
+}
 
+/// Metadata attachment — only available after a task has been added.
+impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, TaskRegistry> {
     /// Attach metadata to the most recently added task.
     ///
     /// This method allows chaining metadata after `then()`, `then_registered()`,
@@ -391,7 +397,11 @@ where
     #[must_use]
     pub fn with_metadata(mut self, metadata: crate::task::TaskMetadata) -> Self {
         if let Some(ref id) = self.last_task_id {
+            let timeout = metadata.timeout;
             self.registry.set_metadata(id, metadata);
+            // Also update the timeout on the continuation node so it's available
+            // for direct execution (not just the serializable roundtrip path).
+            self.continuation.set_task_timeout(id, timeout);
         }
         self
     }
@@ -678,6 +688,7 @@ where
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
                     func: Some(b.task),
+                    timeout: None,
                     next: None,
                 })
             })
@@ -686,6 +697,7 @@ where
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(join_task_fn),
+            timeout: None,
             next: None,
         };
 
@@ -753,6 +765,7 @@ where
             .registry
             .get(id)
             .ok_or_else(|| WorkflowError::TaskNotFound(id.to_string()))?;
+        let join_timeout = self.registry.get_metadata(id).and_then(|m| m.timeout);
 
         let fork_id = WorkflowContinuation::derive_fork_id(
             &self
@@ -766,9 +779,11 @@ where
             .branches
             .into_iter()
             .map(|b| {
+                let timeout = self.registry.get_metadata(&b.id).and_then(|m| m.timeout);
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
                     func: Some(b.task),
+                    timeout,
                     next: None,
                 })
             })
@@ -777,6 +792,7 @@ where
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(join_task_fn),
+            timeout: join_timeout,
             next: None,
         };
 

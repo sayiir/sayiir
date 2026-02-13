@@ -86,11 +86,36 @@ pub(crate) fn build_completed_branches(
         .collect()
 }
 
+/// Maximum interval between periodic deadline checks (1 second).
+const MAX_DEADLINE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Minimum interval between periodic deadline checks (1 millisecond).
+const MIN_DEADLINE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Compute the check interval for a deadline: `min(1s, remaining / 2)`,
+/// clamped to at least 1ms.
+fn deadline_check_interval(deadline: &sayiir_core::snapshot::TaskDeadline) -> std::time::Duration {
+    let remaining = (deadline.deadline - chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    (remaining / 2)
+        .max(MIN_DEADLINE_CHECK_INTERVAL)
+        .min(MAX_DEADLINE_CHECK_INTERVAL)
+}
+
 /// Execute a task or skip it if already cached in the snapshot.
 ///
-/// Checks the snapshot cache first. If the task result exists, returns it.
-/// Otherwise, calls the provided `execute` closure and marks the task as
-/// completed in the snapshot.
+/// Checks the snapshot cache first. If the task result exists, clears any
+/// deadline and returns it. Otherwise, checks for an expired deadline (crash
+/// recovery: previous attempt's deadline expired), then executes the task.
+///
+/// When a deadline is set on the snapshot, the task future is raced against a
+/// periodic check of the **persisted** deadline (like the worker heartbeat).
+/// If the deadline expires mid-execution, the future is dropped (active
+/// cancellation). Without a deadline, the task runs normally.
+///
+/// The caller is responsible for setting the deadline on the snapshot *before*
+/// calling this function.
 ///
 /// Does NOT save the snapshot to the backend — the caller handles position
 /// update + save after, since the position depends on context.
@@ -105,10 +130,51 @@ where
     Fut: Future<Output = Result<Bytes, E>>,
     E: Into<RuntimeError>,
 {
-    if let Some(task_result) = snapshot.get_task_result(id) {
-        return Ok(task_result.output.clone());
+    if let Some(cached) = snapshot.get_task_result(id).map(|r| r.output.clone()) {
+        snapshot.clear_task_deadline();
+        return Ok(cached);
     }
-    let output = execute(input).await.map_err(Into::into)?;
+
+    // Crash recovery: deadline from a previous attempt already expired
+    if let Some((tid, timeout)) = snapshot.expired_task_deadline() {
+        let err = WorkflowError::TaskTimedOut {
+            task_id: tid.to_string(),
+            timeout,
+        };
+        snapshot.clear_task_deadline();
+        return Err(err.into());
+    }
+
+    // Refresh deadline to now + timeout so it measures actual execution time,
+    // not time spent on prior snapshot-save I/O.
+    snapshot.refresh_task_deadline();
+
+    let output = if let Some(dl) = &snapshot.task_deadline {
+        let task_future = execute(input);
+        tokio::pin!(task_future);
+        let mut interval = tokio::time::interval(deadline_check_interval(dl));
+        interval.tick().await; // skip first immediate tick
+
+        loop {
+            tokio::select! {
+                result = &mut task_future => break result.map_err(Into::into)?,
+                _ = interval.tick() => {
+                    if let Some((tid, timeout)) = snapshot.expired_task_deadline() {
+                        let err = WorkflowError::TaskTimedOut {
+                            task_id: tid.to_string(),
+                            timeout,
+                        };
+                        snapshot.clear_task_deadline();
+                        return Err(err.into());
+                    }
+                }
+            }
+        }
+    } else {
+        execute(input).await.map_err(Into::into)?
+    };
+
+    snapshot.clear_task_deadline();
     snapshot.mark_task_completed(id.to_string(), output.clone());
     Ok(output)
 }
@@ -482,11 +548,28 @@ fn execute_async_inner<'a>(
         loop {
             match current {
                 WorkflowContinuation::Task {
+                    id,
                     func: Some(func),
+                    timeout,
                     next,
-                    ..
                 } => {
-                    let output = func.run(current_input).await?;
+                    let output = if let Some(d) = timeout {
+                        let sleep = tokio::time::sleep(*d);
+                        let task_future = func.run(current_input);
+                        tokio::pin!(sleep);
+                        tokio::pin!(task_future);
+                        tokio::select! {
+                            result = &mut task_future => result?,
+                            () = &mut sleep => {
+                                return Err(WorkflowError::TaskTimedOut {
+                                    task_id: id.clone(),
+                                    timeout: *d,
+                                }.into());
+                            }
+                        }
+                    } else {
+                        func.run(current_input).await?
+                    };
 
                     match next {
                         Some(next_cont) => {
@@ -553,6 +636,22 @@ fn execute_async_inner<'a>(
     })
 }
 
+/// Persist a task deadline on the snapshot if the task is uncached and has a timeout.
+async fn set_deadline_if_needed<B: PersistentBackend>(
+    id: &str,
+    timeout: Option<&std::time::Duration>,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+) -> Result<(), RuntimeError> {
+    if snapshot.get_task_result(id).is_none()
+        && let Some(d) = timeout
+    {
+        snapshot.set_task_deadline(id.to_string(), *d);
+        backend.save_snapshot(snapshot).await?;
+    }
+    Ok(())
+}
+
 /// Execute a workflow continuation with checkpointing after each task.
 ///
 /// This is the callback-based variant of `CheckpointingRunner::execute_with_checkpointing`.
@@ -589,8 +688,11 @@ where
 
     loop {
         match current {
-            WorkflowContinuation::Task { id, next, .. } => {
+            WorkflowContinuation::Task {
+                id, timeout, next, ..
+            } => {
                 check_guards(backend, &snapshot.instance_id, Some(id)).await?;
+                set_deadline_if_needed(id, timeout.as_ref(), snapshot, backend).await?;
 
                 let output =
                     execute_or_skip_task(id, current_input, |i| execute_task(id, i), snapshot)
@@ -706,19 +808,35 @@ where
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
 {
     // Load snapshot for checking cached results (populated on resume after AtFork)
-    let snapshot = backend.load_snapshot(instance_id).await?;
+    let mut snapshot = backend.load_snapshot(instance_id).await?;
 
     let mut current = continuation;
     let mut current_input = input;
 
     loop {
         match current {
-            WorkflowContinuation::Task { id, next, .. } => {
+            WorkflowContinuation::Task {
+                id, timeout, next, ..
+            } => {
                 // Skip if already cached in snapshot (resume case)
                 let output = if let Some(result) = snapshot.get_task_result(id) {
                     result.output.clone()
                 } else {
+                    // Set in-memory deadline for post-execution check
+                    if let Some(d) = timeout {
+                        snapshot.set_task_deadline(id.clone(), *d);
+                    }
                     let output = execute_task(id, current_input).await?;
+                    // Post-execution deadline check
+                    if let Some((tid, t)) = snapshot.expired_task_deadline() {
+                        let err = WorkflowError::TaskTimedOut {
+                            task_id: tid.to_string(),
+                            timeout: t,
+                        };
+                        snapshot.clear_task_deadline();
+                        return Err(err.into());
+                    }
+                    snapshot.clear_task_deadline();
                     // Checkpoint: save task result directly to backend
                     backend
                         .save_task_result(instance_id, id, output.clone())
@@ -1041,6 +1159,7 @@ mod tests {
         WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(to_core_task(f, c)),
+            timeout: None,
             next,
         }
     }
@@ -1050,6 +1169,7 @@ mod tests {
         WorkflowContinuation::Task {
             id: id.to_string(),
             func: None,
+            timeout: None,
             next,
         }
     }
@@ -1262,6 +1382,7 @@ mod tests {
         let cont = WorkflowContinuation::Task {
             id: "missing".into(),
             func: None,
+            timeout: None,
             next: None,
         };
 
@@ -1286,6 +1407,147 @@ mod tests {
         let input = encode_u32(1);
         let result = execute_continuation_async(&cont, input).await;
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Task timeout tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_async_task_completes_within_timeout() {
+        let cont = WorkflowContinuation::Task {
+            id: "fast".to_string(),
+            func: Some(to_core_task(|i: u32| async move { Ok(i + 1) }, codec())),
+            timeout: Some(std::time::Duration::from_secs(5)),
+            next: None,
+        };
+
+        let input = encode_u32(10);
+        let result = execute_continuation_async(&cont, input).await;
+        assert!(result.is_ok());
+        assert_eq!(decode_u32(&result.unwrap()), 11);
+    }
+
+    #[tokio::test]
+    async fn test_async_task_exceeds_timeout() {
+        let cont = WorkflowContinuation::Task {
+            id: "slow".to_string(),
+            func: Some(to_core_task(
+                |i: u32| async move {
+                    // Sleep just long enough to exceed the timeout
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    Ok(i + 1)
+                },
+                codec(),
+            )),
+            // Deadline shorter than the sleep — post-execution check will fail
+            timeout: Some(std::time::Duration::from_millis(5)),
+            next: None,
+        };
+
+        let input = encode_u32(10);
+        let result = execute_continuation_async(&cont, input).await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(err.to_string().contains("slow"));
+    }
+
+    #[tokio::test]
+    async fn test_async_task_no_timeout_unlimited() {
+        // Task with no timeout should complete regardless of runtime
+        let cont = WorkflowContinuation::Task {
+            id: "normal".to_string(),
+            func: Some(to_core_task(
+                |i: u32| async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    Ok(i + 1)
+                },
+                codec(),
+            )),
+            timeout: None,
+            next: None,
+        };
+
+        let input = encode_u32(42);
+        let result = execute_continuation_async(&cont, input).await;
+        assert!(result.is_ok());
+        assert_eq!(decode_u32(&result.unwrap()), 43);
+    }
+
+    #[tokio::test]
+    async fn test_checkpointing_task_timeout() {
+        let backend = InMemoryBackend::new();
+        let cont = WorkflowContinuation::Task {
+            id: "slow".to_string(),
+            func: None,
+            timeout: Some(std::time::Duration::from_millis(10)),
+            next: None,
+        };
+
+        let input = encode_u32(1);
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), input.clone());
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "slow".into(),
+        });
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let slow_task = |_id: &str, input: Bytes| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(input)
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &cont,
+            input,
+            &mut snapshot,
+            &backend,
+            &slow_task,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        assert!(err.to_string().contains("slow"));
+    }
+
+    #[tokio::test]
+    async fn test_checkpointing_skipped_tasks_bypass_timeout() {
+        let backend = InMemoryBackend::new();
+        // Task with very short timeout — but it's already cached, so timeout shouldn't matter
+        let cont = WorkflowContinuation::Task {
+            id: "cached".to_string(),
+            func: None,
+            timeout: Some(std::time::Duration::from_millis(1)),
+            next: None,
+        };
+
+        let output = encode_u32(42);
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("inst-1".into(), "hash".into(), encode_u32(1));
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "cached".into(),
+        });
+        snapshot.mark_task_completed("cached".to_string(), output.clone());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let never_called = |_id: &str, _input: Bytes| async move {
+            panic!("should not be called for cached tasks");
+            #[allow(unreachable_code)]
+            Ok(Bytes::new())
+        };
+
+        let result = execute_continuation_with_checkpointing(
+            &cont,
+            encode_u32(1),
+            &mut snapshot,
+            &backend,
+            &never_called,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(decode_u32(&result.unwrap()), 42);
     }
 
     // ========================================================================

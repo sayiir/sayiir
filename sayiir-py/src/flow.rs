@@ -44,14 +44,12 @@ pub struct PyFlowBuilder {
 enum BuilderTask {
     Sequential {
         task_id: String,
-        #[allow(dead_code)]
         metadata: TaskMetadata,
     },
     Fork {
         /// Each branch is a chain of (`task_id`, metadata) pairs.
         branches: Vec<Vec<(String, TaskMetadata)>>,
         join_id: String,
-        #[allow(dead_code)]
         join_metadata: TaskMetadata,
     },
     Delay {
@@ -157,9 +155,10 @@ impl PyFlowBuilder {
 
         for task in iter {
             current = Some(match task {
-                BuilderTask::Sequential { task_id, .. } => WorkflowContinuation::Task {
+                BuilderTask::Sequential { task_id, metadata } => WorkflowContinuation::Task {
                     id: task_id.clone(),
                     func: None,
+                    timeout: metadata.timeout,
                     next: current.map(Box::new),
                 },
                 BuilderTask::Delay {
@@ -171,7 +170,9 @@ impl PyFlowBuilder {
                     next: current.map(Box::new),
                 },
                 BuilderTask::Fork {
-                    branches, join_id, ..
+                    branches,
+                    join_id,
+                    join_metadata,
                 } => {
                     let branch_ids: Vec<&str> = branches
                         .iter()
@@ -184,10 +185,11 @@ impl PyFlowBuilder {
                         .map(|chain| -> PyResult<Arc<WorkflowContinuation>> {
                             // Build the chain in reverse to link tasks together
                             let mut branch_current: Option<WorkflowContinuation> = None;
-                            for (id, _) in chain.iter().rev() {
+                            for (id, metadata) in chain.iter().rev() {
                                 branch_current = Some(WorkflowContinuation::Task {
                                     id: id.clone(),
                                     func: None,
+                                    timeout: metadata.timeout,
                                     next: branch_current.map(Box::new),
                                 });
                             }
@@ -202,6 +204,7 @@ impl PyFlowBuilder {
                     let join_cont = WorkflowContinuation::Task {
                         id: join_id.clone(),
                         func: None,
+                        timeout: join_metadata.timeout,
                         next: current.map(Box::new),
                     };
 

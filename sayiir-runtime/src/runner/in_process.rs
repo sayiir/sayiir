@@ -13,10 +13,7 @@ use sayiir_core::workflow::{Workflow, WorkflowStatus};
 /// # Example
 ///
 /// ```rust,no_run
-/// # use sayiir_runtime::{InProcessRunner, WorkflowRunner};
-/// # use sayiir_core::workflow::WorkflowBuilder;
-/// # use sayiir_core::context::WorkflowContext;
-/// # use sayiir_runtime::serialization::RkyvCodec;
+/// # use sayiir_runtime::prelude::*;
 /// # use std::sync::Arc;
 /// # async fn example() -> Result<(), sayiir_core::error::BoxError> {
 /// let ctx = WorkflowContext::new("my-workflow", Arc::new(RkyvCodec), Arc::new(()));

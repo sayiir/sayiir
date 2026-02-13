@@ -45,25 +45,25 @@ use crate::execution::{
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use sayiir_runtime::CheckpointingRunner;
-/// use sayiir_persistence::InMemoryBackend;
-/// use sayiir_core::workflow::WorkflowBuilder;
-/// use sayiir_core::context::WorkflowContext;
-///
+/// ```rust,no_run
+/// # use sayiir_runtime::prelude::*;
+/// # use std::sync::Arc;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let backend = InMemoryBackend::new();
 /// let runner = CheckpointingRunner::new(backend);
 ///
-/// let ctx = WorkflowContext::new("my-workflow", codec, metadata);
+/// let ctx = WorkflowContext::new("my-workflow", Arc::new(JsonCodec), Arc::new(()));
 /// let workflow = WorkflowBuilder::new(ctx)
 ///     .then("step1", |i: u32| async move { Ok(i + 1) })
 ///     .build()?;
 ///
 /// // Run workflow - snapshots are saved automatically
-/// let status = runner.run(&workflow, "instance-123", 1).await?;
+/// let status = runner.run(&workflow, "instance-123", 1u32).await?;
 ///
 /// // Resume from checkpoint if needed (e.g., after crash)
 /// let status = runner.resume(&workflow, "instance-123").await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct CheckpointingRunner<B> {
     backend: Arc<B>,
@@ -366,9 +366,18 @@ where
                 WorkflowContinuation::Task {
                     id,
                     func: Some(func),
+                    timeout,
                     next,
                 } => {
                     check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+
+                    // Set deadline before execution (persisted for crash recovery)
+                    if snapshot.get_task_result(id).is_none()
+                        && let Some(d) = timeout
+                    {
+                        snapshot.set_task_deadline(id.clone(), *d);
+                        backend.save_snapshot(snapshot).await?;
+                    }
 
                     let output =
                         execute_or_skip_task(id, current_input, |i| func.run(i), snapshot).await?;
@@ -551,7 +560,7 @@ where
     /// On resume after `AtFork`, the backend snapshot contains sub-task results from
     /// the previous execution. This function loads the snapshot to skip cached tasks
     /// and parks at delays instead of sleeping through them.
-    #[allow(clippy::manual_async_fn)]
+    #[allow(clippy::manual_async_fn, clippy::too_many_lines)]
     fn execute_branch_with_checkpoint<C, M>(
         continuation: &WorkflowContinuation,
         input: Bytes,
@@ -566,14 +575,19 @@ where
     {
         async move {
             // Load snapshot for checking cached results (populated on resume after AtFork)
-            let snapshot = backend.load_snapshot(&instance_id).await?;
+            let mut snapshot = backend.load_snapshot(&instance_id).await?;
 
             let mut current = continuation;
             let mut current_input = input;
 
             loop {
                 match current {
-                    WorkflowContinuation::Task { id, func, next } => {
+                    WorkflowContinuation::Task {
+                        id,
+                        func,
+                        timeout,
+                        next,
+                    } => {
                         // Skip if already cached in snapshot (resume case)
                         let output = if let Some(result) = snapshot.get_task_result(id) {
                             result.output.clone()
@@ -581,7 +595,22 @@ where
                             let func = func
                                 .as_ref()
                                 .ok_or_else(|| WorkflowError::TaskNotImplemented(id.clone()))?;
-                            let output = func.run(current_input).await?;
+                            // Set in-memory deadline for post-execution check
+                            if let Some(d) = timeout {
+                                snapshot.set_task_deadline(id.clone(), *d);
+                            }
+                            let output =
+                                func.run(current_input).await.map_err(RuntimeError::from)?;
+                            // Post-execution deadline check
+                            if let Some((tid, t)) = snapshot.expired_task_deadline() {
+                                let err = WorkflowError::TaskTimedOut {
+                                    task_id: tid.to_string(),
+                                    timeout: t,
+                                };
+                                snapshot.clear_task_deadline();
+                                return Err(err.into());
+                            }
+                            snapshot.clear_task_deadline();
                             // Checkpoint: save task result directly to backend
                             backend
                                 .save_task_result(&instance_id, id, output.clone())
@@ -1235,6 +1264,73 @@ mod tests {
         // Wait and resume
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let status = runner.resume(&workflow, "inst-1").await.unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+    }
+
+    // ========================================================================
+    // Timeout tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_run_task_timeout_fails_workflow() {
+        use sayiir_core::task::TaskMetadata;
+
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .with_registry()
+            .then("slow_task", |i: u32| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(i)
+            })
+            .with_metadata(TaskMetadata {
+                timeout: Some(std::time::Duration::from_millis(5)),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        let status = runner
+            .run(workflow.workflow(), "inst-timeout", 5u32)
+            .await
+            .unwrap();
+        match status {
+            WorkflowStatus::Failed(msg) => {
+                assert!(
+                    msg.contains("timed out"),
+                    "Expected timeout error, got: {msg}"
+                );
+                assert!(
+                    msg.contains("slow_task"),
+                    "Expected task id in error, got: {msg}"
+                );
+            }
+            other => panic!("Expected Failed status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_task_within_timeout_succeeds() {
+        use sayiir_core::task::TaskMetadata;
+
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend);
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .with_registry()
+            .then("fast_task", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                timeout: Some(std::time::Duration::from_secs(5)),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        let status = runner
+            .run(workflow.workflow(), "inst-fast", 5u32)
+            .await
+            .unwrap();
         assert!(matches!(status, WorkflowStatus::Completed));
     }
 }
