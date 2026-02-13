@@ -10,7 +10,7 @@ use sayiir_core::task::{RetryPolicy, TaskMetadata};
 #[derive(Clone, Default)]
 pub struct PyRetryPolicy {
     #[pyo3(get, set)]
-    pub max_attempts: u32,
+    pub max_retries: u32,
     #[pyo3(get, set)]
     pub initial_delay_secs: f64,
     #[pyo3(get, set)]
@@ -20,10 +20,10 @@ pub struct PyRetryPolicy {
 #[pymethods]
 impl PyRetryPolicy {
     #[new]
-    #[pyo3(signature = (max_attempts=3, initial_delay_secs=1.0, backoff_multiplier=2.0))]
-    fn new(max_attempts: u32, initial_delay_secs: f64, backoff_multiplier: f64) -> Self {
+    #[pyo3(signature = (max_retries=2, initial_delay_secs=1.0, backoff_multiplier=2.0))]
+    fn new(max_retries: u32, initial_delay_secs: f64, backoff_multiplier: f64) -> Self {
         Self {
-            max_attempts,
+            max_retries,
             initial_delay_secs,
             backoff_multiplier,
         }
@@ -34,7 +34,7 @@ impl From<PyRetryPolicy> for RetryPolicy {
     #[allow(clippy::cast_possible_truncation)]
     fn from(py: PyRetryPolicy) -> Self {
         RetryPolicy {
-            max_attempts: py.max_attempts,
+            max_retries: py.max_retries,
             initial_delay: Duration::from_secs_f64(py.initial_delay_secs),
             backoff_multiplier: py.backoff_multiplier as f32,
         }

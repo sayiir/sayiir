@@ -470,7 +470,7 @@ impl SerializableContinuation {
                     }
                     if let Some(rp) = retry_policy {
                         hasher.update(b":r:");
-                        hasher.update(rp.max_attempts.to_string().as_bytes());
+                        hasher.update(rp.max_retries.to_string().as_bytes());
                         hasher.update(b":");
                         hasher.update(rp.initial_delay.as_millis().to_string().as_bytes());
                         hasher.update(b":");

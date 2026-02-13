@@ -239,7 +239,7 @@ pub(super) fn policy_to_backoff(
         Some(rp) => backon::ExponentialBuilder::default()
             .with_min_delay(rp.initial_delay)
             .with_factor(rp.backoff_multiplier)
-            .with_max_times(rp.max_attempts.saturating_sub(1) as usize)
+            .with_max_times(rp.max_retries as usize)
             .without_max_delay(),
         None => backon::ExponentialBuilder::default().with_max_times(0),
     }
@@ -278,7 +278,7 @@ where
                     tracing::info!(
                         task_id = %task_id,
                         attempt = snapshot.get_retry_state(task_id).map_or(0, |rs| rs.attempts),
-                        max_attempts = rp.max_attempts,
+                        max_retries = rp.max_retries,
                         %next_retry_at,
                         error = %e,
                         "Retrying task (checkpointing)"

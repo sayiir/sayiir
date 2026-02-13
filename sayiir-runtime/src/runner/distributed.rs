@@ -596,7 +596,7 @@ where
                                         tracing::info!(
                                             task_id = %id,
                                             attempt = snapshot.get_retry_state(id).map_or(0, |rs| rs.attempts),
-                                            max_attempts = rp.max_attempts,
+                                            max_retries = rp.max_retries,
                                             %next_retry_at,
                                             error = %e,
                                             "Retrying task (branch)"

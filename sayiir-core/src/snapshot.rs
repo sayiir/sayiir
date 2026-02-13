@@ -646,12 +646,12 @@ impl WorkflowSnapshot {
 
     /// Check whether retries are exhausted for a task.
     ///
-    /// Returns `true` if retry state exists and `attempts >= policy.max_attempts`.
+    /// Returns `true` if retry state exists and `attempts >= policy.max_retries`.
     #[must_use]
     pub fn retries_exhausted(&self, task_id: &str) -> bool {
         self.task_retries
             .get(task_id)
-            .is_some_and(|rs| rs.attempts >= rs.policy.max_attempts)
+            .is_some_and(|rs| rs.attempts >= rs.policy.max_retries)
     }
 
     /// Mark the workflow as completed with a final output.

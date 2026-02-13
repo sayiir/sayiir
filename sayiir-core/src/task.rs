@@ -31,8 +31,9 @@ pub struct TaskMetadata {
 /// Configuration for retrying failed task executions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetryPolicy {
-    /// Maximum number of retry attempts (excluding the initial attempt).
-    pub max_attempts: u32,
+    /// Maximum number of retries after the initial attempt.
+    #[serde(alias = "max_attempts")]
+    pub max_retries: u32,
     /// Initial delay before the first retry.
     pub initial_delay: Duration,
     /// Multiplier applied to delay after each retry (for exponential backoff).

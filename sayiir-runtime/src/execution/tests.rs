@@ -130,10 +130,10 @@ fn stub_node_with_timeout_and_retry(
     }
 }
 
-/// A fast retry policy for tests: minimal delays, configurable max attempts.
-fn fast_retry(max_attempts: u32) -> RetryPolicy {
+/// A fast retry policy for tests: minimal delays, configurable max retries.
+fn fast_retry(max_retries: u32) -> RetryPolicy {
     RetryPolicy {
-        max_attempts,
+        max_retries,
         initial_delay: std::time::Duration::from_millis(1),
         backoff_multiplier: 1.0,
     }
@@ -1540,8 +1540,8 @@ fn test_sync_retry_succeeds_after_failures() {
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
-    // max_attempts: 3 → backon max_times: 2 → 3 total calls allowed
-    let cont = stub_node_with_retry("flaky", fast_retry(3), None);
+    // max_retries: 2 → backon max_times: 2 → 3 total calls allowed
+    let cont = stub_node_with_retry("flaky", fast_retry(2), None);
     let input = encode_u32(10);
 
     let callback = move |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
@@ -1564,8 +1564,8 @@ fn test_sync_retry_exhaustion() {
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
-    // max_attempts: 2 → backon max_times: 1 → 2 total calls, then error
-    let cont = stub_node_with_retry("always_fail", fast_retry(2), None);
+    // max_retries: 1 → backon max_times: 1 → 2 total calls, then error
+    let cont = stub_node_with_retry("always_fail", fast_retry(1), None);
     let input = encode_u32(1);
 
     let callback = move |_id: &str, _input: Bytes| -> Result<Bytes, BoxError> {
@@ -1584,7 +1584,7 @@ fn test_sync_retry_no_retry_on_success() {
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
-    let cont = stub_node_with_retry("ok", fast_retry(3), None);
+    let cont = stub_node_with_retry("ok", fast_retry(2), None);
     let input = encode_u32(5);
 
     let callback = move |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
@@ -1604,7 +1604,7 @@ fn test_sync_retry_in_chain() {
     let attempts_clone = attempts.clone();
 
     let double = stub_node("double", None);
-    let flaky = stub_node_with_retry("flaky", fast_retry(3), Some(Box::new(double)));
+    let flaky = stub_node_with_retry("flaky", fast_retry(2), Some(Box::new(double)));
     let input = encode_u32(10);
 
     let callback = move |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
@@ -1651,7 +1651,7 @@ async fn test_async_retry_succeeds_after_failure() {
                 }
             }
         },
-        fast_retry(3),
+        fast_retry(2),
         None,
     );
 
@@ -1675,7 +1675,7 @@ async fn test_async_retry_exhaustion() {
                 Err::<u32, BoxError>("permanent".into())
             }
         },
-        fast_retry(2),
+        fast_retry(1),
         None,
     );
 
@@ -1683,7 +1683,7 @@ async fn test_async_retry_exhaustion() {
     let result = execute_continuation_async(&cont, input).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("permanent"));
-    // max_attempts: 2 → backon max_times: 1 → 2 total calls
+    // max_retries: 1 → backon max_times: 1 → 2 total calls
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
@@ -1701,7 +1701,7 @@ async fn test_async_retry_no_retry_on_success() {
                 Ok(i + 1)
             }
         },
-        fast_retry(5),
+        fast_retry(4),
         None,
     );
 
@@ -1730,7 +1730,7 @@ async fn test_async_retry_with_timeout_triggers_retry() {
             }
         },
         std::time::Duration::from_millis(10),
-        fast_retry(3),
+        fast_retry(2),
         None,
     );
 
@@ -1759,7 +1759,7 @@ async fn test_async_retry_in_chain() {
                 }
             }
         },
-        fast_retry(3),
+        fast_retry(2),
         Some(Box::new(double)),
     );
 
@@ -1786,7 +1786,7 @@ async fn test_checkpointing_retry_succeeds_after_failure() {
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let cont = stub_node_with_retry("flaky", fast_retry(3), None);
+    let cont = stub_node_with_retry("flaky", fast_retry(2), None);
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
@@ -1828,7 +1828,7 @@ async fn test_checkpointing_retry_exhaustion() {
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let cont = stub_node_with_retry("always_fail", fast_retry(2), None);
+    let cont = stub_node_with_retry("always_fail", fast_retry(1), None);
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
@@ -1846,8 +1846,8 @@ async fn test_checkpointing_retry_exhaustion() {
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("permanent error"));
-    // Checkpointing: initial + max_attempts retries = 1 + 2 = 3 total
-    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    // Checkpointing: initial + max_retries retries = 1 + 1 = 2 total
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1862,7 +1862,7 @@ async fn test_checkpointing_retry_state_persisted() {
     });
     backend.save_snapshot(&snapshot).await.unwrap();
 
-    let cont = stub_node_with_retry("flaky", fast_retry(5), None);
+    let cont = stub_node_with_retry("flaky", fast_retry(4), None);
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
@@ -1912,7 +1912,7 @@ async fn test_checkpointing_retry_with_timeout() {
     let cont = stub_node_with_timeout_and_retry(
         "slow_then_fast",
         std::time::Duration::from_millis(10),
-        fast_retry(3),
+        fast_retry(2),
         None,
     );
 
@@ -1949,7 +1949,7 @@ async fn test_checkpointing_retry_in_chain() {
     backend.save_snapshot(&snapshot).await.unwrap();
 
     let double = stub_node("double", None);
-    let flaky = stub_node_with_retry("flaky", fast_retry(3), Some(Box::new(double)));
+    let flaky = stub_node_with_retry("flaky", fast_retry(2), Some(Box::new(double)));
 
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
@@ -2283,7 +2283,7 @@ fn test_sync_retry_after_delay() {
     let attempts = Arc::new(AtomicU32::new(0));
     let attempts_clone = attempts.clone();
 
-    let retry_task = stub_node_with_retry("retry_task", fast_retry(3), None);
+    let retry_task = stub_node_with_retry("retry_task", fast_retry(2), None);
     let delay = WorkflowContinuation::Delay {
         id: "wait".into(),
         duration: std::time::Duration::from_millis(1),
@@ -2329,7 +2329,7 @@ async fn test_async_retry_after_delay() {
                 }
             }
         },
-        fast_retry(3),
+        fast_retry(2),
         None,
     );
 

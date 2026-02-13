@@ -365,7 +365,7 @@ status = run_durable_workflow(workflow, "job-1", "https://api.example.com")
 ```python
 from sayiir import task, Flow, RetryPolicy, run_durable_workflow
 
-@task(timeout_secs=10, retries=RetryPolicy(max_attempts=3, initial_delay_secs=1.0, backoff_multiplier=2.0))
+@task(timeout_secs=10, retries=RetryPolicy(max_retries=2, initial_delay_secs=1.0, backoff_multiplier=2.0))
 def call_api(url: str) -> dict:
     return requests.get(url).json()  # retries on failure or timeout: 1s, 2s, 4s
 
@@ -502,7 +502,7 @@ let workflow = WorkflowBuilder::new(ctx)
     .with_metadata(TaskMetadata {
         timeout: Some(Duration::from_secs(10)),
         retries: Some(RetryPolicy {
-            max_attempts: 3,
+            max_retries: 2,
             initial_delay: Duration::from_secs(1),
             backoff_multiplier: 2.0,
         }),

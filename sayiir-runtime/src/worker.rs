@@ -669,7 +669,7 @@ where
             instance_id = %available_task.instance_id,
             task_id = %available_task.task_id,
             attempt = snapshot.get_retry_state(&available_task.task_id).map_or(0, |rs| rs.attempts),
-            max_attempts = policy.max_attempts,
+            max_retries = policy.max_retries,
             %next_retry_at,
             "Scheduling retry"
         );
