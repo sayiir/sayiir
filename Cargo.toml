@@ -1,10 +1,10 @@
 [workspace]
-members = ["sayiir-core", "sayiir-persistence", "sayiir-runtime", "sayiir-macros", "sayiir-py"]
+members = ["sayiir-core", "sayiir-persistence", "sayiir-postgres", "sayiir-runtime", "sayiir-macros", "sayiir-py", "tests/integration"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-authors = ["Sayiir Contributors"]
+authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/sayiir/sayiir"
@@ -27,5 +27,7 @@ rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 bytecheck = "0.8"
 tokio = { version = "1", features = ["rt", "macros"] }
 sha2 = "0.10"
+strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 proptest = "1"
