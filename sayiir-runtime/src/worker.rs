@@ -19,15 +19,135 @@ use sayiir_core::codec::sealed;
 use sayiir_core::context::with_context;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::registry::TaskRegistry;
-use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
+use sayiir_core::snapshot::{
+    ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, WorkflowSnapshot,
+};
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use sayiir_persistence::{PersistentBackend, TaskClaimStore};
+use sayiir_persistence::{PersistentBackend, SignalStore, TaskClaimStore};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time;
+
+/// A list of workflow definitions keyed by their definition hash.
+pub type WorkflowRegistry<C, Input, M> = Vec<(String, Arc<Workflow<C, Input, M>>)>;
+
+/// Internal command sent from [`WorkerHandle`] to the actor loop.
+enum WorkerCommand {
+    Shutdown,
+}
+
+struct WorkerHandleInner<B> {
+    backend: Arc<B>,
+    shutdown_tx: mpsc::Sender<WorkerCommand>,
+    join_handle:
+        tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), crate::error::RuntimeError>>>>,
+}
+
+/// A cloneable handle for interacting with a running [`PooledWorker`].
+///
+/// Obtained from [`PooledWorker::spawn`]. The handle is cheap to clone and can
+/// be shared across tasks. Dropping **all** handles triggers a graceful
+/// shutdown of the worker (equivalent to calling [`shutdown`](Self::shutdown)).
+pub struct WorkerHandle<B> {
+    inner: Arc<WorkerHandleInner<B>>,
+}
+
+impl<B> Clone for WorkerHandle<B> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<B> WorkerHandle<B> {
+    /// Request a graceful shutdown of the worker.
+    ///
+    /// The worker will finish its current task (if any) and then exit.
+    /// This is a non-async, fire-and-forget operation — errors are ignored
+    /// (the actor may have already stopped).
+    pub fn shutdown(&self) {
+        let _ = self.inner.shutdown_tx.try_send(WorkerCommand::Shutdown);
+    }
+
+    /// Wait for the worker task to finish.
+    ///
+    /// The first caller gets the real result; subsequent callers get `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worker task panicked or returned an error.
+    pub async fn join(&self) -> Result<(), crate::error::RuntimeError> {
+        let jh = self.inner.join_handle.lock().await.take();
+        match jh {
+            Some(jh) => Ok(jh.await??),
+            None => Ok(()),
+        }
+    }
+
+    /// Get a reference to the backend.
+    #[must_use]
+    pub fn backend(&self) -> &Arc<B> {
+        &self.inner.backend
+    }
+}
+
+impl<B: SignalStore> WorkerHandle<B> {
+    /// Request cancellation of a workflow.
+    ///
+    /// This stores a cancel signal directly in the backend. The worker will
+    /// pick it up at the next guard check (task boundary).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal cannot be stored (workflow not found or in terminal state).
+    pub async fn cancel_workflow(
+        &self,
+        instance_id: &str,
+        reason: Option<String>,
+        cancelled_by: Option<String>,
+    ) -> Result<(), crate::error::RuntimeError> {
+        self.inner
+            .backend
+            .store_signal(
+                instance_id,
+                SignalKind::Cancel,
+                SignalRequest::new(reason, cancelled_by),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Request pausing of a workflow.
+    ///
+    /// This stores a pause signal directly in the backend. The worker will
+    /// pick it up at the next guard check (task boundary).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal cannot be stored (workflow not found or in terminal/paused state).
+    pub async fn pause_workflow(
+        &self,
+        instance_id: &str,
+        reason: Option<String>,
+        paused_by: Option<String>,
+    ) -> Result<(), crate::error::RuntimeError> {
+        self.inner
+            .backend
+            .store_signal(
+                instance_id,
+                SignalKind::Pause,
+                SignalRequest::new(reason, paused_by),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 /// Owns a claimed task and provides explicit release methods.
 ///
 /// No `Drop` impl — callers must explicitly call `release()` or `release_quietly()`.
@@ -49,10 +169,30 @@ impl<B: TaskClaimStore> ActiveTaskClaim<'_, B> {
 
     /// Release the claim, silently ignoring errors. Use for error/panic paths.
     async fn release_quietly(self) {
-        let _ = self
-            .backend
-            .release_task_claim(&self.instance_id, &self.task_id, &self.worker_id)
-            .await;
+        let _ = self.release().await;
+    }
+}
+
+/// Outcome of running a task through `execute_with_deadline`.
+enum ExecutionOutcome {
+    /// Task completed successfully.
+    Success(Bytes),
+    /// Task execution returned an error.
+    TaskError(crate::error::RuntimeError),
+    /// Task panicked.
+    Panic(Box<dyn std::any::Any + Send>),
+    /// Heartbeat detected an expired deadline (active cancellation).
+    Timeout(crate::error::RuntimeError),
+}
+
+/// Extract a human-readable message from a panic payload.
+fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Task panicked with unknown payload".to_string()
     }
 }
 
@@ -74,17 +214,28 @@ impl<B: TaskClaimStore> ActiveTaskClaim<'_, B> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use sayiir_runtime::worker::PooledWorker;
-/// use sayiir_persistence::InMemoryBackend;
-/// use sayiir_core::registry::TaskRegistry;
-///
+/// ```rust,no_run
+/// # use sayiir_runtime::prelude::*;
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let backend = InMemoryBackend::new();
-/// let registry = TaskRegistry::new(); // Must contain all task implementations
+/// let registry = TaskRegistry::new();
 /// let worker = PooledWorker::new("worker-1", backend, registry);
 ///
-/// // Start polling for work
-/// worker.start_polling(Duration::from_secs(1)).await?;
+/// let ctx = WorkflowContext::new("my-wf", Arc::new(JsonCodec), Arc::new(()));
+/// let workflow = WorkflowBuilder::new(ctx)
+///     .then("step1", |i: u32| async move { Ok(i + 1) })
+///     .build()?;
+/// let workflows = vec![(workflow.definition_hash().to_string(), Arc::new(workflow))];
+///
+/// // Spawn the worker and get a handle for lifecycle control
+/// let handle = worker.spawn(Duration::from_secs(1), workflows);
+/// // ... later ...
+/// handle.shutdown();
+/// handle.join().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct PooledWorker<B> {
     worker_id: String,
@@ -210,6 +361,125 @@ where
         &self.backend
     }
 
+    /// Spawn the worker as a background task and return a handle.
+    ///
+    /// Consumes `self`, creates an internal command channel, and spawns the
+    /// actor loop on the Tokio runtime. Returns a cloneable [`WorkerHandle`]
+    /// for lifecycle control — call [`WorkerHandle::shutdown`] to request
+    /// graceful shutdown and [`WorkerHandle::wait`] to await completion.
+    ///
+    /// The worker runs until:
+    /// - [`WorkerHandle::shutdown`] is called, or
+    /// - All clones of the handle are dropped, or
+    /// - A fatal backend error occurs.
+    ///
+    /// # Parameters
+    ///
+    /// - `poll_interval`: How often to poll for new tasks
+    /// - `workflows`: Map of workflow definition hash to workflow
+    #[must_use]
+    pub fn spawn<C, Input, M>(
+        self,
+        poll_interval: Duration,
+        workflows: WorkflowRegistry<C, Input, M>,
+    ) -> WorkerHandle<B>
+    where
+        Input: Send + Sync + 'static,
+        M: Send + Sync + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+    {
+        let (tx, rx) = mpsc::channel(1);
+        let backend = Arc::clone(&self.backend);
+        let join_handle =
+            tokio::spawn(async move { self.run_actor_loop(poll_interval, workflows, rx).await });
+        WorkerHandle {
+            inner: Arc::new(WorkerHandleInner {
+                backend,
+                shutdown_tx: tx,
+                join_handle: tokio::sync::Mutex::new(Some(join_handle)),
+            }),
+        }
+    }
+
+    /// The actor loop: poll for tasks, execute them, respond to shutdown.
+    ///
+    /// This is the core loop that runs inside the spawned task. It uses
+    /// `tokio::select!` with biased polling to ensure shutdown commands are
+    /// never starved by rapid task availability.
+    async fn run_actor_loop<C, Input, M>(
+        &self,
+        poll_interval: Duration,
+        workflows: WorkflowRegistry<C, Input, M>,
+        mut cmd_rx: mpsc::Receiver<WorkerCommand>,
+    ) -> Result<(), crate::error::RuntimeError>
+    where
+        Input: Send + 'static,
+        M: Send + Sync + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+    {
+        let mut interval = time::interval(poll_interval);
+
+        loop {
+            tokio::select! {
+                biased;
+
+                cmd = cmd_rx.recv() => {
+                    // None (all handles dropped) or Some(Shutdown) → exit
+                    match cmd {
+                        Some(WorkerCommand::Shutdown) | None => {
+                            tracing::info!(worker_id = %self.worker_id, "Worker shutting down");
+                            return Ok(());
+                        }
+                    }
+                }
+
+                _ = interval.tick() => {
+                    tracing::trace!(worker_id = %self.worker_id, "Will poll for available tasks");
+                }
+            }
+
+            let available_tasks = self
+                .backend
+                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .await?;
+
+            for task in available_tasks {
+                if let Ok(WorkerCommand::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) =
+                    cmd_rx.try_recv()
+                {
+                    tracing::info!(worker_id = %self.worker_id, "Worker shutting down mid-batch");
+                    return Ok(());
+                }
+
+                if let Some((_, workflow)) = workflows
+                    .iter()
+                    .find(|(hash, _)| *hash == task.workflow_definition_hash)
+                {
+                    match self.execute_task(workflow.as_ref(), task).await {
+                        Err(ref e) if e.is_timeout() => {
+                            tracing::info!(
+                                worker_id = %self.worker_id,
+                                error = %e,
+                                "Task timed out — worker shutting down"
+                            );
+                            return Ok(());
+                        }
+                        Ok(_) => {
+                            tracing::info!("Worker {} completed a task", self.worker_id);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Worker {} task execution failed: {}",
+                                self.worker_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Load cancellation status from a snapshot.
     ///
     /// Attempts to load the snapshot and extract cancellation details.
@@ -297,40 +567,116 @@ where
             "Executing task"
         );
 
-        let context = workflow.context().clone();
+        // 4. Execute with deadline + heartbeat, then settle the result
+        let execution_result = self
+            .execute_with_deadline(workflow, &available_task, &mut snapshot, &claim)
+            .await;
+
+        self.settle_execution_result(
+            execution_result,
+            workflow,
+            &available_task,
+            &mut snapshot,
+            claim,
+        )
+        .await
+    }
+
+    /// Run the task future with an optional deadline, returning the panic-wrapped result.
+    ///
+    /// Sets a deadline on the snapshot (if the task has a timeout), persists it,
+    /// then runs the future inside `run_with_heartbeat`. On heartbeat-level timeout
+    /// the task future is dropped and an `Err` is returned.
+    async fn execute_with_deadline<C, Input, M>(
+        &self,
+        workflow: &Workflow<C, Input, M>,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: &ActiveTaskClaim<'_, B>,
+    ) -> ExecutionOutcome
+    where
+        Input: Send + 'static,
+        M: Send + Sync + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+    {
         let continuation = workflow.continuation();
         let task_id = available_task.task_id.clone();
         let input = available_task.input.clone();
 
-        // 4. Execute task with panic safety and inline heartbeat
+        // Set deadline if task has a timeout configured
+        let deadline = if let Some(timeout) = continuation.get_task_timeout(&task_id) {
+            snapshot.set_task_deadline(task_id.clone(), timeout);
+            let _ = self.backend.save_snapshot(snapshot).await;
+            // Refresh deadline to now + timeout so it measures actual execution
+            // time, not time spent on the snapshot save above.
+            snapshot.refresh_task_deadline();
+            snapshot.task_deadline.clone()
+        } else {
+            None
+        };
+
+        let context = workflow.context().clone();
         let execution_future = with_context(context, || async move {
             Self::execute_task_by_id(continuation, &task_id, input).await
         });
-        let panic_result = self
-            .run_with_heartbeat(&claim, AssertUnwindSafe(execution_future).catch_unwind())
+
+        let heartbeat_result = self
+            .run_with_heartbeat(
+                claim,
+                deadline.as_ref(),
+                AssertUnwindSafe(execution_future).catch_unwind(),
+            )
             .await;
 
-        match panic_result {
-            Err(panic_payload) => {
-                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Task panicked with unknown payload".to_string()
-                };
+        snapshot.clear_task_deadline();
 
+        match heartbeat_result {
+            Err(timeout_err) => ExecutionOutcome::Timeout(timeout_err),
+            Ok(Err(panic_payload)) => ExecutionOutcome::Panic(panic_payload),
+            Ok(Ok(Err(e))) => ExecutionOutcome::TaskError(e),
+            Ok(Ok(Ok(output))) => ExecutionOutcome::Success(output),
+        }
+    }
+
+    /// Settle the outcome of task execution: persist results or errors, release claim.
+    async fn settle_execution_result<C, Input, M>(
+        &self,
+        outcome: ExecutionOutcome,
+        workflow: &Workflow<C, Input, M>,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: ActiveTaskClaim<'_, B>,
+    ) -> Result<WorkflowStatus, crate::error::RuntimeError>
+    where
+        Input: Send + 'static,
+        M: Send + Sync + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+    {
+        match outcome {
+            ExecutionOutcome::Timeout(err) => {
+                tracing::warn!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    error = %err,
+                    "Task timed out via heartbeat — marking workflow failed, shutting down"
+                );
+                snapshot.mark_failed(err.to_string());
+                let _ = self.backend.save_snapshot(snapshot).await;
+                claim.release_quietly().await;
+                Err(err)
+            }
+            ExecutionOutcome::Panic(panic_payload) => {
+                let panic_msg = extract_panic_message(&panic_payload);
                 tracing::error!(
                     instance_id = %available_task.instance_id,
                     task_id = %available_task.task_id,
                     panic = %panic_msg,
                     "Task panicked - releasing claim"
                 );
-
                 claim.release_quietly().await;
                 Err(WorkflowError::TaskPanicked(panic_msg).into())
             }
-            Ok(Err(e)) => {
+            ExecutionOutcome::TaskError(e) => {
                 tracing::error!(
                     instance_id = %available_task.instance_id,
                     task_id = %available_task.task_id,
@@ -340,19 +686,19 @@ where
                 claim.release_quietly().await;
                 Err(e)
             }
-            Ok(Ok(output)) => {
+            ExecutionOutcome::Success(output) => {
                 self.commit_task_result(
                     workflow.continuation(),
-                    &available_task,
-                    &mut snapshot,
+                    available_task,
+                    snapshot,
                     output.clone(),
                     claim,
                 )
                 .await?;
                 self.determine_post_task_status(
                     workflow.continuation(),
-                    &available_task,
-                    &mut snapshot,
+                    available_task,
+                    snapshot,
                     output,
                 )
                 .await
@@ -485,18 +831,23 @@ where
 
     /// Execute a future while periodically extending the task claim.
     ///
-    /// Uses `tokio::select!` to race execution against a heartbeat timer — no
-    /// `tokio::spawn`, no background tasks. When heartbeats are disabled
-    /// (`claim_ttl` is `None`), awaits the future directly.
-    async fn run_with_heartbeat<F, T>(&self, claim: &ActiveTaskClaim<'_, B>, future: F) -> T
+    /// If a `deadline` is provided, the heartbeat tick also checks whether the
+    /// deadline has expired. If it has, the task future is dropped (active
+    /// cancellation) and a `TaskTimedOut` error is returned.
+    async fn run_with_heartbeat<F, T>(
+        &self,
+        claim: &ActiveTaskClaim<'_, B>,
+        deadline: Option<&TaskDeadline>,
+        future: F,
+    ) -> Result<T, crate::error::RuntimeError>
     where
         F: std::future::Future<Output = T>,
     {
         let Some(ttl) = self.claim_ttl else {
-            return future.await;
+            return Ok(future.await);
         };
         let Some(chrono_ttl) = chrono::Duration::from_std(ttl).ok() else {
-            return future.await;
+            return Ok(future.await);
         };
 
         let interval_duration = ttl / 2;
@@ -507,8 +858,24 @@ where
 
         loop {
             tokio::select! {
-                result = &mut future => break result,
+                result = &mut future => break Ok(result),
                 _ = heartbeat_timer.tick() => {
+                    // Check deadline during heartbeat
+                    if let Some(dl) = deadline
+                        && chrono::Utc::now() >= dl.deadline
+                    {
+                        tracing::warn!(
+                            instance_id = %claim.instance_id,
+                            task_id = %dl.task_id,
+                            "Task deadline expired during heartbeat, cancelling"
+                        );
+                        return Err(WorkflowError::TaskTimedOut {
+                            task_id: dl.task_id.clone(),
+                            timeout: std::time::Duration::from_millis(dl.timeout_ms),
+                        }
+                        .into());
+                    }
+
                     tracing::trace!(
                         instance_id = %claim.instance_id,
                         task_id = %claim.task_id,
@@ -616,65 +983,6 @@ where
         }
     }
 
-    /// Poll for available tasks and execute them.
-    ///
-    /// This continuously polls the backend for available tasks and executes them.
-    /// Returns when an error occurs or the future is cancelled.
-    ///
-    /// # Parameters
-    ///
-    /// - `poll_interval`: How often to poll for new tasks
-    /// - `workflows`: Map of workflow definition hash to workflow (for task execution)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if polling the backend fails.
-    #[allow(clippy::type_complexity)]
-    pub async fn start_polling<C, Input, M>(
-        &self,
-        poll_interval: Duration,
-        workflows: Vec<(String, Arc<Workflow<C, Input, M>>)>,
-    ) -> Result<(), crate::error::RuntimeError>
-    where
-        Input: Send + 'static,
-        M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
-    {
-        let mut interval = time::interval(poll_interval);
-
-        loop {
-            interval.tick().await;
-
-            // Find available tasks
-            let available_tasks = self
-                .backend
-                .find_available_tasks(&self.worker_id, self.batch_size.get())
-                .await?;
-
-            for task in available_tasks {
-                // Find matching workflow
-                if let Some((_, workflow)) = workflows
-                    .iter()
-                    .find(|(hash, _)| *hash == task.workflow_definition_hash)
-                {
-                    // Execute task
-                    match self.execute_task(workflow.as_ref(), task).await {
-                        Ok(_) => {
-                            tracing::info!("Worker {} completed a task", self.worker_id);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Worker {} task execution failed: {}",
-                                self.worker_id,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Find a task function in the workflow continuation and return a reference.
     ///
     /// Note: We can't clone `UntypedCoreTask`, so we need to execute it directly
@@ -719,7 +1027,7 @@ where
 
             loop {
                 match current {
-                    WorkflowContinuation::Task { id, func, next } => {
+                    WorkflowContinuation::Task { id, func, next, .. } => {
                         if id == task_id {
                             let func = func
                                 .as_ref()
@@ -835,5 +1143,103 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serialization::JsonCodec;
+    use sayiir_core::registry::TaskRegistry;
+    use sayiir_core::snapshot::WorkflowSnapshot;
+    use sayiir_persistence::{InMemoryBackend, SignalStore, SnapshotStore};
+
+    type EmptyWorkflows = WorkflowRegistry<JsonCodec, (), ()>;
+
+    fn make_worker() -> PooledWorker<InMemoryBackend> {
+        let backend = InMemoryBackend::new();
+        let registry = TaskRegistry::new();
+        PooledWorker::new("test-worker", backend, registry)
+    }
+
+    #[tokio::test]
+    async fn test_spawn_and_shutdown() {
+        let worker = make_worker();
+        let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());
+
+        handle.shutdown();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle.join()).await;
+        assert!(result.is_ok(), "Worker should exit cleanly after shutdown");
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_is_clone_and_send() {
+        let worker = make_worker();
+        let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());
+
+        let handle2 = handle.clone();
+        let remote = tokio::spawn(async move {
+            handle2.shutdown();
+        });
+        remote.await.ok();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle.join()).await;
+        assert!(result.is_ok_and(|r| r.is_ok()));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_via_handle() {
+        let backend = InMemoryBackend::new();
+        let registry = TaskRegistry::new();
+
+        // Create a workflow snapshot so store_signal can validate it
+        let snapshot = WorkflowSnapshot::new("wf-1".to_string(), "hash-1".to_string());
+        backend.save_snapshot(&snapshot).await.ok();
+
+        let worker = PooledWorker::new("test-worker", backend, registry);
+        let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());
+
+        handle
+            .cancel_workflow(
+                "wf-1",
+                Some("test reason".to_string()),
+                Some("tester".to_string()),
+            )
+            .await
+            .ok();
+
+        // Verify the signal was stored
+        let signal = handle
+            .backend()
+            .get_signal("wf-1", SignalKind::Cancel)
+            .await;
+        assert!(signal.is_ok_and(|s| s.is_some()));
+
+        handle.shutdown();
+        tokio::time::timeout(Duration::from_secs(5), handle.join())
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn test_dropped_handle_shuts_down_worker() {
+        let worker = make_worker();
+        let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());
+
+        // Extract the join handle before dropping so we can still await completion
+        let join_handle = handle.inner.join_handle.lock().await.take().unwrap();
+        drop(handle);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), join_handle)
+            .await
+            .ok()
+            .and_then(|r| r.ok());
+        assert!(
+            result.is_some(),
+            "Worker should exit when all handles are dropped"
+        );
+        assert!(result.is_some_and(|r| r.is_ok()));
     }
 }

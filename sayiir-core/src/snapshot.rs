@@ -9,6 +9,31 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A persisted deadline for a running task.
+///
+/// When a task with a timeout starts, the absolute wall-clock deadline is
+/// computed and stored in the snapshot. On crash recovery, an expired deadline
+/// causes immediate `TaskTimedOut` without re-executing the task.
+///
+/// # Cancellation behaviour
+///
+/// When a deadline expires, the workflow is marked as `Failed`, which prevents
+/// other workers from picking up further tasks for that instance.
+///
+/// All runners use `tokio::select!` to race the task future against a sleep
+/// until the deadline. When the deadline fires first, the task future is
+/// **dropped** (active cancellation). In the distributed worker, the heartbeat
+/// loop provides an additional check during the tick interval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskDeadline {
+    /// The task this deadline applies to.
+    pub task_id: String,
+    /// Absolute wall-clock deadline.
+    pub deadline: DateTime<Utc>,
+    /// Original configured timeout in milliseconds (for error reporting).
+    pub timeout_ms: u64,
+}
+
 /// Represents the position in workflow execution.
 ///
 /// This tracks which tasks have been completed and where execution should resume.
@@ -364,6 +389,9 @@ pub struct WorkflowSnapshot {
     /// Initial input to the workflow (for resuming from start).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_input: Option<Bytes>,
+    /// Active task deadline (set when a task with a timeout starts executing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_deadline: Option<TaskDeadline>,
 }
 
 impl WorkflowSnapshot {
@@ -388,6 +416,7 @@ impl WorkflowSnapshot {
             created_at: now,
             updated_at: now,
             initial_input: None,
+            task_deadline: None,
         }
     }
 
@@ -409,6 +438,7 @@ impl WorkflowSnapshot {
             created_at: now,
             updated_at: now,
             initial_input: Some(initial_input),
+            task_deadline: None,
         }
     }
 
@@ -489,14 +519,64 @@ impl WorkflowSnapshot {
         }
     }
 
+    /// Set a task deadline from a timeout duration.
+    ///
+    /// Computes `deadline = Utc::now() + timeout` and stores it in the snapshot.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn set_task_deadline(&mut self, task_id: String, timeout: std::time::Duration) {
+        let deadline =
+            Utc::now() + chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::MAX);
+        self.task_deadline = Some(TaskDeadline {
+            task_id,
+            deadline,
+            timeout_ms: timeout.as_millis() as u64,
+        });
+    }
+
+    /// Recompute the deadline to `Utc::now() + timeout_ms`.
+    ///
+    /// Call this right before actual task execution so the deadline reflects
+    /// the true execution start, not the earlier moment when the deadline was
+    /// first persisted (which includes snapshot-save I/O overhead).
+    #[allow(clippy::cast_possible_wrap)]
+    pub fn refresh_task_deadline(&mut self) {
+        if let Some(d) = &mut self.task_deadline {
+            let timeout = chrono::Duration::milliseconds(d.timeout_ms as i64);
+            d.deadline = Utc::now() + timeout;
+        }
+    }
+
+    /// Clear the active task deadline.
+    pub fn clear_task_deadline(&mut self) {
+        self.task_deadline = None;
+    }
+
+    /// If the persisted deadline has expired, return `(task_id, timeout)`.
+    ///
+    /// Returns `None` if no deadline is set or it hasn't expired yet.
+    pub fn expired_task_deadline(&self) -> Option<(&str, std::time::Duration)> {
+        self.task_deadline.as_ref().and_then(|d| {
+            if Utc::now() >= d.deadline {
+                Some((
+                    d.task_id.as_str(),
+                    std::time::Duration::from_millis(d.timeout_ms),
+                ))
+            } else {
+                None
+            }
+        })
+    }
+
     /// Mark the workflow as completed with a final output.
     pub fn mark_completed(&mut self, final_output: Bytes) {
+        self.task_deadline = None;
         self.state = WorkflowSnapshotState::Completed { final_output };
         self.updated_at = Self::current_timestamp();
     }
 
     /// Mark the workflow as failed with an error.
     pub fn mark_failed(&mut self, error: String) {
+        self.task_deadline = None;
         self.state = WorkflowSnapshotState::Failed { error };
         self.updated_at = Self::current_timestamp();
     }
@@ -513,6 +593,7 @@ impl WorkflowSnapshot {
             last_completed_task_id,
         } = &self.state
         {
+            self.task_deadline = None;
             self.state = WorkflowSnapshotState::Paused {
                 reason: request.reason.clone(),
                 paused_by: request.requested_by.clone(),
@@ -560,6 +641,7 @@ impl WorkflowSnapshot {
             _ => HashMap::new(),
         };
 
+        self.task_deadline = None;
         self.state = WorkflowSnapshotState::Cancelled {
             reason,
             cancelled_by,

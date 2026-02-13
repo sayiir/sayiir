@@ -72,6 +72,18 @@ pub enum WorkflowError {
         /// When the delay expires.
         wake_at: chrono::DateTime<chrono::Utc>,
     },
+
+    /// Task exceeded its configured timeout duration.
+    ///
+    /// This marks the entire workflow as `Failed`. The task future is actively
+    /// dropped (cancelled mid-flight) via `tokio::select!` in all runners.
+    #[error("Task '{task_id}' timed out after {timeout:?}")]
+    TaskTimedOut {
+        /// The task that timed out.
+        task_id: String,
+        /// The configured timeout duration.
+        timeout: std::time::Duration,
+    },
 }
 
 impl WorkflowError {

@@ -29,6 +29,7 @@
 
 pub mod error;
 pub mod execution;
+pub mod prelude;
 mod runner;
 pub mod serialization;
 pub mod worker;
@@ -43,7 +44,7 @@ pub use execution::{
 pub use runner::WorkflowRunner;
 pub use runner::distributed::CheckpointingRunner;
 pub use runner::in_process::InProcessRunner;
-pub use worker::PooledWorker;
+pub use worker::{PooledWorker, WorkerHandle, WorkflowRegistry};
 
 pub use sayiir_core::sayiir_ctx;
 pub use sayiir_persistence as persistence;

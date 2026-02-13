@@ -443,8 +443,11 @@ let worker = PooledWorker::new("worker-1", backend, registry)
     .with_claim_ttl(Some(Duration::from_secs(300)))
     .with_heartbeat_interval(Some(Duration::from_secs(120)));
 
-// Start polling - tasks are automatically distributed across workers
-worker.start_polling(Duration::from_secs(1), workflows).await?;
+// Spawn the worker - tasks are automatically distributed across workers
+let handle = worker.spawn(Duration::from_secs(1), workflows);
+// ... later, shut down gracefully ...
+handle.shutdown();
+handle.join().await?;
 ```
 
 **Durable delays:**

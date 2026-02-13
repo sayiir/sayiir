@@ -51,6 +51,8 @@ pub enum WorkflowContinuation {
         /// Task implementation. `None` for registry-based execution
         /// where tasks are looked up by `id` at runtime.
         func: Option<UntypedCoreTask>,
+        /// Maximum time the task is allowed to run before being cancelled.
+        timeout: Option<std::time::Duration>,
         next: Option<Box<WorkflowContinuation>>,
     },
     Fork {
@@ -110,12 +112,78 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Set the timeout on a specific task node found by ID.
+    ///
+    /// Walks the continuation chain looking for the task with `target_id`
+    /// and updates its timeout. Fork branches are `Arc` and cannot be mutated;
+    /// join continuations are traversed.
+    pub fn set_task_timeout(&mut self, target_id: &str, timeout: Option<std::time::Duration>) {
+        match self {
+            WorkflowContinuation::Task {
+                id,
+                timeout: t,
+                next,
+                ..
+            } => {
+                if id == target_id {
+                    *t = timeout;
+                } else if let Some(next) = next {
+                    next.set_task_timeout(target_id, timeout);
+                }
+            }
+            WorkflowContinuation::Delay { next, .. } => {
+                if let Some(next) = next {
+                    next.set_task_timeout(target_id, timeout);
+                }
+            }
+            WorkflowContinuation::Fork { join, .. } => {
+                if let Some(join) = join {
+                    join.set_task_timeout(target_id, timeout);
+                }
+            }
+        }
+    }
+
+    /// Look up the timeout configured on a specific task by ID.
+    ///
+    /// Recursively traverses the continuation tree (Task → Delay → Fork branches/join)
+    /// to find the task and return its timeout. Used by the worker to look up a
+    /// timeout from the continuation when setting a deadline.
+    #[must_use]
+    pub fn get_task_timeout(&self, task_id: &str) -> Option<std::time::Duration> {
+        match self {
+            WorkflowContinuation::Task {
+                id, timeout, next, ..
+            } => {
+                if id == task_id {
+                    return *timeout;
+                }
+                next.as_ref().and_then(|n| n.get_task_timeout(task_id))
+            }
+            WorkflowContinuation::Delay { next, .. } => {
+                next.as_ref().and_then(|n| n.get_task_timeout(task_id))
+            }
+            WorkflowContinuation::Fork { branches, join, .. } => {
+                for branch in branches {
+                    if let Some(t) = branch.get_task_timeout(task_id) {
+                        return Some(t);
+                    }
+                }
+                join.as_ref().and_then(|j| j.get_task_timeout(task_id))
+            }
+        }
+    }
+
     /// Convert to a serializable representation (strips out task implementations).
     #[must_use]
     pub fn to_serializable(&self) -> SerializableContinuation {
         match self {
-            WorkflowContinuation::Task { id, next, .. } => SerializableContinuation::Task {
+            #[allow(clippy::cast_possible_truncation)] // Durations > u64::MAX ms are not realistic
+            WorkflowContinuation::Task {
+                id, timeout, next, ..
+            } => SerializableContinuation::Task {
                 id: id.clone(),
+                timeout_ms: timeout.map(|d| d.as_millis() as u64),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
             WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
@@ -153,6 +221,8 @@ impl WorkflowContinuation {
 pub enum SerializableContinuation {
     Task {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         next: Option<Box<SerializableContinuation>>,
     },
     Fork {
@@ -169,7 +239,7 @@ pub enum SerializableContinuation {
 
 impl_find_duplicate_id!(
     SerializableContinuation,
-    task_fields: {},
+    task_fields: { .. },
     delay_extra: { .. },
     deref_branch: |b: &SerializableContinuation| -> &SerializableContinuation { b }
 );
@@ -199,7 +269,11 @@ impl SerializableContinuation {
         registry: &crate::registry::TaskRegistry,
     ) -> Result<WorkflowContinuation, WorkflowError> {
         match self {
-            SerializableContinuation::Task { id, next } => {
+            SerializableContinuation::Task {
+                id,
+                timeout_ms,
+                next,
+            } => {
                 let func = registry
                     .get(id)
                     .ok_or_else(|| WorkflowError::TaskNotFound(id.clone()))?;
@@ -210,6 +284,7 @@ impl SerializableContinuation {
                 Ok(WorkflowContinuation::Task {
                     id: id.clone(),
                     func: Some(func),
+                    timeout: timeout_ms.map(std::time::Duration::from_millis),
                     next,
                 })
             }
@@ -251,7 +326,7 @@ impl SerializableContinuation {
     pub fn task_ids(&self) -> Vec<&str> {
         fn collect<'a>(cont: &'a SerializableContinuation, ids: &mut Vec<&'a str>) {
             match cont {
-                SerializableContinuation::Task { id, next }
+                SerializableContinuation::Task { id, next, .. }
                 | SerializableContinuation::Delay { id, next, .. } => {
                     ids.push(id.as_str());
                     if let Some(n) = next {
@@ -286,9 +361,17 @@ impl SerializableContinuation {
     pub fn compute_definition_hash(&self) -> String {
         fn hash_continuation(cont: &SerializableContinuation, hasher: &mut Sha256) {
             match cont {
-                SerializableContinuation::Task { id, next } => {
+                SerializableContinuation::Task {
+                    id,
+                    timeout_ms,
+                    next,
+                } => {
                     hasher.update(b"T:"); // Tag for Task
                     hasher.update(id.as_bytes());
+                    if let Some(ms) = timeout_ms {
+                        hasher.update(b":t:");
+                        hasher.update(ms.to_string().as_bytes());
+                    }
                     hasher.update(b";");
                     if let Some(n) = next {
                         hash_continuation(n, hasher);
@@ -978,8 +1061,10 @@ mod tests {
         // Manually construct a tampered continuation with duplicate IDs
         let tampered = SerializableContinuation::Task {
             id: "step1".to_string(),
+            timeout_ms: None,
             next: Some(Box::new(SerializableContinuation::Task {
                 id: "step1".to_string(), // Duplicate!
+                timeout_ms: None,
                 next: None,
             })),
         };
@@ -1245,6 +1330,106 @@ mod tests {
             _ => panic!("Expected Delay variant"),
         }
     }
+
+    // ========================================================================
+    // Timeout tests
+    // ========================================================================
+
+    #[test]
+    fn test_timeout_serialization_roundtrip() {
+        use crate::context::WorkflowContext;
+        use crate::task::TaskMetadata;
+        use crate::workflow::SerializableContinuation;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                timeout: Some(Duration::from_secs(30)),
+                ..Default::default()
+            })
+            .then("step2", |i: u32| async move { Ok(i * 2) })
+            .build()
+            .unwrap();
+
+        // Convert to serializable
+        let serializable = workflow.to_serializable();
+
+        // Check timeout is preserved in serialization
+        match &serializable.continuation {
+            SerializableContinuation::Task { id, timeout_ms, .. } => {
+                assert_eq!(id, "step1");
+                assert_eq!(*timeout_ms, Some(30_000));
+            }
+            other => panic!("Expected Task, got {other:?}"),
+        }
+
+        // Hydrate back to runnable and verify timeout
+        let hydrated = workflow.to_runnable(&serializable).unwrap();
+        match &hydrated {
+            crate::workflow::WorkflowContinuation::Task { id, timeout, .. } => {
+                assert_eq!(id, "step1");
+                assert_eq!(*timeout, Some(Duration::from_secs(30)));
+            }
+            _ => panic!("Expected Task variant"),
+        }
+    }
+
+    #[test]
+    fn test_timeout_changes_definition_hash() {
+        use crate::context::WorkflowContext;
+        use crate::task::TaskMetadata;
+        use crate::workflow::SerializableWorkflow;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Workflow without timeout
+        let ctx1 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf1: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx1)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        // Workflow with timeout (same ID, different timeout)
+        let ctx2 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                timeout: Some(Duration::from_secs(30)),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        // Hashes should differ because timeout differs
+        assert_ne!(wf1.definition_hash(), wf2.definition_hash());
+    }
+
+    #[test]
+    fn test_no_timeout_field_absent_in_serialization() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        let serializable = workflow.to_serializable();
+        // With serde skip_serializing_if, timeout_ms should not appear in JSON
+        let json = serde_json::to_string(&serializable.continuation).unwrap();
+        assert!(
+            !json.contains("timeout_ms"),
+            "timeout_ms should be absent when None: {json}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1265,19 +1450,28 @@ mod proptests {
 
     /// Recursive strategy for `SerializableContinuation` with bounded depth.
     fn arb_continuation(depth: usize) -> BoxedStrategy<SerializableContinuation> {
-        let leaf = arb_id().prop_map(|id| SerializableContinuation::Task { id, next: None });
+        let leaf = arb_id().prop_map(|id| SerializableContinuation::Task {
+            id,
+            timeout_ms: None,
+            next: None,
+        });
 
         if depth == 0 {
             return leaf.boxed();
         }
 
         prop_oneof![
-            // Task with optional next
+            // Task with optional next and optional timeout
             (
                 arb_id(),
+                prop::option::of(any::<u64>()),
                 prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
             )
-                .prop_map(|(id, next)| SerializableContinuation::Task { id, next }),
+                .prop_map(|(id, timeout_ms, next)| SerializableContinuation::Task {
+                    id,
+                    timeout_ms,
+                    next,
+                }),
             // Fork with branches and optional join
             (
                 arb_id(),
@@ -1314,7 +1508,12 @@ mod proptests {
         let id = format!("{prefix}n");
 
         if depth == 0 {
-            return Just(SerializableContinuation::Task { id, next: None }).boxed();
+            return Just(SerializableContinuation::Task {
+                id,
+                timeout_ms: None,
+                next: None,
+            })
+            .boxed();
         }
 
         let id_clone = id.clone();
@@ -1325,6 +1524,7 @@ mod proptests {
             )
             .prop_map(move |next| SerializableContinuation::Task {
                 id: id_clone.clone(),
+                timeout_ms: None,
                 next,
             }),
             // Fork with 0..3 branches (each gets unique prefix) and optional join
@@ -1383,7 +1583,7 @@ mod proptests {
         let mut ids = Vec::new();
         fn walk(c: &SerializableContinuation, out: &mut Vec<String>) {
             match c {
-                SerializableContinuation::Task { id, next } => {
+                SerializableContinuation::Task { id, next, .. } => {
                     out.push(id.clone());
                     if let Some(n) = next {
                         walk(n, out);
@@ -1413,8 +1613,11 @@ mod proptests {
     /// Inject a duplicate ID into a continuation by replacing the first node's ID.
     fn inject_duplicate(cont: &SerializableContinuation, dup_id: &str) -> SerializableContinuation {
         match cont {
-            SerializableContinuation::Task { next, .. } => SerializableContinuation::Task {
+            SerializableContinuation::Task {
+                timeout_ms, next, ..
+            } => SerializableContinuation::Task {
                 id: dup_id.to_string(),
+                timeout_ms: *timeout_ms,
                 next: next.clone(),
             },
             SerializableContinuation::Fork { branches, join, .. } => {

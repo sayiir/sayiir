@@ -89,8 +89,11 @@ let worker = PooledWorker::new("worker-1", backend, registry)
     .with_claim_ttl(Some(Duration::from_secs(5 * 60)))
     .with_heartbeat_interval(Some(Duration::from_secs(2 * 60)));
 
-// Start polling for tasks
-worker.start_polling(Duration::from_secs(1), workflows).await?;
+// Spawn the worker and get a handle for lifecycle control
+let handle = worker.spawn(Duration::from_secs(1), workflows);
+// ... later, shut down gracefully ...
+handle.shutdown();
+handle.join().await?;
 ```
 
 ---

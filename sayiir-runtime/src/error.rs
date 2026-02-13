@@ -25,3 +25,11 @@ pub enum RuntimeError {
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
 }
+
+impl RuntimeError {
+    /// Returns `true` if this error is a `TaskTimedOut` workflow error.
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Workflow(WorkflowError::TaskTimedOut { .. }))
+    }
+}
