@@ -3,7 +3,7 @@ name = "sayiir-py"
 description = "PyO3 bridge between Python and the Sayiir workflow runtime"
 version.workspace = true
 authors.workspace = true
-edition = "2021"
+edition.workspace = true
 license.workspace = true
 publish = false
 

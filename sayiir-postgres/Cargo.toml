@@ -23,10 +23,18 @@ chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[[bench]]
+name = "postgres"
+harness = false
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
 sayiir-runtime = { version = "0.1.0", path = "../sayiir-runtime", features = [
     "json",
 ] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+serde_json = { workspace = true }
+bytes = { workspace = true }
 testcontainers = "0.26"
 testcontainers-modules = { version = "0.14", features = ["postgres"] }
