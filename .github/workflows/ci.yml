@@ -156,7 +156,7 @@ jobs:
           tool: critcmp
 
       - name: Run benchmarks (PR)
-        run: cargo bench -p sayiir-postgres -- --save-baseline pr
+        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline pr
 
       - name: Checkout main branch
         uses: actions/checkout@v6
@@ -167,7 +167,7 @@ jobs:
       - name: Run benchmarks (baseline)
         id: baseline
         continue-on-error: true
-        run: cargo bench -p sayiir-postgres -- --save-baseline main
+        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline main
 
       - name: Checkout PR branch again
         uses: actions/checkout@v6
