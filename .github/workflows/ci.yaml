@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      deny: ${{ steps.filter.outputs.deny }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-macros/**'
+              - 'sayiir-py/**'
+              - 'tests/**'
+              - 'benches/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            python:
+              - 'sayiir-python/**'
+              - 'sayiir-py/**'
+            deny:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+
+  deny:
+    name: Cargo Deny
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Run cargo deny check
+        run: cargo deny check
+
+  test:
+    name: Test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run cargo test
+        run: cargo test --workspace --all-features
+
+  python-lint:
+    name: Python Lint
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run ruff check
+        run: uvx ruff check sayiir-python/
+
+      - name: Run ruff format check
+        run: uvx ruff format --check sayiir-python/
+
+      - name: Run pyright
+        run: uvx pyright --project sayiir-python/
+
+  python:
+    name: Python Binding
+    needs: [changes, python-lint]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sayiir-python
+          args: --out dist
+
+      - name: Install and test import
+        run: |
+          uv pip install --system sayiir-python/dist/*.whl
+          python -c "import sayiir; print(sayiir)"
+
+      - name: Run pytest
+        run: |
+          uv pip install --system pytest pydantic
+          pytest sayiir-python/tests/ -v
+
+  bench:
+    name: Benchmarks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@v2
+        with:
+          tool: critcmp
+
+      - name: Run benchmarks (PR)
+        run: cargo bench -p sayiir-postgres -- --save-baseline pr
+
+      - name: Checkout main branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          clean: false
+
+      - name: Run benchmarks (baseline)
+        id: baseline
+        continue-on-error: true
+        run: cargo bench -p sayiir-postgres -- --save-baseline main
+
+      - name: Checkout PR branch again
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Compare benchmarks
+        if: steps.baseline.outcome == 'success'
+        run: critcmp main pr
