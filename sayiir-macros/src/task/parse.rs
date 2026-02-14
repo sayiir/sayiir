@@ -68,7 +68,10 @@ impl ParsedTask {
 
         // Validation 2: no self parameter
         if let Some(FnArg::Receiver(r)) = item_fn.sig.inputs.first() {
-            return Err(err(r.self_token.span, "#[task] function cannot have `self`"));
+            return Err(err(
+                r.self_token.span,
+                "#[task] function cannot have `self`",
+            ));
         }
 
         // Classify parameters
@@ -115,10 +118,7 @@ impl ParsedTask {
         let output_type = extract_result_ok_type(&item_fn.sig.output, item_fn.sig.fn_token.span)?;
 
         let fn_name = item_fn.sig.ident.clone();
-        let task_id = attrs
-            .id
-            .clone()
-            .unwrap_or_else(|| fn_name.to_string());
+        let task_id = attrs.id.clone().unwrap_or_else(|| fn_name.to_string());
         let vis = item_fn.vis.clone();
 
         Ok(Self {
@@ -159,10 +159,7 @@ fn extract_ident(pat: &Pat) -> syn::Result<syn::Ident> {
 fn extract_result_ok_type(ret: &ReturnType, fn_span: Span) -> syn::Result<Box<Type>> {
     let ty = match ret {
         ReturnType::Default => {
-            return Err(err(
-                fn_span,
-                "#[task] function must return Result<T, _>",
-            ))
+            return Err(err(fn_span, "#[task] function must return Result<T, _>"));
         }
         ReturnType::Type(_, ty) => ty,
     };

@@ -36,12 +36,9 @@ impl DurationLit {
             ));
         };
 
-        let num: u64 = num_str.parse().map_err(|_| {
-            syn::Error::new(
-                span,
-                format!("invalid number in duration \"{s}\""),
-            )
-        })?;
+        let num: u64 = num_str
+            .parse()
+            .map_err(|_| syn::Error::new(span, format!("invalid number in duration \"{s}\"")))?;
 
         Ok(Self {
             millis: num * multiplier,

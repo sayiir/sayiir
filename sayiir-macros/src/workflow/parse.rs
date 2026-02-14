@@ -1,7 +1,7 @@
 use proc_macro2::Span;
 use syn::parse::{Parse, ParseStream};
 use syn::token::Paren;
-use syn::{braced, parenthesized, Expr, Ident, LitStr, Token, Type};
+use syn::{Expr, Ident, LitStr, Token, Type, braced, parenthesized};
 
 use crate::task::duration::DurationLit;
 use crate::util::{err, snake_to_pascal};
@@ -104,7 +104,9 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         // Not "delay", fall through — but we consumed the ident, so we need to handle it
         return Err(err(
             ident.span(),
-            format!("unexpected identifier `{ident}` followed by string literal; did you mean `delay`?"),
+            format!(
+                "unexpected identifier `{ident}` followed by string literal; did you mean `delay`?"
+            ),
         ));
     }
 

@@ -2,8 +2,8 @@ pub mod codegen;
 pub mod duration;
 pub mod parse;
 
-use darling::ast::NestedMeta;
 use darling::FromMeta;
+use darling::ast::NestedMeta;
 use proc_macro2::TokenStream;
 use syn::ItemFn;
 
