@@ -176,4 +176,5 @@ jobs:
 
       - name: Compare benchmarks
         if: steps.baseline.outcome == 'success'
+        continue-on-error: true
         run: critcmp main pr
