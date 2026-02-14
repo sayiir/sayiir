@@ -12,13 +12,13 @@ use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_core::workflow::WorkflowStatus;
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
-    execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
-    ResumeOutcome,
+    ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
+    prepare_run,
 };
 
-use crate::backend::{with_backend, BackendKind, PyInMemoryBackend, PyPostgresBackend};
+use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend, with_backend};
 use crate::codec::{decode_to_pyobject, encode_pyobject};
-use crate::engine::{execute_python_task, PyWorkflowStatus};
+use crate::engine::{PyWorkflowStatus, execute_python_task};
 use crate::exceptions;
 use crate::flow::PyWorkflow;
 
@@ -252,8 +252,8 @@ fn make_task_executor(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Bytes, sayiir_core::error::BoxError>> + Send>,
 > + Send
-       + Sync
-       + '_ {
++ Sync
++ '_ {
     move |task_id: &str, task_input: Bytes| {
         let reg = Arc::clone(registry);
         let task_id = task_id.to_string();

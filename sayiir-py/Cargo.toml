@@ -18,10 +18,10 @@ chrono = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 
 serde_json = { workspace = true }
-sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
-sayiir-persistence = { version = "0.1.0", path = "../sayiir-persistence" }
-sayiir-postgres = { version = "0.1.0", path = "../sayiir-postgres" }
-sayiir-runtime = { version = "0.1.0", path = "../sayiir-runtime" }
+sayiir-core = { path = "../sayiir-core" }
+sayiir-persistence = { path = "../sayiir-persistence" }
+sayiir-postgres = { path = "../sayiir-postgres" }
+sayiir-runtime = { path = "../sayiir-runtime" }
 
 [build-dependencies]
 pyo3-build-config = "0.28"
