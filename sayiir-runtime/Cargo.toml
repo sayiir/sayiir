@@ -16,9 +16,9 @@ json = []
 rkyv = ["dep:rkyv", "dep:bytecheck"]
 
 [dependencies]
-sayiir-core = { path = "../sayiir-core" }
-sayiir-persistence = { path = "../sayiir-persistence" }
-sayiir-macros = { path = "../sayiir-macros" }
+sayiir-core = { version = "0.1.0-alpha.2", path = "../sayiir-core" }
+sayiir-persistence = { version = "0.1.0-alpha.2", path = "../sayiir-persistence" }
+sayiir-macros = { version = "0.1.0-alpha.2", path = "../sayiir-macros" }
 tracing = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }

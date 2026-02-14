@@ -29,7 +29,7 @@ No DSL. No YAML. No determinism constraints. No infrastructure to deploy.
 ## Why Sayiir?
 
 - **No replay, no determinism rules** — Unlike Temporal, Restate, and other replay-based engines, Sayiir checkpoints after each task and resumes from the last checkpoint. Your tasks can call any API, use any library, read the clock, generate random values. No restrictions.
-- **A library, not a platform** — `pip install sayiir` and write workflows. No server cluster, no database requirement, no separate services.
+- **A library, not a platform** — `pip install sayiir` and write workflows. No server cluster, no separate services. Optional PostgreSQL for production persistence.
 - **Rust core** — All orchestration, checkpointing, and execution runs in Rust via PyO3. You write Python; Rust handles the hard parts.
 - **Pydantic integration** — Automatic input validation and output serialization for `BaseModel` types.
 - **Type-safe** — Full type stubs (`.pyi`) and PEP 561 `py.typed` marker. Works with mypy and pyright.
@@ -89,6 +89,32 @@ workflow = Flow("order").then(process_order).then(send_confirmation).build()
 status = run_durable_workflow(workflow, "order-123", 42)
 print(status.output)           # "Confirmed order 42"
 print(status.is_completed())   # True
+```
+
+### PostgreSQL persistence
+
+```python
+from sayiir import task, Flow, PostgresBackend, run_durable_workflow
+
+@task
+def process(x: int) -> int:
+    return x * 2
+
+workflow = Flow("persistent").then(process).build()
+
+# Auto-runs migrations on first connect
+backend = PostgresBackend("postgresql://localhost/sayiir")
+status = run_durable_workflow(workflow, "run-001", 21, backend=backend)
+```
+
+### Retry policy
+
+```python
+from sayiir import task, RetryPolicy
+
+@task(retries=RetryPolicy(max_retries=3, initial_delay_secs=0.5, backoff_multiplier=2.0))
+def flaky_call(url: str) -> dict:
+    return requests.get(url).json()
 ```
 
 ### Parallel execution (fork/join)
@@ -172,7 +198,7 @@ def process_payment(order: dict) -> dict:
 
 ### Decorators
 
-- **`@task`** — Mark a function as a workflow task. Optional params: `name`, `timeout_secs`, `tags`, `description`.
+- **`@task`** — Mark a function as a workflow task. Optional params: `name`, `timeout_secs`, `retries`, `tags`, `description`.
 
 ### Flow Builder
 
@@ -187,18 +213,27 @@ def process_payment(order: dict) -> dict:
 
 - **`run_workflow(workflow, input)`** — Execute a workflow in-memory. Returns the final output.
 - **`run_durable_workflow(workflow, instance_id, input, backend=None)`** — Execute with checkpointing. Returns a `WorkflowStatus`.
+- **`resume_workflow(workflow, instance_id, backend)`** — Resume a workflow from its last checkpoint.
+- **`cancel_workflow(instance_id, backend, reason=None, cancelled_by=None)`** — Cancel a running workflow.
+- **`pause_workflow(instance_id, backend, reason=None, paused_by=None)`** — Pause a running workflow.
+- **`unpause_workflow(instance_id, backend)`** — Unpause a paused workflow.
 
 ### WorkflowStatus
 
 - **`.output`** — The final output value (if completed).
 - **`.status`** — `"completed"`, `"failed"`, `"cancelled"`, or `"in_progress"`.
-- **`.is_completed()`** / **`.is_failed()`** / **`.is_cancelled()`** — Status checks.
+- **`.is_completed()`** / **`.is_failed()`** / **`.is_cancelled()`** / **`.is_paused()`** / **`.is_in_progress()`** — Status checks.
 - **`.error`** — Error message (if failed).
 - **`.reason`** / **`.cancelled_by`** — Cancellation details.
+
+### Retry
+
+- **`RetryPolicy(max_retries=2, initial_delay_secs=1.0, backoff_multiplier=2.0)`** — Exponential backoff retry policy for tasks.
 
 ### Backends
 
 - **`InMemoryBackend()`** — In-memory storage for development and testing (default).
+- **`PostgresBackend(url)`** — PostgreSQL persistence. Auto-runs migrations on first connect.
 
 ## Architecture
 

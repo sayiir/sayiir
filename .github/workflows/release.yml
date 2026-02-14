@@ -126,6 +126,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           cargo publish -p sayiir-core
+          cargo publish -p sayiir-macros
           cargo publish -p sayiir-persistence
           cargo publish -p sayiir-postgres
           cargo publish -p sayiir-runtime

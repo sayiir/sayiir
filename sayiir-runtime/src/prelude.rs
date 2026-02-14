@@ -22,3 +22,6 @@ pub use sayiir_core::workflow::{Workflow, WorkflowBuilder, WorkflowStatus};
 
 // Persistence (from sayiir-persistence)
 pub use sayiir_persistence::{InMemoryBackend, PersistentBackend};
+
+// Macros (from sayiir-macros)
+pub use sayiir_macros::{task, workflow};
