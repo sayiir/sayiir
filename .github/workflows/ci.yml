@@ -5,20 +5,57 @@ on:
     branches: [ main ]
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      deny: ${{ steps.filter.outputs.deny }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-macros/**'
+              - 'sayiir-py/**'
+              - 'tests/**'
+              - 'benches/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            python:
+              - 'sayiir-python/**'
+              - 'sayiir-py/**'
+            deny:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+
   deny:
     name: Cargo Deny
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
-      
+
       - name: Run cargo deny check
         run: cargo deny check
 
   test:
     name: Test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -38,6 +75,8 @@ jobs:
 
   python-lint:
     name: Python Lint
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -62,7 +101,8 @@ jobs:
 
   python:
     name: Python Binding
-    needs: python-lint
+    needs: [changes, python-lint]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -97,3 +137,44 @@ jobs:
         run: |
           uv pip install --system pytest pydantic
           pytest sayiir-python/tests/ -v
+
+  bench:
+    name: Benchmarks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@v2
+        with:
+          tool: critcmp
+
+      - name: Run benchmarks (PR)
+        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline pr
+
+      - name: Checkout main branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          clean: false
+
+      - name: Run benchmarks (baseline)
+        id: baseline
+        continue-on-error: true
+        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline main
+
+      - name: Checkout PR branch again
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Compare benchmarks
+        if: steps.baseline.outcome == 'success'
+        continue-on-error: true
+        run: critcmp main pr

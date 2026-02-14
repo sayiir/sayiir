@@ -1,9 +1,17 @@
 [workspace]
-members = ["sayiir-core", "sayiir-persistence", "sayiir-postgres", "sayiir-runtime", "sayiir-macros", "sayiir-py", "tests/integration"]
+members = [
+    "sayiir-core",
+    "sayiir-persistence",
+    "sayiir-postgres",
+    "sayiir-runtime",
+    "sayiir-macros",
+    "sayiir-py",
+    "tests/integration",
+]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"

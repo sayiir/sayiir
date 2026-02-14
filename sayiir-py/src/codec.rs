@@ -32,10 +32,10 @@ pub fn decode_to_pyobject(py: Python<'_>, bytes: &Bytes) -> PyResult<Py<PyAny>> 
     // Try branch results first: serde-JSON for NamedBranchResults is
     // [[name, [u8...]], ...] — a very specific shape that won't match
     // normal task inputs (numbers, strings, objects, flat arrays).
-    if let Ok(named) = serde_json::from_slice::<NamedBranchResults>(bytes) {
-        if !named.is_empty() {
-            return decode_branch_results_to_pydict(py, &named);
-        }
+    if let Ok(named) = serde_json::from_slice::<NamedBranchResults>(bytes)
+        && !named.is_empty()
+    {
+        return decode_branch_results_to_pydict(py, &named);
     }
 
     // Regular JSON path for normal task inputs
