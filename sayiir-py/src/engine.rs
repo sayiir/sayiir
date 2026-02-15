@@ -219,7 +219,10 @@ pub(crate) fn execute_python_task(
             let executor = thread_mod
                 .getattr(intern!(py, "ThreadPoolExecutor"))?
                 .call1((1,))?;
-            let future = executor.call_method1(intern!(py, "submit"), (asyncio.getattr(intern!(py, "run"))?, result))?;
+            let future = executor.call_method1(
+                intern!(py, "submit"),
+                (asyncio.getattr(intern!(py, "run"))?, result),
+            )?;
             let output = future.call_method0(intern!(py, "result"))?;
             executor.call_method0(intern!(py, "shutdown"))?;
             output

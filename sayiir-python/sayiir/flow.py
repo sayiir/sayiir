@@ -185,9 +185,7 @@ class Flow:
         self._task_registry: dict[str, Callable[..., Any]] = {}
         self._lambda_counter: int = 0
 
-    def then(
-        self, task_func: Callable[..., Any], *, name: str | None = None
-    ) -> "Flow":
+    def then(self, task_func: Callable[..., Any], *, name: str | None = None) -> "Flow":
         """Add a sequential task."""
         task_id, metadata, self._lambda_counter = _register_task(
             task_func,

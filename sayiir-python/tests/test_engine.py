@@ -479,12 +479,7 @@ class TestInlineTasks:
         assert run_workflow(wf, 21) == 42
 
     def test_chained_lambdas_no_collision(self):
-        wf = (
-            Flow("lambda-chain")
-            .then(lambda x: x * 2)
-            .then(lambda x: x + 1)
-            .build()
-        )
+        wf = Flow("lambda-chain").then(lambda x: x * 2).then(lambda x: x + 1).build()
         assert run_workflow(wf, 10) == 21  # (10 * 2) + 1
 
     def test_mixed_task_and_lambda(self):
