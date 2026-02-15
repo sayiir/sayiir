@@ -47,4 +47,5 @@ pub use runner::in_process::InProcessRunner;
 pub use worker::{PooledWorker, WorkerHandle, WorkflowRegistry};
 
 pub use sayiir_core::sayiir_ctx;
+pub use sayiir_macros::{task, workflow};
 pub use sayiir_persistence as persistence;

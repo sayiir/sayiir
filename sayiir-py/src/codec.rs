@@ -1,8 +1,25 @@
-//! JSON-based codec for Python objects.
+//! JSON-based codec bridging Python objects and the Rust core's `Bytes` representation.
 //!
-//! This module provides serialization and deserialization of Python objects
-//! to/from bytes using JSON as the interchange format. It also handles
-//! decoding JSON-encoded fork/join branch results into Python dicts.
+//! The Rust workflow engine operates entirely on opaque `Bytes` — it never inspects
+//! task inputs or outputs. The Python binding layer, however, must convert between
+//! native Python values and `Bytes` at two boundaries:
+//!
+//! 1. **Encode** — before handing a Python return value to the Rust engine
+//!    (e.g. task output → checkpoint store).
+//! 2. **Decode** — before passing stored `Bytes` back into a Python task
+//!    (e.g. checkpoint restore → next task input).
+//!
+//! JSON is used as the interchange format because it is universally supported
+//! by Python's stdlib (`json.dumps` / `json.loads`) and by Pydantic models,
+//! keeping the serialization path simple and debuggable.
+//!
+//! ## Fork/join branch results
+//!
+//! Fork/join branches produce a [`NamedBranchResults`] (serialized by serde as
+//! `[[name, [u8…]], …]`). If decoded naively with `json.loads`, this would yield
+//! a list-of-lists instead of the `dict[str, value]` that Python join tasks expect.
+//! [`decode_to_pyobject`] detects this shape and converts it into a Python dict
+//! where each value is individually JSON-decoded.
 
 use bytes::Bytes;
 use pyo3::intern;

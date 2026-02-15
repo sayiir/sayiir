@@ -15,8 +15,8 @@ name = "sayiir_postgres"
 path = "src/lib.rs"
 
 [dependencies]
-sayiir-core = { path = "../sayiir-core" }
-sayiir-persistence = { path = "../sayiir-persistence" }
+sayiir-core = { version = "0.1.0-alpha.2", path = "../sayiir-core" }
+sayiir-persistence = { version = "0.1.0-alpha.2", path = "../sayiir-persistence" }
 sqlx = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }

@@ -16,3 +16,5 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 testcontainers = "0.26"
 testcontainers-modules = { version = "0.14", features = ["postgres"] }
+sayiir-macros = { path = "../../sayiir-macros" }
+serde = { workspace = true }

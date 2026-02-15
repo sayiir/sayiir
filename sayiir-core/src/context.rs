@@ -1,12 +1,10 @@
-use crate::codec::Codec;
 use std::sync::Arc;
-use tokio::task_local;
 
 /// Workflow execution context that provides access to metadata and codec.
 ///
-/// This context is stored in tokio task-local storage and is accessible
-/// from within any task execution via the `sayiir_ctx!` macro.
-///
+/// This context is always available as a plain struct. When the `tokio` feature
+/// is enabled, it can also be stored in task-local storage and retrieved via
+/// the [`sayiir_ctx!`] macro.
 pub struct WorkflowContext<C, M> {
     /// The unique workflow identifier.
     pub workflow_id: Arc<str>,
@@ -52,97 +50,89 @@ impl<C, M> WorkflowContext<C, M> {
     }
 }
 
-/// Type-erased workflow context for task-local storage.
-struct ErasedContext {
-    inner: Arc<dyn std::any::Any + Send + Sync>,
-}
+// ── Task-local context storage (requires tokio) ─────────────────────────
 
-impl ErasedContext {
-    fn new<C, M>(ctx: WorkflowContext<C, M>) -> Self
-    where
-        C: Codec + 'static,
-        M: Send + Sync + 'static,
-    {
-        Self {
-            inner: Arc::new(ctx) as Arc<dyn std::any::Any + Send + Sync>,
+#[cfg(feature = "tokio")]
+mod task_local_ctx {
+    use super::{Arc, WorkflowContext};
+    use crate::codec::Codec;
+
+    /// Type-erased workflow context for task-local storage.
+    struct ErasedContext {
+        inner: Arc<dyn std::any::Any + Send + Sync>,
+    }
+
+    impl ErasedContext {
+        fn new<C, M>(ctx: WorkflowContext<C, M>) -> Self
+        where
+            C: Codec + 'static,
+            M: Send + Sync + 'static,
+        {
+            Self {
+                inner: Arc::new(ctx) as Arc<dyn std::any::Any + Send + Sync>,
+            }
+        }
+
+        fn downcast<C, M>(&self) -> Option<WorkflowContext<C, M>>
+        where
+            C: Codec + 'static,
+            M: Send + Sync + 'static,
+        {
+            self.inner
+                .clone()
+                .downcast::<WorkflowContext<C, M>>()
+                .ok()
+                .map(|arc| {
+                    WorkflowContext::new(
+                        Arc::clone(&arc.workflow_id),
+                        Arc::clone(&arc.codec),
+                        Arc::clone(&arc.metadata),
+                    )
+                })
         }
     }
 
-    fn downcast<C, M>(&self) -> Option<WorkflowContext<C, M>>
+    tokio::task_local! {
+        /// Task-local storage for workflow context.
+        static WORKFLOW_CTX: Option<ErasedContext>;
+    }
+
+    /// Set the workflow context in task-local storage and execute the future.
+    ///
+    /// This should be called by the runner before executing tasks.
+    pub async fn with_context<C, M, F, Fut>(ctx: WorkflowContext<C, M>, f: F) -> Fut::Output
+    where
+        C: Codec + 'static,
+        M: Send + Sync + 'static,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future,
+    {
+        WORKFLOW_CTX.scope(Some(ErasedContext::new(ctx)), f()).await
+    }
+
+    /// Get the workflow context from task-local storage.
+    ///
+    /// This is used internally by the `sayiir_ctx!` macro.
+    #[must_use]
+    pub fn get_context<C, M>() -> Option<WorkflowContext<C, M>>
     where
         C: Codec + 'static,
         M: Send + Sync + 'static,
     {
-        self.inner
-            .clone()
-            .downcast::<WorkflowContext<C, M>>()
+        WORKFLOW_CTX
+            .try_with(|ctx_opt| ctx_opt.as_ref()?.downcast())
             .ok()
-            .map(|arc| {
-                WorkflowContext::new(
-                    Arc::clone(&arc.workflow_id),
-                    Arc::clone(&arc.codec),
-                    Arc::clone(&arc.metadata),
-                )
-            })
+            .flatten()
     }
 }
 
-task_local! {
-    /// Task-local storage for workflow context.
-    static WORKFLOW_CTX: Option<ErasedContext>;
-}
-
-/// Set the workflow context in task-local storage and execute the future.
-///
-/// This should be called by the runner before executing tasks.
-pub async fn with_context<C, M, F, Fut>(ctx: WorkflowContext<C, M>, f: F) -> Fut::Output
-where
-    C: Codec + 'static,
-    M: Send + Sync + 'static,
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future,
-{
-    WORKFLOW_CTX.scope(Some(ErasedContext::new(ctx)), f()).await
-}
-
-/// Get the workflow context from task-local storage.
-///
-/// This is used internally by the `sayiir_ctx!` macro.
-#[must_use]
-pub fn get_context<C, M>() -> Option<WorkflowContext<C, M>>
-where
-    C: Codec + 'static,
-    M: Send + Sync + 'static,
-{
-    WORKFLOW_CTX
-        .try_with(|ctx_opt| ctx_opt.as_ref()?.downcast())
-        .ok()
-        .flatten()
-}
-
-/// Spawn a tokio task with the workflow context propagated to task-local storage.
-///
-/// This ensures [`sayiir_ctx!`] works inside spawned tasks without manual
-/// `with_context` wrapping. The context is cloned once for the task-local scope;
-/// if the spawned work also needs an owned context (e.g. for nested spawns),
-/// clone it beforehand and capture it in the closure.
-pub fn spawn_with_context<C, M, F, Fut>(
-    ctx: WorkflowContext<C, M>,
-    f: F,
-) -> tokio::task::JoinHandle<Fut::Output>
-where
-    C: Codec + 'static,
-    M: Send + Sync + 'static,
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future + Send + 'static,
-    Fut::Output: Send + 'static,
-{
-    tokio::spawn(with_context(ctx, f))
-}
+#[cfg(feature = "tokio")]
+pub use task_local_ctx::{get_context, with_context};
 
 /// Macro to access the workflow context from within a task.
 ///
-/// Returns `Option<WorkflowContext<C, M>>` - `None` if called outside of workflow execution context.
+/// Requires the `tokio` feature. Returns `Option<WorkflowContext<C, M>>` —
+/// `None` if called outside of workflow execution context.
 ///
 /// Usage:
 /// ```rust,ignore
@@ -151,6 +141,7 @@ where
 ///     let codec = ctx.codec();
 /// }
 /// ```
+#[cfg(feature = "tokio")]
 #[macro_export]
 macro_rules! sayiir_ctx {
     () => {

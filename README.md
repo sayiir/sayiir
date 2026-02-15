@@ -2,7 +2,7 @@
 
 **Durable workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
 
-[![CI](https://github.com/sayiir/sayiir/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sayiir/sayiir/actions/workflows/ci.yml)
+[![Release](https://github.com/sayiir/sayiir/actions/workflows/release.yml/badge.svg)](https://github.com/sayiir/sayiir/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition_2024-93450a.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
@@ -34,16 +34,28 @@ result = run_workflow(workflow, 42)
 ```
 
 ```rust
-let workflow = WorkflowBuilder::new(ctx)
-    .then("fetch_user", |id: UserId| async move {
-        db.get_user(id).await
-    })
-    .then("send_email", |user: User| async move {
-        email_service.send_welcome(&user).await
-    })
-    .build();
+use sayiir_runtime::prelude::*;
 
-runner.run(&workflow, "welcome-user-123", user_id).await?;
+#[task(timeout = "30s", retries = 3)]
+async fn fetch_user(id: UserId) -> Result<User, BoxError> {
+    db.get_user(id).await
+}
+
+#[task]
+async fn send_email(user: User) -> Result<(), BoxError> {
+    email_service.send_welcome(&user).await
+}
+
+// Register and compose
+let mut registry = TaskRegistry::new();
+FetchUser::register(&mut registry, codec.clone(), FetchUser::new());
+SendEmail::register(&mut registry, codec.clone(), SendEmail::new());
+
+let workflow = workflow!("welcome", JsonCodec, registry,
+    fetch_user => send_email
+).unwrap();
+
+runner.run(workflow.workflow(), "welcome-user-123", user_id).await?;
 ```
 
 No annotations. No YAML. No separate worker processes. Just code.
@@ -56,19 +68,20 @@ No annotations. No YAML. No separate worker processes. Just code.
 
 | Feature                        | Status |
 | ------------------------------ | ------ |
-| Durable task execution         | Stable |
-| Automatic checkpointing        | Stable |
-| Fork/join parallelism          | Stable |
-| Crash recovery and resume      | Stable |
-| Pause and resume workflows     | Stable |
-| Panic-safe execution           | Stable |
-| Pluggable storage backends     | Stable |
-| Durable timers/delays          | Stable |
-| Automatic retries with backoff | Stable |
-| Distributed worker pools       | Stable |
-| Claim-based task distribution  | Stable |
-| Zero-copy serialization (rkyv) | Stable |
-| PostgreSQL backend (13+)       | Stable |
+| Durable task execution         | ✅ |
+| Automatic checkpointing        | ✅ |
+| Fork/join parallelism          | ✅ |
+| Crash recovery and resume      | ✅ |
+| Pause and resume workflows     | ✅ |
+| Panic-safe execution           | ✅ |
+| Pluggable storage backends     | ✅ |
+| Durable timers/delays          | ✅ |
+| Automatic retries with backoff | ✅ |
+| Distributed worker pools       | ✅ |
+| Claim-based task distribution  | ✅ |
+| Zero-copy serialization (rkyv) | ✅ |
+| PostgreSQL backend (13+)       | ✅ |
+| Proc macros (`#[task]`, `workflow!`) | ✅ |
 
 ### Python Bindings
 
@@ -104,11 +117,12 @@ No annotations. No YAML. No separate worker processes. Just code.
 
 | Component            | Status      |
 | -------------------- | ----------- |
-| sayiir-core          | Stable      |
-| sayiir-runtime       | Stable      |
-| sayiir-persistence   | Stable      |
-| Python bindings      | Stable      |
-| PostgreSQL backend   | Stable (requires PostgreSQL 13+) |
+| sayiir-core          | ✅      |
+| sayiir-macros        | ✅      |
+| sayiir-runtime       | ✅      |
+| sayiir-persistence   | ✅      |
+| Python bindings      | ✅      |
+| PostgreSQL backend   | ✅ (requires PostgreSQL 13+) |
 | Cloudflare Workers   | In Progress |
 | Node.js bindings     | Planned     |
 | Enterprise server    | Planned     |

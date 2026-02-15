@@ -5,7 +5,117 @@ All examples assume `sayiir_runtime::prelude::*` is in scope:
 ```rust
 use sayiir_runtime::prelude::*;
 // Re-exports: WorkflowBuilder, CheckpointingRunner, PooledWorker,
-// WorkerHandle, InMemoryBackend, JsonCodec, TaskRegistry, etc.
+// WorkerHandle, InMemoryBackend, JsonCodec, TaskRegistry,
+// task (macro), workflow (macro), etc.
+```
+
+---
+
+## Define tasks with `#[task]`
+
+The `#[task]` macro transforms an async function into a reusable, registrable
+`CoreTask` struct — no boilerplate needed.
+
+```rust
+use sayiir_runtime::prelude::*;
+use sayiir_core::error::BoxError;
+use std::sync::Arc;
+
+#[task(timeout = "30s", retries = 3, backoff = "100ms")]
+async fn charge(order: Order, #[inject] stripe: Arc<Stripe>) -> Result<Receipt, BoxError> {
+    stripe.charge(&order).await
+}
+
+// Generated: struct Charge with new(stripe), task_id(), metadata(), register(), CoreTask impl
+// The original `charge` function is preserved for direct use/testing.
+```
+
+### Attribute options
+
+| Option | Example | Description |
+|--------|---------|-------------|
+| `id` | `id = "custom_name"` | Override task ID (default: fn name) |
+| `timeout` | `timeout = "30s"` | Task timeout (`ms`, `s`, `m`, `h`) |
+| `retries` | `retries = 3` | Max retry count |
+| `backoff` | `backoff = "100ms"` | Initial retry delay |
+| `backoff_multiplier` | `backoff_multiplier = 2.0` | Exponential multiplier (default: 2.0) |
+| `tags` | `tags = "io"` | Categorization tags (repeatable) |
+
+### Parameters
+
+- Exactly **one** non-`#[inject]` parameter — the task input type
+- Zero or more `#[inject]` parameters — dependency-injected struct fields
+
+---
+
+## Build workflows with `workflow!`
+
+The `workflow!` macro composes tasks into a pipeline with a concise DSL.
+
+```rust
+use sayiir_runtime::prelude::*;
+use sayiir_core::error::BoxError;
+
+#[task]
+async fn validate(order: Order) -> Result<Order, BoxError> {
+    // validation logic
+    Ok(order)
+}
+
+#[task]
+async fn charge(order: Order) -> Result<Receipt, BoxError> {
+    Ok(Receipt { id: order.id })
+}
+
+#[task]
+async fn send_email(receipt: Receipt) -> Result<(), BoxError> {
+    Ok(())
+}
+
+// Register tasks
+let codec = Arc::new(JsonCodec);
+let mut registry = TaskRegistry::new();
+Validate::register(&mut registry, codec.clone(), Validate::new());
+Charge::register(&mut registry, codec.clone(), Charge::new());
+SendEmail::register(&mut registry, codec.clone(), SendEmail::new());
+
+// Build the workflow
+let workflow = workflow!("order-process", JsonCodec, registry,
+    validate => charge => send_email
+).unwrap();
+```
+
+### Pipeline syntax
+
+| Syntax | Meaning |
+|--------|---------|
+| `task_name` | Reference to a `#[task]`-generated struct |
+| `name(param: Type) { expr }` | Inline task (no registration needed) |
+| `a \|\| b` | Parallel fork (branches) |
+| `delay "5s"` | Durable delay |
+| `=>` | Sequential chain (or join after `\|\|`) |
+
+### Fork-join example
+
+```rust
+let workflow = workflow!("process", JsonCodec, registry,
+    validate
+    => send_email || update_inventory
+    => finalize
+).unwrap();
+// Desugars to: then_registered → fork().branch_registered().branch_registered().join_registered() → ...
+```
+
+### Inline tasks
+
+Inline tasks must return `Result` — use `Ok(...)` to wrap infallible expressions,
+or `?` for fallible calls:
+
+```rust
+let workflow = workflow!("pipeline", JsonCodec, registry,
+    transform(x: u32) { Ok(x * 2) }
+    => charge
+).unwrap();
 ```
 
 ---

@@ -8,40 +8,40 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 
 ### What Works Today
 
-**Rust Core (Stable)**
+**Rust Core**
 
 | Feature | Status |
 |---|---|
-| Durable task execution with automatic checkpointing | Stable |
-| Crash recovery and deterministic resume | Stable |
-| Fork/join parallelism with heterogeneous branch outputs | Stable |
-| Distributed worker pools with claim-based task distribution | Stable |
-| Pluggable storage backends (`PersistentBackend` trait) | Stable |
-| Pluggable codecs (rkyv zero-copy, JSON, custom) | Stable |
-| Task registry for serializable workflows | Stable |
-| Workflow serialization with definition hash validation | Stable |
-| Durable delay/timer primitives (`sleep` between steps) | Stable |
-| Workflow pause and resume | Stable |
-| Panic-safe execution | Stable |
-| `WorkflowContext` with task-local metadata access | Stable |
-| InMemory backend (development/testing) | Stable |
+| Durable task execution with automatic checkpointing | ✅ |
+| Crash recovery and deterministic resume | ✅ |
+| Fork/join parallelism with heterogeneous branch outputs | ✅ |
+| Distributed worker pools with claim-based task distribution | ✅ |
+| Pluggable storage backends (`PersistentBackend` trait) | ✅ |
+| Pluggable codecs (rkyv zero-copy, JSON, custom) | ✅ |
+| Task registry for serializable workflows | ✅ |
+| Workflow serialization with definition hash validation | ✅ |
+| Durable delay/timer primitives (`sleep` between steps) | ✅ |
+| Workflow pause and resume | ✅ |
+| Panic-safe execution | ✅ |
+| `WorkflowContext` with task-local metadata access | ✅ |
+| InMemory backend (development/testing) | ✅ |
 
-**Python Bindings (Stable)**
+**Python Bindings**
 
 | Feature | Status |
 |---|---|
-| `@task` decorator with metadata (timeout, tags, description) | Done |
-| Fluent `Flow` builder API (`.then()`, `.fork()`, `.branch()`, `.join()`) | Done |
-| Simple execution (`run_workflow`) | Done |
-| Durable execution with checkpointing (`run_durable_workflow`) | Done |
-| Resume, cancel, pause and unpause from Python | Done |
-| Fork/join with multi-step branches | Done |
-| Pydantic integration (automatic validation/serialization) | Done |
-| Type stubs (`.pyi`) and PEP 561 compliance | Done |
-| Async task support (via `asyncio.run()`) | Done |
-| Durable delays (`.delay()` with `timedelta` support) | Done |
-| `InMemoryBackend` exposed to Python | Done |
-| `WorkflowStatus` with error/cancellation/pause details | Done |
+| `@task` decorator with metadata (timeout, tags, description) | ✅ |
+| Fluent `Flow` builder API (`.then()`, `.fork()`, `.branch()`, `.join()`) | ✅ |
+| Simple execution (`run_workflow`) | ✅ |
+| Durable execution with checkpointing (`run_durable_workflow`) | ✅ |
+| Resume, cancel, pause and unpause from Python | ✅ |
+| Fork/join with multi-step branches | ✅ |
+| Pydantic integration (automatic validation/serialization) | ✅ |
+| Type stubs (`.pyi`) and PEP 561 compliance | ✅ |
+| Async task support (via `asyncio.run()`) | ✅ |
+| Durable delays (`.delay()` with `timedelta` support) | ✅ |
+| `InMemoryBackend` exposed to Python | ✅ |
+| `WorkflowStatus` with error/cancellation/pause details | ✅ |
 
 ---
 
