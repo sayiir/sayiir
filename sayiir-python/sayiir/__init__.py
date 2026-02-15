@@ -19,6 +19,7 @@ from .executor import (
     resume_workflow,
     run_durable_workflow,
     run_workflow,
+    send_signal,
     unpause_workflow,
 )
 from .flow import Flow, Workflow
@@ -42,6 +43,7 @@ __all__ = [
     "resume_workflow",
     "run_durable_workflow",
     "run_workflow",
+    "send_signal",
     "unpause_workflow",
     "task",
 ]

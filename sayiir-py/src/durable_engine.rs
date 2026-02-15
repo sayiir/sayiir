@@ -244,6 +244,27 @@ impl PyDurableEngine {
         })
     }
 
+    /// Send an external signal (event) to a workflow instance.
+    ///
+    /// The payload is buffered per (`instance_id`, `signal_name`) in FIFO order.
+    /// The next time the workflow resumes and reaches the matching
+    /// `wait_for_signal` node, it will consume the oldest buffered event.
+    fn send_signal(
+        &self,
+        py: Python<'_>,
+        instance_id: String,
+        signal_name: String,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let payload_bytes = encode_pyobject(py, payload)?;
+        tracing::info!(%instance_id, %signal_name, "sending external signal");
+        with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.send_event(&instance_id, &signal_name, payload_bytes))
+                .map_err(backend_err_to_py)
+        })
+    }
+
     /// Unpause a paused workflow so it can be resumed.
     fn unpause(&self, instance_id: String) -> PyResult<()> {
         tracing::info!(%instance_id, "unpausing workflow");

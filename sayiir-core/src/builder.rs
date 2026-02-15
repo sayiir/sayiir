@@ -339,6 +339,34 @@ where
             _phantom: PhantomData,
         }
     }
+
+    /// Wait for a named external signal before continuing.
+    ///
+    /// The signal payload (if any) becomes the input to the next step.
+    /// If a timeout is specified and expires before a signal arrives,
+    /// `None` is passed as the payload.
+    #[must_use]
+    pub fn wait_for_signal(
+        self,
+        id: &str,
+        signal_name: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> WorkflowBuilder<C, Input, Output, M, WorkflowContinuation, R> {
+        let new_node = WorkflowContinuation::AwaitSignal {
+            id: id.to_string(),
+            signal_name: signal_name.to_string(),
+            timeout,
+            next: None,
+        };
+        let continuation = self.continuation.append(new_node);
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(id.to_string()),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 /// Methods for referencing pre-registered tasks (only available with `TaskRegistry`).
@@ -638,12 +666,12 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
 /// Helper function to append a task to the continuation chain.
 fn append_to_chain(continuation: &mut WorkflowContinuation, new_task: WorkflowContinuation) {
     match continuation {
-        WorkflowContinuation::Task { next, .. } | WorkflowContinuation::Delay { next, .. } => {
-            match next {
-                Some(next_box) => append_to_chain(next_box, new_task),
-                None => *next = Some(Box::new(new_task)),
-            }
-        }
+        WorkflowContinuation::Task { next, .. }
+        | WorkflowContinuation::Delay { next, .. }
+        | WorkflowContinuation::AwaitSignal { next, .. } => match next {
+            Some(next_box) => append_to_chain(next_box, new_task),
+            None => *next = Some(Box::new(new_task)),
+        },
         WorkflowContinuation::Fork { join, .. } => match join {
             Some(join_box) => append_to_chain(join_box, new_task),
             None => *join = Some(Box::new(new_task)),

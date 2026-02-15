@@ -14,7 +14,9 @@ use super::fork::{
     JoinResolution, collect_cached_branches, execute_fork_branches_sequential, resolve_join,
     settle_fork_outcome,
 };
-use super::helpers::{check_guards, execute_task_step, park_at_delay, policy_to_backoff};
+use super::helpers::{
+    check_guards, execute_task_step, park_at_delay, park_at_signal, policy_to_backoff,
+};
 
 // ── Sync ────────────────────────────────────────────────────────────────
 
@@ -98,6 +100,13 @@ where
                     }
                     None => return Ok(current_input),
                 }
+            }
+            WorkflowContinuation::AwaitSignal { id, .. } => {
+                // Sync executor cannot wait for external signals
+                return Err(WorkflowError::ResumeError(format!(
+                    "AwaitSignal '{id}' not supported in sync executor"
+                ))
+                .into());
             }
         }
     }
@@ -219,6 +228,13 @@ fn execute_async_inner<'a>(
                         None => return Ok(current_input),
                     }
                 }
+                WorkflowContinuation::AwaitSignal { id, .. } => {
+                    // Async executor (non-durable) cannot wait for external signals
+                    return Err(WorkflowError::ResumeError(format!(
+                        "AwaitSignal '{id}' not supported in non-durable async executor"
+                    ))
+                    .into());
+                }
                 WorkflowContinuation::Fork { branches, join, .. } => {
                     let branch_results = if parallel_branches && branches.len() > 1 {
                         // Multiple branches: spawn each as a tokio task for parallelism
@@ -285,6 +301,7 @@ fn execute_async_inner<'a>(
 ///
 /// # Errors
 /// Returns an error if task execution, cancellation checking, or snapshot saving fails.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_continuation_with_checkpointing<F, Fut, B>(
     continuation: &WorkflowContinuation,
     input: Bytes,
@@ -351,6 +368,53 @@ where
                     backend,
                 )
                 .await);
+            }
+            WorkflowContinuation::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                next,
+            } => {
+                check_guards(backend, &snapshot.instance_id, Some(id)).await?;
+
+                // If we already consumed this signal (on resume), skip it
+                if snapshot.get_task_result(id).is_some() {
+                    match next {
+                        Some(n) => {
+                            current = n;
+                            // Use the signal payload as input for the next step
+                            current_input =
+                                snapshot.get_task_result_bytes(id).unwrap_or(current_input);
+                            continue;
+                        }
+                        None => return Ok(current_input),
+                    }
+                }
+
+                let err = park_at_signal(
+                    id,
+                    signal_name,
+                    timeout.as_ref(),
+                    next.as_deref(),
+                    current_input.clone(),
+                    snapshot,
+                    backend,
+                )
+                .await;
+
+                // If the signal was already buffered, park_at_signal consumed it
+                // and updated the snapshot — continue execution
+                if matches!(err, RuntimeError::Workflow(WorkflowError::SignalConsumed)) {
+                    if let Some(n) = next {
+                        current = n;
+                        current_input = snapshot.get_task_result_bytes(id).unwrap_or(current_input);
+                        continue;
+                    }
+                    let output = snapshot.get_task_result_bytes(id).unwrap_or(current_input);
+                    return Ok(output);
+                }
+
+                return Err(err);
             }
             WorkflowContinuation::Fork {
                 id: fork_id,

@@ -1070,7 +1070,8 @@ where
     fn find_task_id_in_continuation(continuation: &WorkflowContinuation, task_id: &str) -> bool {
         match continuation {
             WorkflowContinuation::Task { id, next, .. }
-            | WorkflowContinuation::Delay { id, next, .. } => {
+            | WorkflowContinuation::Delay { id, next, .. }
+            | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if id == task_id {
                     return true;
                 }
@@ -1119,8 +1120,9 @@ where
                             return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
-                    WorkflowContinuation::Delay { next, .. } => {
-                        // Skip over delay nodes when searching for a task
+                    WorkflowContinuation::Delay { next, .. }
+                    | WorkflowContinuation::AwaitSignal { next, .. } => {
+                        // Skip over delay/signal nodes when searching for a task
                         if let Some(next_cont) = next {
                             current = next_cont;
                         } else {
@@ -1160,7 +1162,8 @@ where
     ) {
         match continuation {
             WorkflowContinuation::Task { id, next, .. }
-            | WorkflowContinuation::Delay { id, next, .. } => {
+            | WorkflowContinuation::Delay { id, next, .. }
+            | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
                         snapshot.update_position(ExecutionPosition::AtTask {
@@ -1201,7 +1204,8 @@ where
                     true // Last task completed
                 }
             }
-            WorkflowContinuation::Delay { id, next, .. } => {
+            WorkflowContinuation::Delay { id, next, .. }
+            | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if snapshot.get_task_result(id).is_none() {
                     return false;
                 }

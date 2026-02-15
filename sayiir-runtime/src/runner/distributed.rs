@@ -24,8 +24,8 @@ use crate::error::RuntimeError;
 use crate::execution::{
     ForkBranchOutcome, JoinResolution, ResumeParkedPosition, branch_execute_or_skip_task,
     check_guards, collect_cached_branches, execute_or_skip_task, finalize_execution,
-    get_resume_input, park_at_delay, park_branch_at_delay, resolve_join, retry_with_checkpoint,
-    set_deadline_if_needed, settle_fork_outcome,
+    get_resume_input, park_at_delay, park_at_signal, park_branch_at_delay, park_branch_at_signal,
+    resolve_join, retry_with_checkpoint, set_deadline_if_needed, settle_fork_outcome,
 };
 
 /// A single-process workflow runner with checkpointing for crash recovery.
@@ -375,6 +375,50 @@ where
                     )
                     .await);
                 }
+                WorkflowContinuation::AwaitSignal {
+                    id,
+                    signal_name,
+                    timeout,
+                    next,
+                } => {
+                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+
+                    if snapshot.get_task_result(id).is_some() {
+                        match next {
+                            Some(n) => {
+                                current = n;
+                                current_input =
+                                    snapshot.get_task_result_bytes(id).unwrap_or(current_input);
+                                continue;
+                            }
+                            None => return Ok(current_input),
+                        }
+                    }
+
+                    let err = park_at_signal(
+                        id,
+                        signal_name,
+                        timeout.as_ref(),
+                        next.as_deref(),
+                        current_input.clone(),
+                        snapshot,
+                        backend.as_ref(),
+                    )
+                    .await;
+
+                    if matches!(err, RuntimeError::Workflow(WorkflowError::SignalConsumed)) {
+                        if let Some(n) = next {
+                            current = n;
+                            current_input =
+                                snapshot.get_task_result_bytes(id).unwrap_or(current_input);
+                            continue;
+                        }
+                        let output = snapshot.get_task_result_bytes(id).unwrap_or(current_input);
+                        return Ok(output);
+                    }
+
+                    return Err(err);
+                }
                 WorkflowContinuation::Fork {
                     id: fork_id,
                     branches,
@@ -637,6 +681,35 @@ where
                         return Err(park_branch_at_delay(
                             id,
                             duration,
+                            current_input,
+                            &instance_id,
+                            backend.as_ref(),
+                        )
+                        .await);
+                    }
+                    WorkflowContinuation::AwaitSignal {
+                        id,
+                        signal_name,
+                        timeout,
+                        next,
+                    } => {
+                        // Skip if signal was already consumed (resume case)
+                        if let Some(result) = snapshot.get_task_result(id) {
+                            tracing::debug!(signal_id = %id, %signal_name, "signal already consumed in branch, skipping");
+                            match next {
+                                Some(next_cont) => {
+                                    current = next_cont;
+                                    current_input = result.output.clone();
+                                    continue;
+                                }
+                                None => return Ok(result.output.clone()),
+                            }
+                        }
+
+                        return Err(park_branch_at_signal(
+                            id,
+                            signal_name,
+                            timeout.as_ref(),
                             current_input,
                             &instance_id,
                             backend.as_ref(),

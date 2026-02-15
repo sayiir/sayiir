@@ -94,6 +94,56 @@ where
         Ok(())
     }
 
+    async fn send_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+        payload: bytes::Bytes,
+    ) -> Result<(), BackendError> {
+        tracing::debug!(instance_id, signal_name, "buffering external event");
+        sqlx::query(
+            "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(instance_id)
+        .bind(signal_name)
+        .bind(payload.as_ref())
+        .execute(&self.pool)
+        .await
+        .map_err(PgError)?;
+        Ok(())
+    }
+
+    async fn consume_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+    ) -> Result<Option<bytes::Bytes>, BackendError> {
+        tracing::debug!(instance_id, signal_name, "consuming oldest buffered event");
+        // Atomically delete-and-return the oldest event for this (instance, signal).
+        let row = sqlx::query(
+            "DELETE FROM sayiir_workflow_events
+             WHERE id = (
+                 SELECT id FROM sayiir_workflow_events
+                 WHERE instance_id = $1 AND signal_name = $2
+                 ORDER BY id ASC
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING payload",
+        )
+        .bind(instance_id)
+        .bind(signal_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(PgError)?;
+
+        Ok(row.map(|r| {
+            let raw: Vec<u8> = r.get("payload");
+            bytes::Bytes::from(raw)
+        }))
+    }
+
     // --- Overridden composites: single ACID transactions ---
 
     async fn check_and_cancel(

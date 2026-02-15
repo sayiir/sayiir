@@ -84,6 +84,15 @@ pub enum ExecutionPosition {
         /// First task ID after the delay (so backends can advance without traversing the workflow tree).
         next_task_id: Option<String>,
     },
+    /// Execution is parked waiting for an external signal.
+    AtSignal {
+        signal_id: String,
+        signal_name: String,
+        /// Optional timeout deadline. `None` means wait indefinitely.
+        wake_at: Option<DateTime<Utc>>,
+        /// First task ID after the signal (so backends can advance without traversing the workflow tree).
+        next_task_id: Option<String>,
+    },
 }
 
 /// Result of a completed task execution.

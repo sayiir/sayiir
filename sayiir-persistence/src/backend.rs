@@ -115,6 +115,26 @@ pub trait SignalStore: SnapshotStore {
         kind: SignalKind,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
+    /// Send an external event to a workflow instance.
+    ///
+    /// Events are buffered per `(instance_id, signal_name)` in FIFO order.
+    /// Sending to a nonexistent or terminal instance silently stores the event.
+    fn send_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+        payload: bytes::Bytes,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
+
+    /// Consume the oldest buffered event for the given signal name, if any.
+    ///
+    /// Returns `Some(payload)` if an event was consumed, `None` otherwise.
+    fn consume_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+    ) -> impl Future<Output = Result<Option<bytes::Bytes>, BackendError>> + Send;
+
     // --- 3 composites with default impls (overridable for atomicity) ---
 
     /// Atomically check for cancellation and transition to cancelled state.

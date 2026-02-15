@@ -251,6 +251,33 @@ class Flow:
         self._builder.delay(name, duration)
         return self
 
+    def wait_for_signal(
+        self,
+        signal_name: str,
+        *,
+        name: str | None = None,
+        timeout: "float | timedelta | None" = None,
+    ) -> "Flow":
+        """Wait for an external signal before continuing.
+
+        The workflow parks and releases the worker until the signal arrives
+        (via ``send_signal``). An optional timeout causes the workflow to
+        fail if the signal is not received in time.
+
+        Args:
+            signal_name: The named signal to wait for.
+            name: Node ID for this step. Defaults to ``signal_name``.
+            timeout: Optional timeout as seconds or timedelta.
+        """
+        signal_id = name or signal_name
+        timeout_secs: float | None = None
+        if timeout is not None:
+            timeout_secs = (
+                timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
+            )
+        self._builder.wait_for_signal(signal_id, signal_name, timeout_secs)
+        return self
+
     def fork(self) -> "ForkBuilder":
         """Start a fork for parallel execution."""
         return ForkBuilder(self)

@@ -121,6 +121,21 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 cancelled_by: None,
                 output: None,
             },
+            WorkflowStatus::AwaitingSignal {
+                signal_id,
+                signal_name,
+                wake_at,
+            } => PyWorkflowStatus {
+                status: "awaiting_signal".to_string(),
+                error: None,
+                reason: Some(if let Some(at) = wake_at {
+                    format!("Signal '{signal_name}' (node '{signal_id}') until {at}")
+                } else {
+                    format!("Signal '{signal_name}' (node '{signal_id}')")
+                }),
+                cancelled_by: None,
+                output: None,
+            },
         }
     }
 }

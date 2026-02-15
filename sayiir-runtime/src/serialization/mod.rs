@@ -1,4 +1,6 @@
+#[cfg(feature = "json")]
 mod json;
+#[cfg(feature = "rkyv")]
 mod rkyv;
 
 #[cfg(feature = "json")]

@@ -1,6 +1,6 @@
 # Sayiir
 
-**Durable workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
+**Durable, fast workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
 
 [![crates.io](https://img.shields.io/crates/v/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
 [![docs.rs](https://docs.rs/sayiir-core/badge.svg)](https://docs.rs/sayiir-core)
@@ -12,11 +12,13 @@
 [![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
 
-> **Early Stage Project** — Sayiir is under active development. Core functionality works but APIs may change. We welcome contributors, maintainers, and sponsors.
+> Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
 
 ---
 
 ## Why Sayiir?
+
+**Fast by design.** Rust-native orchestration with zero-copy serialization (rkyv) and no replay overhead — resume from the last checkpoint, not from the beginning of your workflow history.
 
 **No deterministic replay.** Sayiir checkpoints after each task and resumes from the last checkpoint — your code can call any API, use any library, with zero determinism constraints.
 
@@ -80,6 +82,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 | Panic-safe execution           | ✅ |
 | Pluggable storage backends     | ✅ |
 | Durable timers/delays          | ✅ |
+| Signals / external events      | ✅ |
 | Automatic retries with backoff | ✅ |
 | Distributed worker pools       | ✅ |
 | Claim-based task distribution  | ✅ |
@@ -97,6 +100,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 | Resume, cancel, pause and unpause | Done |
 | Fork/join with multi-step branches | Done |
 | Durable delays (`.delay()`) | Done |
+| Signals / external events (`.wait_for_signal()`, `send_signal()`) | Done |
 | Pydantic integration (automatic validation) | Done |
 | Type stubs and PEP 561 compliance | Done |
 | Async task support | Done |

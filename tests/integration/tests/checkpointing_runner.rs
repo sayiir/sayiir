@@ -5,7 +5,7 @@ use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::BoxError;
 use sayiir_core::task::BranchOutputs;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
-use sayiir_persistence::SnapshotStore;
+use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::CheckpointingRunner;
 use sayiir_runtime::serialization::JsonCodec;
@@ -457,6 +457,100 @@ async fn multi_stage_scatter_gather() {
         result, 345_693,
         "Pipeline produced {result}, expected 345693"
     );
+}
+
+// ─── 12. signal_parks_then_resumes_with_payload ──────────────────────────────
+//
+// step1 → wait_for_signal("approval") → step2
+// Run parks at signal. Send event. Resume picks up event payload.
+
+#[tokio::test]
+async fn signal_parks_then_resumes_with_payload() {
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("step1", |i: u32| async move { Ok(i + 1) })
+        .wait_for_signal("sig_approval", "approval", None)
+        .then("step2", |i: u32| async move { Ok(i * 10) })
+        .build()
+        .unwrap();
+
+    // Run — step1 completes, parks at signal
+    let status = runner.run(&workflow, "inst-sig-1", 5u32).await.unwrap();
+    match &status {
+        WorkflowStatus::AwaitingSignal { signal_name, .. } => {
+            assert_eq!(signal_name, "approval");
+        }
+        other => panic!("Expected AwaitingSignal, got {other:?}"),
+    }
+
+    // Verify step1 completed
+    let snapshot = runner.backend().load_snapshot("inst-sig-1").await.unwrap();
+    assert!(snapshot.get_task_result("step1").is_some());
+
+    // Send the signal with a payload
+    let payload = Arc::new(JsonCodec).encode(&42u32).unwrap();
+    runner
+        .backend()
+        .send_event("inst-sig-1", "approval", payload)
+        .await
+        .unwrap();
+
+    // Resume — signal consumed, step2 runs with signal payload
+    let status = runner.resume(&workflow, "inst-sig-1").await.unwrap();
+    assert!(
+        matches!(status, WorkflowStatus::Completed),
+        "Expected Completed after signal resume, got {status:?}"
+    );
+
+    let snapshot = runner.backend().load_snapshot("inst-sig-1").await.unwrap();
+    assert!(snapshot.state.is_completed());
+
+    // Final output: signal payload 42 → step2(42*10) = 420
+    let output = snapshot.final_output_bytes().unwrap();
+    let result: u32 = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result, 420, "Expected 420, got {result}");
+}
+
+// ─── 13. signal_buffered_before_park ─────────────────────────────────────────
+//
+// Send the signal BEFORE the workflow reaches the wait_for_signal node.
+// The executor should consume it immediately without parking.
+
+#[tokio::test]
+async fn signal_buffered_before_park() {
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .wait_for_signal("sig_early", "early_signal", None)
+        .then("step1", |i: u32| async move { Ok(i + 100) })
+        .build()
+        .unwrap();
+
+    // Buffer the signal before running
+    let payload = Arc::new(JsonCodec).encode(&7u32).unwrap();
+    runner
+        .backend()
+        .send_event("inst-sig-2", "early_signal", payload)
+        .await
+        .unwrap();
+
+    // Run — signal already buffered, should consume immediately and continue
+    let status = runner.run(&workflow, "inst-sig-2", 0u32).await.unwrap();
+    assert!(
+        matches!(status, WorkflowStatus::Completed),
+        "Expected Completed (buffered signal), got {status:?}"
+    );
+
+    let snapshot = runner.backend().load_snapshot("inst-sig-2").await.unwrap();
+    assert!(snapshot.state.is_completed());
+
+    // Output: signal payload 7 → step1(7+100) = 107
+    let output = snapshot.final_output_bytes().unwrap();
+    let result: u32 = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result, 107, "Expected 107, got {result}");
 }
 
 // ─── 10. definition_hash_mismatch_on_resume ──────────────────────────────────

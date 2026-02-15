@@ -3,11 +3,10 @@
 ## Installation
 
 ```bash
-cd sayiir-python
-uv venv && source .venv/bin/activate
-maturin develop
-pip install -e ".[dev]"
+pip install sayiir
 ```
+
+For development from source, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ---
 
@@ -150,6 +149,50 @@ workflow = (
 )
 result = run_workflow(workflow, {"order_id": 1})
 ```
+
+---
+
+## Signals (wait for external events)
+
+Pause a workflow until an external event arrives — payment confirmed, human
+approved, webhook received. The worker is released while waiting.
+
+```python
+from datetime import timedelta
+from sayiir import task, Flow, run_durable_workflow, send_signal, InMemoryBackend
+
+@task
+def create_order(order_id: int) -> dict:
+    return {"order_id": order_id, "status": "pending"}
+
+@task
+def fulfill(approval: dict) -> str:
+    return f"Fulfilled order (approved by {approval.get('by', 'unknown')})"
+
+workflow = (
+    Flow("approval")
+    .then(create_order)
+    .wait_for_signal("manager_approval", timeout=timedelta(hours=24))
+    .then(fulfill)
+    .build()
+)
+
+backend = InMemoryBackend()
+
+# First run — parks at the signal and returns AwaitingSignal status
+status = run_durable_workflow(workflow, "order-42", 42, backend=backend)
+
+# Later — an external system sends the signal
+send_signal("order-42", "manager_approval", {"by": "alice"}, backend=backend)
+
+# Resume — picks up the signal payload and continues
+from sayiir import resume_workflow
+status = resume_workflow(workflow, "order-42", backend=backend)
+```
+
+Signals are durably buffered: if `send_signal` is called before the workflow
+reaches `wait_for_signal`, the signal is consumed immediately on arrival — no
+race conditions.
 
 ---
 
