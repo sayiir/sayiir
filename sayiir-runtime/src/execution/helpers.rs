@@ -42,6 +42,66 @@ pub(crate) async fn park_at_delay<B: SnapshotStore>(
     WorkflowError::Waiting { wake_at }.into()
 }
 
+/// Park a workflow waiting for an external signal.
+///
+/// Updates the snapshot position to `AtSignal`, saves, and returns
+/// `WorkflowError::AwaitingSignal`.
+pub(crate) async fn park_at_signal<B: SignalStore>(
+    id: &str,
+    signal_name: &str,
+    timeout: Option<&std::time::Duration>,
+    next: Option<&WorkflowContinuation>,
+    current_input: Bytes,
+    snapshot: &mut WorkflowSnapshot,
+    backend: &B,
+) -> RuntimeError {
+    // Check for an already-buffered signal before parking
+    match backend
+        .consume_event(&snapshot.instance_id, signal_name)
+        .await
+    {
+        Ok(Some(payload)) => {
+            // Signal was already buffered — don't park, advance immediately
+            snapshot.mark_task_completed(id.to_string(), payload);
+            if let Some(next_cont) = next {
+                snapshot.update_position(ExecutionPosition::AtTask {
+                    task_id: next_cont.first_task_id().to_string(),
+                });
+            }
+            if let Err(e) = backend.save_snapshot(snapshot).await {
+                return RuntimeError::from(e);
+            }
+            // Return a special "signal consumed" error that the caller will handle
+            return WorkflowError::SignalConsumed.into();
+        }
+        Ok(None) => {} // No buffered signal, proceed to park
+        Err(e) => return RuntimeError::from(e),
+    }
+
+    let wake_at = timeout.and_then(|d| {
+        chrono::Duration::from_std(*d)
+            .ok()
+            .map(|cd| chrono::Utc::now() + cd)
+    });
+    let next_task_id = next.map(|n| n.first_task_id().to_string());
+    snapshot.update_position(ExecutionPosition::AtSignal {
+        signal_id: id.to_string(),
+        signal_name: signal_name.to_string(),
+        wake_at,
+        next_task_id,
+    });
+    snapshot.mark_task_completed(id.to_string(), current_input);
+    if let Err(e) = backend.save_snapshot(snapshot).await {
+        return RuntimeError::from(e);
+    }
+    WorkflowError::AwaitingSignal {
+        signal_id: id.to_string(),
+        signal_name: signal_name.to_string(),
+        wake_at,
+    }
+    .into()
+}
+
 /// Check for cancellation and pause before or after a task boundary.
 ///
 /// Combines the cancel + pause check into a single call. Returns `Ok(())` if
@@ -140,6 +200,13 @@ pub(crate) enum ResumeParkedPosition {
         wake_at: chrono::DateTime<chrono::Utc>,
         fork_id: String,
     },
+    /// Workflow was parked waiting for an external signal.
+    Signal {
+        signal_id: String,
+        signal_name: String,
+        wake_at: Option<chrono::DateTime<chrono::Utc>>,
+        next_task_id: Option<String>,
+    },
     /// Snapshot is not in a parked position.
     NotParked,
 }
@@ -171,6 +238,21 @@ impl ResumeParkedPosition {
             } => Self::Fork {
                 wake_at: *wake_at,
                 fork_id: fork_id.clone(),
+            },
+            WorkflowSnapshotState::InProgress {
+                position:
+                    ExecutionPosition::AtSignal {
+                        signal_id,
+                        signal_name,
+                        wake_at,
+                        next_task_id,
+                    },
+                ..
+            } => Self::Signal {
+                signal_id: signal_id.clone(),
+                signal_name: signal_name.clone(),
+                wake_at: *wake_at,
+                next_task_id: next_task_id.clone(),
             },
             _ => Self::NotParked,
         }
@@ -222,6 +304,74 @@ impl ResumeParkedPosition {
                 }
                 tracing::info!(instance_id, %fork_id, "fork delays expired, resuming execution");
                 Ok(None)
+            }
+            Self::Signal {
+                signal_id,
+                signal_name,
+                wake_at,
+                next_task_id,
+            } => {
+                // Check cancel/pause first
+                if backend
+                    .check_and_cancel(instance_id, Some(&signal_id))
+                    .await?
+                {
+                    let snap = backend.load_snapshot(instance_id).await?;
+                    let (reason, cancelled_by) =
+                        snap.state.cancellation_details().unwrap_or((None, None));
+                    return Ok(Some(WorkflowStatus::Cancelled {
+                        reason,
+                        cancelled_by,
+                    }));
+                }
+                if backend.check_and_pause(instance_id).await? {
+                    let snap = backend.load_snapshot(instance_id).await?;
+                    let (reason, paused_by) = snap.state.pause_details().unwrap_or((None, None));
+                    return Ok(Some(WorkflowStatus::Paused { reason, paused_by }));
+                }
+
+                // Try to consume a buffered signal
+                if let Some(payload) = backend.consume_event(instance_id, &signal_name).await? {
+                    tracing::info!(instance_id, %signal_id, %signal_name, "signal received, advancing");
+                    // Store under signal_id (node ID) so the executor's skip logic finds it
+                    snapshot.mark_task_completed(signal_id.clone(), payload);
+                    if let Some(next_id) = next_task_id {
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
+                    } else {
+                        let output = snapshot
+                            .get_task_result_bytes(&signal_id)
+                            .unwrap_or_default();
+                        snapshot.mark_completed(output);
+                        backend.save_snapshot(snapshot).await?;
+                        return Ok(Some(WorkflowStatus::Completed));
+                    }
+                    backend.save_snapshot(snapshot).await?;
+                    return Ok(None);
+                }
+
+                // Check timeout
+                if let Some(wt) = wake_at
+                    && chrono::Utc::now() >= wt
+                {
+                    tracing::info!(instance_id, %signal_id, %signal_name, "signal timed out, advancing with empty payload");
+                    snapshot.mark_task_completed(signal_id, Bytes::new());
+                    if let Some(next_id) = next_task_id {
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
+                    } else {
+                        snapshot.mark_completed(Bytes::new());
+                        backend.save_snapshot(snapshot).await?;
+                        return Ok(Some(WorkflowStatus::Completed));
+                    }
+                    backend.save_snapshot(snapshot).await?;
+                    return Ok(None);
+                }
+
+                // Still waiting
+                Ok(Some(WorkflowStatus::AwaitingSignal {
+                    signal_id,
+                    signal_name,
+                    wake_at,
+                }))
             }
         }
     }

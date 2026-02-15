@@ -56,6 +56,11 @@ enum BuilderTask {
         delay_id: String,
         duration_secs: f64,
     },
+    AwaitSignal {
+        signal_id: String,
+        signal_name: String,
+        timeout_secs: Option<f64>,
+    },
 }
 
 #[pymethods]
@@ -76,6 +81,29 @@ impl PyFlowBuilder {
             task_id,
             metadata: metadata.map(Into::into).unwrap_or_default(),
         });
+    }
+
+    /// Wait for an external signal before continuing.
+    #[pyo3(signature = (signal_id, signal_name, timeout_secs=None))]
+    fn wait_for_signal(
+        &mut self,
+        signal_id: String,
+        signal_name: String,
+        timeout_secs: Option<f64>,
+    ) -> PyResult<()> {
+        if let Some(t) = timeout_secs
+            && (!t.is_finite() || t < 0.0)
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "timeout must be a finite non-negative number",
+            ));
+        }
+        self.tasks.push(BuilderTask::AwaitSignal {
+            signal_id,
+            signal_name,
+            timeout_secs,
+        });
+        Ok(())
     }
 
     /// Add a durable delay.
@@ -186,6 +214,16 @@ impl PyFlowBuilder {
                 } => WorkflowContinuation::Delay {
                     id: delay_id.clone(),
                     duration: std::time::Duration::from_secs_f64(*duration_secs),
+                    next: current.map(Box::new),
+                },
+                BuilderTask::AwaitSignal {
+                    signal_id,
+                    signal_name,
+                    timeout_secs,
+                } => WorkflowContinuation::AwaitSignal {
+                    id: signal_id.clone(),
+                    signal_name: signal_name.clone(),
+                    timeout: timeout_secs.map(std::time::Duration::from_secs_f64),
                     next: current.map(Box::new),
                 },
                 BuilderTask::Fork {

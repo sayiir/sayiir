@@ -1,5 +1,17 @@
 # Quick Start: Rust
 
+## Installation
+
+```toml
+# Cargo.toml
+[dependencies]
+sayiir-runtime = "0.1"       # core runtime + runners + macros
+
+# Optional — pick your backend
+sayiir-persistence = "0.1"   # InMemoryBackend (dev/testing)
+sayiir-postgres = "0.1"      # PostgreSQL backend (production)
+```
+
 All examples assume `sayiir_runtime::prelude::*` is in scope:
 
 ```rust
@@ -319,6 +331,38 @@ let workflow = WorkflowBuilder::new(ctx)
 ```
 
 Retries use exponential backoff (`delay = initial_delay * multiplier^attempt`). The retry count and next-retry time are persisted in the snapshot, so retries survive crashes. Timeouts also trigger retries — a timed-out task is retried the same as a failed one.
+
+---
+
+## Signals (wait for external events)
+
+Pause a workflow until an external event arrives. The worker is released while
+waiting — no resources held.
+
+```rust
+let workflow = WorkflowBuilder::new(ctx)
+    .then("create_order", |id: u64| async move {
+        Ok(json!({ "order_id": id, "status": "pending" }))
+    })
+    .wait_for_signal("approval_wait", "manager_approval", Some(Duration::from_secs(86400)))
+    .then("fulfill", |approval: serde_json::Value| async move {
+        Ok(format!("Fulfilled (approved by {})", approval["by"]))
+    })
+    .build();
+
+// Run — parks at the signal node
+let status = runner.run(&workflow, "order-42", 42u64).await?;
+
+// External system sends the signal
+backend.send_event("order-42", "manager_approval", payload).await?;
+
+// Resume — consumes the signal and continues
+let status = runner.resume(&workflow, "order-42").await?;
+```
+
+Signals are durably buffered: if `send_event` is called before the workflow
+reaches `wait_for_signal`, the signal is consumed immediately — no race
+conditions.
 
 ---
 

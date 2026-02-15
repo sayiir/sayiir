@@ -29,7 +29,7 @@
 
 ### Workflow Definition vs Workflow Instance
 
-A **workflow definition** is the blueprint — the chain of tasks, forks, delays, and retries you build with `Flow` or `WorkflowBuilder`. It has a **definition hash** (auto-computed from its structure) that uniquely identifies the shape of the workflow.
+A **workflow definition** is the blueprint — the chain of tasks, forks, delays, signals, and retries you build with `Flow` or `WorkflowBuilder`. It has a **definition hash** (auto-computed from its structure) that uniquely identifies the shape of the workflow.
 
 A **workflow instance** is a single execution of that definition. When you call `engine.run(workflow, "order-123", ...)`, `"order-123"` is the **instance ID** — a user-provided string that uniquely identifies this run. The same definition can have thousands of concurrent instances, each with its own instance ID and independent state.
 
@@ -44,7 +44,7 @@ The `instance_id` is the primary key for all persistence — snapshots, signals,
 
 ### What is a Run?
 
-A **run** is a single invocation of `engine.run()` or `engine.resume()`. It executes tasks sequentially from the current position until the workflow completes, fails, pauses, or parks at a delay.
+A **run** is a single invocation of `engine.run()` or `engine.resume()`. It executes tasks sequentially from the current position until the workflow completes, fails, pauses, parks at a delay, or parks at a signal.
 
 In **single-process mode** (`CheckpointingRunner` / `DurableEngine`), a run executes all tasks in one process. After each task, the snapshot is checkpointed. If the process crashes, call `resume()` to continue from the last checkpoint.
 

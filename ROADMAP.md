@@ -21,6 +21,7 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | Task registry for serializable workflows | ✅ |
 | Workflow serialization with definition hash validation | ✅ |
 | Durable delay/timer primitives (`sleep` between steps) | ✅ |
+| Signals / external events (`wait_for_signal`, `send_event`) | ✅ |
 | Workflow pause and resume | ✅ |
 | Panic-safe execution | ✅ |
 | `WorkflowContext` with task-local metadata access | ✅ |
@@ -40,6 +41,7 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | Type stubs (`.pyi`) and PEP 561 compliance | ✅ |
 | Async task support (via `asyncio.run()`) | ✅ |
 | Durable delays (`.delay()` with `timedelta` support) | ✅ |
+| Signals / external events (`.wait_for_signal()`, `send_signal()`) | ✅ |
 | `InMemoryBackend` exposed to Python | ✅ |
 | `WorkflowStatus` with error/cancellation/pause details | ✅ |
 
@@ -140,13 +142,17 @@ Pause a running workflow at the next task boundary. Unpause and resume when read
 - [x] Pause checks at all boundaries: before/after tasks, delays, and forks
 - [x] Available from Rust (`CheckpointingRunner`, `PooledWorker`) and Python (`pause_workflow`, `unpause_workflow`)
 
-### Signals / External Events
+### Signals / External Events ✅
 
 Pause a workflow until an external event arrives (payment confirmed, human approved, webhook received).
 
-- [ ] `wait_for_signal(signal_name, timeout)` primitive
-- [ ] `send_signal(instance_id, signal_name, payload)` API
-- [ ] Enables: human-in-the-loop, payment callbacks, approval chains, webhook-driven flows
+- [x] `wait_for_signal(signal_name, timeout)` primitive (Rust + Python)
+- [x] `send_signal(instance_id, signal_name, payload)` API (Rust + Python)
+- [x] Durable buffered event queue (FIFO, per-instance, per-signal-name)
+- [x] Buffered signals consumed immediately if workflow hasn't parked yet
+- [x] Optional timeout with automatic wake-up
+- [x] PostgreSQL backend support (atomic consume with `FOR UPDATE SKIP LOCKED`)
+- [x] Enables: human-in-the-loop, payment callbacks, approval chains, webhook-driven flows
 
 ### Child Workflows
 

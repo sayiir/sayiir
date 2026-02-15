@@ -19,6 +19,7 @@ repository = "https://github.com/sayiir/sayiir"
 homepage = "https://github.com/sayiir/sayiir"
 categories = ["asynchronous", "concurrency"]
 keywords = ["workflow", "orchestration", "durable", "async", "distributed"]
+documentation = "https://docs.rs/sayiir-core"
 
 [profile.release]
 opt-level = 3

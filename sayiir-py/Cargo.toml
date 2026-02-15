@@ -21,7 +21,9 @@ serde_json = { workspace = true }
 sayiir-core = { path = "../sayiir-core" }
 sayiir-persistence = { path = "../sayiir-persistence" }
 sayiir-postgres = { path = "../sayiir-postgres" }
-sayiir-runtime = { path = "../sayiir-runtime" }
+sayiir-runtime = { path = "../sayiir-runtime", default-features = false, features = [
+    "json",
+] }
 tracing = { workspace = true }
 
 [build-dependencies]

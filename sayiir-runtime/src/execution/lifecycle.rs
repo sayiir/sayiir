@@ -168,6 +168,27 @@ where
             );
             Ok((WorkflowStatus::Waiting { wake_at, delay_id }, None))
         }
+        Err(RuntimeError::Workflow(WorkflowError::AwaitingSignal {
+            signal_id,
+            signal_name,
+            wake_at,
+        })) => {
+            tracing::info!(
+                instance_id = %snapshot.instance_id,
+                %signal_id,
+                %signal_name,
+                ?wake_at,
+                "workflow parked at signal"
+            );
+            Ok((
+                WorkflowStatus::AwaitingSignal {
+                    signal_id,
+                    signal_name,
+                    wake_at,
+                },
+                None,
+            ))
+        }
         Err(RuntimeError::Workflow(WorkflowError::Cancelled { .. })) => {
             // Reload snapshot to get cancellation details (set by check_and_cancel)
             if let Ok(cancelled_snapshot) = backend.load_snapshot(&snapshot.instance_id).await

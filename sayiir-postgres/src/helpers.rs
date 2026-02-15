@@ -67,6 +67,14 @@ pub(crate) fn delay_wake_at(snapshot: &WorkflowSnapshot) -> Option<DateTime<Utc>
             position: ExecutionPosition::AtDelay { wake_at, .. },
             ..
         } => Some(*wake_at),
+        WorkflowSnapshotState::InProgress {
+            position:
+                ExecutionPosition::AtSignal {
+                    wake_at: Some(wake_at),
+                    ..
+                },
+            ..
+        } => Some(*wake_at),
         _ => None,
     }
 }

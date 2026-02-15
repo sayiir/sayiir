@@ -126,6 +126,41 @@ pub(crate) async fn park_branch_at_delay<B: SnapshotStore>(
     WorkflowError::Waiting { wake_at }.into()
 }
 
+/// Park a branch at a signal node.
+///
+/// Computes optional `wake_at`, saves the current input as a pass-through
+/// result via `save_task_result`, and returns `WorkflowError::AwaitingSignal`.
+///
+/// Returns `RuntimeError` (not `Result`) — the caller uses
+/// `return Err(park_branch_at_signal(...).await)`.
+pub(crate) async fn park_branch_at_signal<B: SnapshotStore>(
+    id: &str,
+    signal_name: &str,
+    timeout: Option<&std::time::Duration>,
+    current_input: Bytes,
+    instance_id: &str,
+    backend: &B,
+) -> RuntimeError {
+    tracing::info!(signal_id = %id, %signal_name, "parking branch at signal");
+    let wake_at = timeout.and_then(|d| {
+        chrono::Duration::from_std(*d)
+            .ok()
+            .map(|cd| chrono::Utc::now() + cd)
+    });
+    if let Err(e) = backend
+        .save_task_result(instance_id, id, current_input)
+        .await
+    {
+        return RuntimeError::from(e);
+    }
+    WorkflowError::AwaitingSignal {
+        signal_id: id.to_string(),
+        signal_name: signal_name.to_string(),
+        wake_at,
+    }
+    .into()
+}
+
 /// Sync branch results into the local snapshot and save the join position.
 ///
 /// Marks each branch as completed in the snapshot, sets the `AtJoin` position
@@ -333,6 +368,7 @@ where
 /// On resume after `AtFork`, the backend snapshot contains sub-task results from
 /// the previous execution. This function loads the snapshot to skip cached tasks
 /// and parks at delays instead of sleeping through them.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn execute_branch_with_checkpointing<F, Fut, B>(
     continuation: &WorkflowContinuation,
     input: Bytes,
@@ -406,6 +442,35 @@ where
                 return Err(park_branch_at_delay(
                     id,
                     duration,
+                    current_input,
+                    instance_id,
+                    backend,
+                )
+                .await);
+            }
+            WorkflowContinuation::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                next,
+            } => {
+                // Skip if signal was already consumed (resume case)
+                if let Some(result) = snapshot.get_task_result(id) {
+                    tracing::debug!(signal_id = %id, %signal_name, "signal already consumed in branch, skipping");
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = result.output.clone();
+                            continue;
+                        }
+                        None => return Ok(result.output.clone()),
+                    }
+                }
+
+                return Err(park_branch_at_signal(
+                    id,
+                    signal_name,
+                    timeout.as_ref(),
                     current_input,
                     instance_id,
                     backend,
