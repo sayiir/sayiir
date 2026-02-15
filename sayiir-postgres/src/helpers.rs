@@ -30,7 +30,7 @@ pub(crate) fn completed_task_count(snapshot: &WorkflowSnapshot) -> i32 {
         }
         | WorkflowSnapshotState::Paused {
             completed_tasks, ..
-        } => completed_tasks.len() as i32,
+        } => completed_tasks.len().try_into().unwrap_or(i32::MAX),
         _ => 0,
     }
 }
@@ -60,14 +60,14 @@ pub(crate) fn position_kind(snapshot: &WorkflowSnapshot) -> Option<&str> {
     }
 }
 
-/// Extract the delay wake_at time, if the workflow is parked at a delay.
+/// Extract the delay `wake_at` time, if the workflow is parked at a delay.
 pub(crate) fn delay_wake_at(snapshot: &WorkflowSnapshot) -> Option<DateTime<Utc>> {
     match &snapshot.state {
         WorkflowSnapshotState::InProgress {
             position: ExecutionPosition::AtDelay { wake_at, .. },
             ..
-        } => Some(*wake_at),
-        WorkflowSnapshotState::InProgress {
+        }
+        | WorkflowSnapshotState::InProgress {
             position:
                 ExecutionPosition::AtSignal {
                     wake_at: Some(wake_at),

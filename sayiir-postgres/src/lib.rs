@@ -47,6 +47,21 @@
 //! # }
 //! ```
 
+#![deny(clippy::pedantic)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+// PostgreSQL is a proper noun, not inline code.
+#![allow(clippy::doc_markdown)]
+
 mod backend;
 mod error;
 mod helpers;

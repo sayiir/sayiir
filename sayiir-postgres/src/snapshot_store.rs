@@ -19,6 +19,7 @@ where
         + codec::sealed::EncodeValue<WorkflowSnapshot>
         + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
+    #[allow(clippy::too_many_lines)]
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         tracing::debug!(
             instance_id = %snapshot.instance_id,
