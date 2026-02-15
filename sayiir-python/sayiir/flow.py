@@ -53,15 +53,39 @@ def _maybe_wrap_pydantic(task_func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _resolve_task_id(
+    task_func: Callable[..., Any],
+    *,
+    name: str | None = None,
+    lambda_counter: int = 0,
+) -> tuple[str, int]:
+    """Determine task id and return (task_id, updated_counter)."""
+    if name is not None:
+        return name, lambda_counter
+    task_id = getattr(task_func, "_task_id", None)
+    if task_id is not None:
+        return task_id, lambda_counter
+    fn_name = getattr(task_func, "__name__", "<lambda>")
+    if fn_name == "<lambda>":
+        task_id = f"lambda_{lambda_counter}"
+        return task_id, lambda_counter + 1
+    return fn_name, lambda_counter
+
+
 def _register_task(
     task_func: Callable[..., Any],
     registry: dict[str, Callable[..., Any]],
-) -> tuple[str, PyTaskMetadata | None]:
+    *,
+    name: str | None = None,
+    lambda_counter: int = 0,
+) -> tuple[str, PyTaskMetadata | None, int]:
     """Extract task id/metadata and register the wrapped task."""
-    task_id = getattr(task_func, "_task_id", task_func.__name__)
+    task_id, lambda_counter = _resolve_task_id(
+        task_func, name=name, lambda_counter=lambda_counter
+    )
     metadata = getattr(task_func, "_metadata", None)
     registry[task_id] = _maybe_wrap_pydantic(task_func)
-    return task_id, metadata
+    return task_id, metadata, lambda_counter
 
 
 class Workflow:
@@ -116,14 +140,22 @@ class ForkBuilder:
             raise ValueError("branch() requires at least one task function")
         chain: list[tuple[str, Callable[..., Any]]] = []
         for func in task_funcs:
-            task_id, _ = _register_task(func, self._flow._task_registry)
+            task_id, _, self._flow._lambda_counter = _register_task(
+                func,
+                self._flow._task_registry,
+                lambda_counter=self._flow._lambda_counter,
+            )
             chain.append((task_id, func))
         self._branches.append(chain)
         return self
 
     def join(self, task_func: Callable[..., Any]) -> "Flow":
         """Join branches with a combining task."""
-        task_id, metadata = _register_task(task_func, self._flow._task_registry)
+        task_id, metadata, self._flow._lambda_counter = _register_task(
+            task_func,
+            self._flow._task_registry,
+            lambda_counter=self._flow._lambda_counter,
+        )
         branches: list[list[tuple[str, PyTaskMetadata | None]]] = [
             [(name, getattr(func, "_metadata", None)) for name, func in chain]
             for chain in self._branches
@@ -151,10 +183,18 @@ class Flow:
         self._name = name
         self._builder = PyFlowBuilder(name)
         self._task_registry: dict[str, Callable[..., Any]] = {}
+        self._lambda_counter: int = 0
 
-    def then(self, task_func: Callable[..., Any]) -> "Flow":
+    def then(
+        self, task_func: Callable[..., Any], *, name: str | None = None
+    ) -> "Flow":
         """Add a sequential task."""
-        task_id, metadata = _register_task(task_func, self._task_registry)
+        task_id, metadata, self._lambda_counter = _register_task(
+            task_func,
+            self._task_registry,
+            name=name,
+            lambda_counter=self._lambda_counter,
+        )
         self._builder.then(task_id, metadata)
         return self
 

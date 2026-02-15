@@ -203,13 +203,29 @@ pub(crate) fn execute_python_task(
     // Call function
     let result = callable.call1((input_obj,))?;
 
-    // Handle async (coroutine) — run synchronously via asyncio.run().
-    // This creates a new event loop, so it must NOT be called from within
-    // an already-running loop (e.g. Jupyter). For that use case, the planned
-    // async execution path will be needed.
+    // Handle async (coroutine) — await the result synchronously.
+    // If an event loop is already running (e.g. Jupyter), we run the
+    // coroutine in a separate thread to avoid "cannot call asyncio.run()
+    // while another loop is running".
     let result = if result.getattr(intern!(py, "__await__")).is_ok() {
         let asyncio = py.import(intern!(py, "asyncio"))?;
-        asyncio.call_method1(intern!(py, "run"), (result,))?
+        let has_running_loop = asyncio
+            .call_method0(intern!(py, "get_running_loop"))
+            .is_ok();
+
+        if has_running_loop {
+            // Run in a new thread with its own event loop
+            let thread_mod = py.import(intern!(py, "concurrent.futures"))?;
+            let executor = thread_mod
+                .getattr(intern!(py, "ThreadPoolExecutor"))?
+                .call1((1,))?;
+            let future = executor.call_method1(intern!(py, "submit"), (asyncio.getattr(intern!(py, "run"))?, result))?;
+            let output = future.call_method0(intern!(py, "result"))?;
+            executor.call_method0(intern!(py, "shutdown"))?;
+            output
+        } else {
+            asyncio.call_method1(intern!(py, "run"), (result,))?
+        }
     } else {
         result
     };

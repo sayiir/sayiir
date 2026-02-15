@@ -2,9 +2,13 @@
 
 **Durable workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
 
-[![Release](https://github.com/sayiir/sayiir/actions/workflows/release.yml/badge.svg)](https://github.com/sayiir/sayiir/actions/workflows/release.yml)
+[![crates.io](https://img.shields.io/crates/v/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
+[![docs.rs](https://docs.rs/sayiir-core/badge.svg)](https://docs.rs/sayiir-core)
+[![crates.io downloads](https://img.shields.io/crates/d/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
+[![PyPI](https://img.shields.io/pypi/v/sayiir.svg)](https://pypi.org/project/sayiir/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/sayiir.svg)](https://pypi.org/project/sayiir/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-edition_2024-93450a.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-93450a.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
 
