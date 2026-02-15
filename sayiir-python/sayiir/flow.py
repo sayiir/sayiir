@@ -119,7 +119,9 @@ class ForkBuilder:
         self._flow = flow
         self._branches: list[list[tuple[str, Callable[..., Any]]]] = []
 
-    def branch(self, *task_funcs: Callable[..., Any]) -> "ForkBuilder":
+    def branch(
+        self, *task_funcs: Callable[..., Any], name: str | None = None
+    ) -> "ForkBuilder":
         """Add a branch with one or more chained tasks.
 
         Each positional argument is a task function. When multiple tasks are
@@ -128,10 +130,18 @@ class ForkBuilder:
 
         The branch name in the join dict is the first task's ID.
 
+        Args:
+            *task_funcs: One or more task callables. Accepts ``@task``-decorated
+                functions, plain functions, or lambdas.
+            name: Override the task ID of the **first** task in the branch.
+                Useful for lambdas or when the same function appears in
+                multiple branches.
+
         Examples::
 
-            .branch(step_a)                  # single-task branch
-            .branch(step_a, step_b, step_c)  # multi-step branch
+            .branch(step_a)                                # single-task branch
+            .branch(step_a, step_b, step_c)                # multi-step branch
+            .branch(lambda x: x + 1, name="increment")    # lambda with name
 
         Raises:
             ValueError: If no task functions are provided.
@@ -139,21 +149,31 @@ class ForkBuilder:
         if not task_funcs:
             raise ValueError("branch() requires at least one task function")
         chain: list[tuple[str, Callable[..., Any]]] = []
-        for func in task_funcs:
+        for i, func in enumerate(task_funcs):
+            task_name = name if i == 0 else None
             task_id, _, self._flow._lambda_counter = _register_task(
                 func,
                 self._flow._task_registry,
+                name=task_name,
                 lambda_counter=self._flow._lambda_counter,
             )
             chain.append((task_id, func))
         self._branches.append(chain)
         return self
 
-    def join(self, task_func: Callable[..., Any]) -> "Flow":
-        """Join branches with a combining task."""
+    def join(self, task_func: Callable[..., Any], *, name: str | None = None) -> "Flow":
+        """Join branches with a combining task.
+
+        Args:
+            task_func: The join callable that receives a dict of branch results.
+                Accepts ``@task``-decorated functions, plain functions, or lambdas.
+            name: Override the task ID. Useful for lambdas or when the same
+                function is used as a join in multiple forks.
+        """
         task_id, metadata, self._flow._lambda_counter = _register_task(
             task_func,
             self._flow._task_registry,
+            name=name,
             lambda_counter=self._flow._lambda_counter,
         )
         branches: list[list[tuple[str, PyTaskMetadata | None]]] = [
@@ -186,7 +206,35 @@ class Flow:
         self._lambda_counter: int = 0
 
     def then(self, task_func: Callable[..., Any], *, name: str | None = None) -> "Flow":
-        """Add a sequential task."""
+        """Add a sequential task to the workflow pipeline.
+
+        Accepts any callable: ``@task``-decorated functions, plain functions,
+        or lambdas. The callable receives the output of the previous step
+        and returns the input for the next.
+
+        Args:
+            task_func: The task to execute. Can be:
+                - A ``@task``-decorated function (uses its task ID and metadata)
+                - A plain function (uses ``__name__`` as the task ID)
+                - A lambda (auto-assigned ``lambda_0``, ``lambda_1``, etc.)
+            name: Override the task ID. Useful for lambdas or when the same
+                function is used multiple times in a pipeline.
+
+        Returns:
+            The Flow instance for chaining.
+
+        Examples::
+
+            @task
+            def double(x: int) -> int:
+                return x * 2
+
+            Flow("example")
+                .then(double)                          # @task-decorated
+                .then(lambda x: x + 1, name="add_one") # lambda with name
+                .then(str.upper)                        # plain callable
+                .build()
+        """
         task_id, metadata, self._lambda_counter = _register_task(
             task_func,
             self._task_registry,

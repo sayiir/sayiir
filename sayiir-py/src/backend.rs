@@ -50,6 +50,9 @@ impl PyPostgresBackend {
     ///     url: Connection URL (e.g. `postgresql://localhost/sayiir`)
     #[new]
     fn new(url: &str) -> PyResult<Self> {
+        tracing::info!("connecting to PostgreSQL backend");
+        tracing::debug!(url, "PostgreSQL connection URL");
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -58,8 +61,11 @@ impl PyPostgresBackend {
         let backend = runtime
             .block_on(PostgresBackend::<JsonCodec>::connect(url))
             .map_err(|e: sayiir_persistence::BackendError| {
+                tracing::error!(error = %e, "failed to connect to PostgreSQL");
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
             })?;
+
+        tracing::info!("PostgreSQL backend connected");
 
         Ok(Self {
             inner: Arc::new(backend),

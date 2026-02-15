@@ -86,6 +86,12 @@ impl PyDurableEngine {
         let first_task_id = continuation.first_task_id().to_string();
         let registry = Arc::new(task_registry);
 
+        tracing::info!(
+            workflow_id = %workflow.workflow_id,
+            %instance_id,
+            "starting durable workflow execution"
+        );
+
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             py.detach(|| {
@@ -118,6 +124,12 @@ impl PyDurableEngine {
         });
 
         let mut py_status: PyWorkflowStatus = status.into();
+
+        tracing::info!(
+            status = %py_status.status,
+            "durable workflow execution finished"
+        );
+
         if let Some(bytes) = output_bytes {
             py_status.output = Some(decode_to_pyobject(py, &bytes)?);
         }
@@ -136,12 +148,19 @@ impl PyDurableEngine {
         let definition_hash = workflow.definition_hash.clone();
         let registry = Arc::new(task_registry);
 
+        tracing::info!(
+            workflow_id = %workflow.workflow_id,
+            %instance_id,
+            "resuming workflow from checkpoint"
+        );
+
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             py.detach(|| {
                 self.runtime.block_on(async {
                     match prepare_resume(&instance_id, &definition_hash, backend.as_ref()).await? {
                         ResumeOutcome::AlreadyTerminal(status) => {
+                            tracing::debug!(%instance_id, status = ?status, "workflow already terminal");
                             let output = if matches!(status, WorkflowStatus::Completed) {
                                 let snapshot = backend.load_snapshot(&instance_id).await.ok();
                                 snapshot.and_then(|s| s.state.completed_output().cloned())
@@ -150,7 +169,10 @@ impl PyDurableEngine {
                             };
                             Ok((status, output))
                         }
-                        ResumeOutcome::Paused(status) => Ok((status, None)),
+                        ResumeOutcome::Paused(status) => {
+                            tracing::debug!(%instance_id, "workflow is paused, cannot resume");
+                            Ok((status, None))
+                        }
                         ResumeOutcome::Ready {
                             mut snapshot,
                             input_bytes,
@@ -190,6 +212,7 @@ impl PyDurableEngine {
         reason: Option<String>,
         cancelled_by: Option<String>,
     ) -> PyResult<()> {
+        tracing::info!(%instance_id, ?reason, ?cancelled_by, "requesting workflow cancellation");
         with_backend!(self, |backend| {
             self.runtime
                 .block_on(backend.store_signal(
@@ -209,6 +232,7 @@ impl PyDurableEngine {
         reason: Option<String>,
         paused_by: Option<String>,
     ) -> PyResult<()> {
+        tracing::info!(%instance_id, ?reason, ?paused_by, "requesting workflow pause");
         with_backend!(self, |backend| {
             self.runtime
                 .block_on(backend.store_signal(
@@ -222,6 +246,7 @@ impl PyDurableEngine {
 
     /// Unpause a paused workflow so it can be resumed.
     fn unpause(&self, instance_id: String) -> PyResult<()> {
+        tracing::info!(%instance_id, "unpausing workflow");
         with_backend!(self, |backend| {
             self.runtime
                 .block_on(backend.unpause(&instance_id))
