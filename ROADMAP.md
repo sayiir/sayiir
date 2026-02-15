@@ -45,6 +45,23 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 | `InMemoryBackend` exposed to Python | ✅ |
 | `WorkflowStatus` with error/cancellation/pause details | ✅ |
 
+**Node.js / TypeScript Bindings**
+
+| Feature | Status |
+|---|---|
+| `task()` wrapper with metadata (timeout, retries, tags, description) | ✅ |
+| Type-safe generic `Flow<TInput, TLast>` builder (`.then()`, `.fork()`, `.join()`) | ✅ |
+| Simple execution (`runWorkflow`) | ✅ |
+| Durable execution with checkpointing (`runDurableWorkflow`) | ✅ |
+| Resume, cancel, pause and unpause from Node.js | ✅ |
+| Fork/join with typed tuple branch outputs | ✅ |
+| Zod integration (optional peer dependency for validation) | ✅ |
+| Durable delays (`.delay()` with `ms`-style duration strings) | ✅ |
+| Signals / external events (`.waitForSignal()`, `sendSignal()`) | ✅ |
+| `InMemoryBackend` and `PostgresBackend` exposed to Node.js | ✅ |
+| `WorkflowStatus<TOut>` discriminated union with narrowing | ✅ |
+| `WorkflowError`, `TaskError`, `BackendError` error classes | ✅ |
+
 ---
 
 ## Phase 0 — Python Bindings Polish
@@ -166,14 +183,21 @@ Compose workflows from other workflows.
 
 ## Phase 3 — Ecosystem
 
-### TypeScript / Node.js Bindings
+### TypeScript / Node.js Bindings ✅
 
 Python + TypeScript covers ~90% of the developer market for this space.
 
-- [ ] NAPI-RS bindings (same architecture as Python: thin layer, Rust orchestrates)
-- [ ] Promise-based API
-- [ ] TypeScript type definitions
-- [ ] npm package
+- [x] NAPI-RS bindings (same architecture as Python: thin layer, Rust orchestrates)
+- [x] Type-safe generic `Flow<TInput, TLast>` builder with full inference
+- [x] `task()` wrapper with optional Zod validation (input/output schemas)
+- [x] Simple execution (`runWorkflow`) and durable execution (`runDurableWorkflow`)
+- [x] Resume, cancel, pause, unpause, sendSignal
+- [x] Fork/join parallelism with typed tuple outputs
+- [x] Durable delays (`.delay()`) and signals (`.waitForSignal()`)
+- [x] `InMemoryBackend` and `PostgresBackend`
+- [x] `WorkflowStatus<TOut>` discriminated union with TypeScript narrowing
+- [x] Worker placeholder (distributed workers planned)
+- [x] CI pipeline (Node 18/20/22)
 
 ### Observability
 
@@ -303,6 +327,6 @@ Want to help? Check out issues labeled `good first issue` or join our [Discord](
 Areas where contributions are especially welcome:
 
 - Storage backend implementations (PostgreSQL, SQLite, Redis)
-- Language binding prototypes (TypeScript, Go)
+- Language binding prototypes (Go, Java)
 - Documentation, examples, and tutorials
 - Testing and benchmarking

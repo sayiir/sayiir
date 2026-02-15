@@ -25,6 +25,7 @@ export default defineConfig({
           label: "Getting Started",
           items: [
             { label: "Python Quick Start", slug: "getting-started/python" },
+            { label: "Node.js Quick Start", slug: "getting-started/nodejs" },
             { label: "Rust Quick Start", slug: "getting-started/rust" },
           ],
         },
@@ -85,6 +86,7 @@ export default defineConfig({
           label: "API Reference",
           items: [
             { label: "Python API", slug: "reference/python-api" },
+            { label: "Node.js API", slug: "reference/nodejs-api" },
             { label: "Rust API", slug: "reference/rust-api" },
             { label: "Configuration", slug: "reference/configuration" },
           ],
@@ -95,6 +97,9 @@ export default defineConfig({
             { label: "Overview", slug: "comparisons/overview" },
             { label: "vs Temporal", slug: "comparisons/vs-temporal" },
             { label: "vs Airflow", slug: "comparisons/vs-airflow" },
+            { label: "vs Prefect", slug: "comparisons/vs-prefect" },
+            { label: "vs Step Functions", slug: "comparisons/vs-step-functions" },
+            { label: "vs Elsa", slug: "comparisons/vs-elsa" },
           ],
         },
         {

@@ -128,3 +128,134 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: cargo ws publish --from-git --yes --token "$CARGO_REGISTRY_TOKEN"
+
+  node-build:
+    name: Node.js (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux ──
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            lib: libsayiir_node.so
+
+          - platform: linux-arm64-gnu
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            lib: libsayiir_node.so
+            cross: true
+
+          - platform: darwin-x64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            lib: libsayiir_node.dylib
+
+          - platform: darwin-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            lib: libsayiir_node.dylib
+
+          - platform: win32-x64-msvc
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            lib: sayiir_node.dll
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      # Build the native addon. The cdylib output is a shared library
+      # (.so/.dylib/.dll) that Node.js loads via require().
+      - name: Build native addon
+        run: cargo build -p sayiir-node --release --target ${{ matrix.target }}
+
+      # Rename the platform-specific library to the universal name
+      # that the npm package expects.
+      - name: Rename to sayiir-node.node
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/${{ matrix.lib }} sayiir-node.node
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.platform }}
+          path: sayiir-node.node
+          if-no-files-found: error
+
+  node-publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: node-build
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # Node 24+ ships npm >= 11.5.1 which supports OIDC trusted publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Download all platform binaries built by node-build.
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          path: artifacts/
+
+      # Place each binary into its platform package directory.
+      # After this step, each npm/<platform>/ has a sayiir-node.node file.
+      - name: Stage platform binaries
+        run: |
+          for dir in artifacts/node-*; do
+            platform=$(basename "$dir" | sed 's/^node-//')
+            cp "$dir/sayiir-node.node" "sayiir-nodejs/npm/$platform/sayiir-node.node"
+            echo "Staged $platform"
+          done
+          ls -lhR sayiir-nodejs/npm/
+
+      # Publish each platform-specific package first.
+      # These are the @sayiir/node-<platform> packages that contain
+      # only the native binary for one OS/arch combination (~5 MB each).
+      # --provenance attaches build attestation via OIDC (no token needed).
+      - name: Publish platform packages
+        run: |
+          for dir in sayiir-nodejs/npm/*/; do
+            name=$(node -p "require('./${dir}package.json').name")
+            echo "Publishing $name ..."
+            cd "$dir"
+            npm publish --provenance --access public
+            cd -
+          done
+
+      # Build the TypeScript source to dist/.
+      - name: Build TypeScript
+        working-directory: sayiir-nodejs
+        run: |
+          pnpm install
+          pnpm tsc
+
+      # Publish the main `sayiir` package.
+      # This package contains only the TypeScript wrapper code.
+      # The native binary is pulled in via optionalDependencies
+      # on @sayiir/node-<platform> — pnpm/npm resolves only the
+      # package matching the user's platform.
+      - name: Publish sayiir
+        working-directory: sayiir-nodejs
+        run: npm publish --provenance --access public

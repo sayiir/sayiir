@@ -1,0 +1,242 @@
+---
+title: Sayiir vs Elsa
+description: Sayiir vs Elsa Workflows — comparing Rust-native durable workflows with .NET visual workflow designer for embedded business process automation
+---
+
+Elsa Workflows is a .NET workflow engine focused on business process automation with both visual and code-first approaches. Sayiir takes a different path: Rust-native performance with Python and Rust bindings, code-first only, and checkpoint-based recovery. Both are embeddable libraries, but they target different ecosystems and design philosophies.
+
+This page explains the key differences in language runtime, workflow definition (visual vs code), recovery models, and when to choose each.
+
+## Language Runtime: .NET vs Rust Core
+
+**Elsa is built for the .NET ecosystem.** It's written in C#, runs on the .NET runtime, and integrates deeply with ASP.NET Core, Entity Framework Core, and the broader .NET ecosystem. If your application is built on .NET, Elsa fits naturally into your stack.
+
+**Sayiir has a Rust core with language bindings.** The workflow runtime, checkpoint serialization, and orchestration logic are implemented in Rust. Python and Rust applications use thin wrappers around this shared core. Every language binding gets the same performance, safety guarantees, and memory efficiency.
+
+### What This Means in Practice
+
+In Elsa, you write workflows in C# using .NET APIs:
+
+```csharp
+// Elsa workflow in C#
+public class WelcomeWorkflow : WorkflowBase
+{
+    protected override void Build(IWorkflowBuilder builder)
+    {
+        builder
+            .StartWith<FetchUser>()
+            .Then<SendEmail>()
+            .Then<LogActivity>();
+    }
+}
+```
+
+In Sayiir, Python developers write workflows in Python:
+
+```python
+# Sayiir workflow in Python
+@task
+async def fetch_user(user_id: int) -> dict:
+    return await db.get_user(user_id)
+
+@task
+async def send_email(user: dict):
+    await email_service.send_welcome(user)
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+```
+
+Rust developers write workflows in Rust:
+
+```rust
+// Sayiir workflow in Rust
+#[task]
+async fn fetch_user(user_id: i32) -> User {
+    db::get_user(user_id).await
+}
+
+#[task]
+async fn send_email(user: User) {
+    email::send_welcome(user).await
+}
+
+let workflow = Flow::new("welcome")
+    .then(fetch_user)
+    .then(send_email)
+    .build();
+```
+
+If your team is .NET-native, Elsa integrates seamlessly. If you're using Rust or Python, Sayiir is the native choice.
+
+## Workflow Definition: Visual Designer vs Code-First
+
+This is the most visible difference.
+
+**Elsa includes a visual workflow designer.** It ships with a web-based drag-and-drop UI where you can build workflows without writing code. Activities (nodes) are connected visually, properties are configured via forms, and workflows are stored as JSON. This makes Elsa accessible to non-developers (business analysts, operations teams) who can design workflows using the UI.
+
+Elsa also supports **code-first workflows** via a fluent C# API. Developers can define workflows in code, version them in source control, and test them like any other class.
+
+**Sayiir is code-first by design.** Workflows are defined programmatically using the Rust or Python API. There's no visual designer, no drag-and-drop — and that's intentional. Sayiir believes workflow definitions belong in code: versioned, tested, reviewed, and deployed like the rest of your application. [Sayiir Server](/server/) (coming soon) adds a web dashboard for *monitoring and observability* — not visual workflow building.
+
+### Why This Matters
+
+Elsa's visual designer is a major value-add for teams that:
+
+- Need business users to design or modify workflows
+- Want to configure workflows dynamically without deploying code
+- Prefer visual representation for documentation or training
+
+Sayiir's code-first approach is a better fit for teams that:
+
+- Want workflows versioned in source control
+- Prefer type-safe, testable workflow definitions
+- Already have CI/CD pipelines and prefer code deploys over UI changes
+- Don't need non-technical users to modify workflow logic
+
+If your workflows are defined by product managers or operations teams, Elsa's designer is compelling. If your workflows are defined by developers and treated as code, Sayiir's model is simpler.
+
+## Activities vs Tasks: Structured vs Open
+
+**Elsa uses an Activity abstraction.** Activities are the building blocks of workflows. Each activity is a class that implements `IActivity`, with properties, input/output ports, and execution logic. Elsa ships with built-in activities:
+
+- **HTTP activities** — make HTTP requests, respond to webhooks
+- **Email activities** — send emails via SMTP or SendGrid
+- **Timer activities** — delay execution, wait for specific times
+- **JavaScript activities** — evaluate JavaScript expressions in workflows
+
+You can also write custom activities by implementing `IActivity`.
+
+**Sayiir uses tasks.** A task is any async function annotated with `@task` (Python) or `#[task]` (Rust). There are no built-in activities, no activity library, no abstraction. You write normal async code, and Sayiir makes it durable.
+
+```python
+# Sayiir: Any function becomes a task
+@task
+async def send_email(to: str, subject: str, body: str):
+    async with aiosmtplib.SMTP("smtp.example.com") as smtp:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["To"] = to
+        await smtp.send_message(msg)
+```
+
+Elsa's activity model provides discoverability (browse available activities) and reusability (pre-built components). Sayiir's task model provides flexibility (any code can be a task) and simplicity (no abstraction to learn).
+
+## Recovery Model: Event-Driven Persistence vs Checkpoints
+
+**Elsa uses event-driven persistence.** Workflows execute step-by-step, and Elsa records execution events in the database (via Entity Framework Core). When a workflow suspends (waiting for a signal, timer, or external event), its state is persisted. When the workflow resumes, Elsa loads the persisted state and continues from the last activity.
+
+Elsa's model is similar to Sayiir's checkpoint approach: workflows resume from where they left off, not from the beginning. No deterministic replay, no re-execution of completed activities.
+
+**Sayiir uses checkpoint-based recovery.** After each task completes, Sayiir serializes the workflow state and stores it in the configured backend (in-memory for dev, PostgreSQL for production). When a workflow resumes (after a crash, restart, or scheduled pause), Sayiir loads the checkpoint and continues from the next task.
+
+Both Elsa and Sayiir avoid deterministic replay. Both allow workflows to suspend and resume. The key difference is implementation: Elsa uses Entity Framework Core and event sourcing patterns, Sayiir uses direct checkpoint serialization with rkyv (zero-copy) or JSON.
+
+## Serialization: EF Core vs rkyv
+
+**Elsa uses Entity Framework Core** for persistence. Workflow instances, activity states, and execution events are stored as relational database rows. This integrates naturally with .NET's ORM ecosystem but requires mapping objects to database schemas.
+
+**Sayiir uses rkyv for Rust** (zero-copy serialization) and JSON for Python. Checkpoints are stored as binary blobs (rkyv) or JSON documents, not relational rows. This provides:
+
+- **Zero-copy deserialization** (rkyv) — load checkpoints without parsing or allocation
+- **No schema migrations** — checkpoint structure is opaque to storage
+- **Simpler storage model** — key-value semantics, not relational joins
+
+Elsa's EF Core integration provides query capabilities (find workflows by property, filter by status). Sayiir's checkpoint model provides performance and simplicity but no query layer (yet).
+
+## Distributed Workers: Built-In vs Pluggable
+
+**Elsa has built-in distributed execution support.** Multiple Elsa hosts can run concurrently, and workflows are distributed across workers using a message queue (RabbitMQ, Azure Service Bus, or SQL Server). Elsa handles workflow dispatch, worker coordination, and state synchronization.
+
+**Sayiir supports distributed workers** but requires you to set up the task queue. Sayiir provides a worker abstraction that polls for workflows, but you choose the queue backend (PostgreSQL LISTEN/NOTIFY, Redis Streams, SQS, etc.). This gives flexibility but requires more integration work.
+
+For teams that want out-of-the-box distributed execution, Elsa's built-in support is an advantage. For teams with existing message infrastructure, Sayiir's pluggable model fits better.
+
+## Signals and External Events: Core Feature vs Core Feature
+
+Both Elsa and Sayiir support external signals and events.
+
+**Elsa has first-class signal support.** Activities like `SignalReceived` and `SendSignal` allow workflows to wait for external triggers. HTTP endpoints can trigger workflows, and workflows can trigger each other via signals.
+
+**Sayiir also supports signals** via the `signal` mechanism. Workflows can pause and wait for named signals, and external code can send signals to running workflows:
+
+```python
+# Sayiir signal example
+@task
+async def wait_for_approval():
+    await receive_signal("approval_granted")
+
+# Send signal from external code
+await send_signal(workflow_id, "approval_granted", {"approved_by": "admin"})
+```
+
+Both systems treat signals as first-class primitives. The API differs, but the capability is equivalent.
+
+## UI and Observability
+
+**Elsa ships with a web-based UI** for:
+
+- Designing workflows visually
+- Monitoring running workflows
+- Viewing execution history and activity logs
+- Triggering workflows manually
+- Managing workflow definitions
+
+This is a significant operational advantage for teams that need visibility without building custom tooling.
+
+**Sayiir's open-source core has no built-in UI.** You can use your existing observability stack (structured logging, Prometheus, OpenTelemetry). [Sayiir Server](/server/) (coming soon) adds a web dashboard for real-time workflow monitoring, execution history, and observability. Note that Sayiir Server is a *monitoring and operations* dashboard — not a visual workflow designer. Sayiir's philosophy is code-first: workflow definitions belong in code, versioned and reviewed like the rest of your application.
+
+If you need a visual designer for non-developers to build workflows, Elsa is the clear choice. If you need monitoring and observability for code-defined workflows, Sayiir Server fills that role.
+
+## Infrastructure: ASP.NET Core + EF Core vs Library
+
+**Elsa is designed to run inside an ASP.NET Core application.** It uses:
+
+- **Entity Framework Core** for persistence (SQL Server, PostgreSQL, SQLite, MongoDB)
+- **ASP.NET Core middleware** for HTTP triggers and webhook endpoints
+- **.NET dependency injection** for workflow services and activity registration
+- **Hosted services** for background workflow execution
+
+This provides a complete, batteries-included experience for .NET developers but requires the ASP.NET Core runtime.
+
+**Sayiir is a library with pluggable backends.** It doesn't require a web framework, database ORM, or specific runtime. Configure storage (in-memory, PostgreSQL, custom), call `run_workflow()`, and you're done. Works in CLI apps, web servers, serverless functions, or background workers.
+
+Elsa's integration with ASP.NET Core is a strength for .NET web applications. Sayiir's minimal dependencies are a strength for lightweight, portable deployments.
+
+## When to Choose Elsa
+
+Choose Elsa if you need:
+
+- **.NET ecosystem integration** — your application is built on C#, ASP.NET Core, and Entity Framework
+- **Visual workflow designer** — business users or operations teams need to design workflows without code
+- **Out-of-the-box activities** — HTTP, email, timers, JavaScript expressions included
+- **Web-based UI** — monitoring, execution history, manual triggers
+- **Mature .NET library** — extensive documentation, active community, proven in production
+
+Elsa is the right choice for .NET teams that want a comprehensive, batteries-included workflow engine with visual tooling.
+
+## When to Choose Sayiir
+
+Choose Sayiir if you need:
+
+- **Rust or Python ecosystem** — your application is built on Rust or Python
+- **Code-first workflows** — workflows are defined in code, versioned in source control
+- **No determinism constraints** — write any async code, use any library, no replay gotchas
+- **Zero infrastructure** — library, not platform. Import and run. [Sayiir Server](/server/) adds monitoring when you need it.
+- **Rust performance** — zero-copy serialization (rkyv), shared Rust core across language bindings
+- **Minimal dependencies** — no ORM, no web framework, pluggable storage
+
+Sayiir is the right choice for Rust or Python teams that want the simplest path to durable workflows, especially for code-first, event-driven use cases.
+
+## Summary
+
+Elsa is a comprehensive .NET workflow engine with visual tooling, built-in activities, and deep integration with ASP.NET Core. It's the right choice for .NET teams, especially those that need a visual designer for non-developers or out-of-the-box UI.
+
+Sayiir is a Rust-native workflow library with Python and Rust bindings, code-first only, and checkpoint-based recovery. It's the right choice for Rust or Python teams that want simplicity, performance, and no infrastructure overhead.
+
+Both are embeddable libraries. Both support signals, retries, and distributed workers. The difference is ecosystem (.NET vs Rust/Python) and design philosophy (visual + code vs code-first only).
+
+If you're in the .NET ecosystem and need visual tooling, choose Elsa. If you're in the Rust or Python ecosystem and prefer code-first workflows, choose Sayiir.
+
+---
+
+See also: [Sayiir vs Temporal](/comparisons/vs-temporal/) and [Comparison Overview](/comparisons/overview/)

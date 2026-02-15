@@ -16,7 +16,7 @@ name = "sayiir_persistence"
 path = "src/lib.rs"
 
 [dependencies]
-sayiir-core = { version = "0.1.0-alpha.3", path = "../sayiir-core" }
+sayiir-core = { version = "0.1.0-alpha.4", path = "../sayiir-core" }
 thiserror = "2"
 bytes = { workspace = true }
 chrono = { workspace = true }
