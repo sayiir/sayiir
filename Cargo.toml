@@ -9,6 +9,7 @@ members = [
     "tests/integration",
 ]
 resolver = "2"
+exclude = ["examples/hello-world-rs", "examples/background-jobs-rs"]
 
 [workspace.package]
 version = "0.1.0-alpha.3"

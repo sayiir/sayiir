@@ -1,0 +1,98 @@
+---
+title: Python Quick Start
+description: Get started with Sayiir in Python in 5 minutes — simple durable workflows with zero learning curve. pip install, define tasks, run.
+---
+
+## Installation
+
+```bash
+pip install sayiir
+```
+
+## Simple workflow
+
+Define tasks with `@task` and chain them with `Flow`:
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def fetch_user(user_id: int) -> dict:
+    return {"id": user_id, "name": "Alice"}
+
+@task
+def send_email(user: dict) -> str:
+    return f"Sent welcome to {user['name']}"
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+result = run_workflow(workflow, 42)
+print(result)  # "Sent welcome to Alice"
+```
+
+## Make it durable
+
+Use `run_durable_workflow` to checkpoint after each task. If the process crashes, call `resume_workflow` to continue from the last checkpoint.
+
+```python
+from sayiir import task, Flow, run_durable_workflow, InMemoryBackend
+
+@task(timeout_secs=30)
+def process_order(order_id: int) -> dict:
+    return {"order_id": order_id, "status": "processed"}
+
+@task
+def send_confirmation(order: dict) -> str:
+    return f"Confirmed order {order['order_id']}"
+
+workflow = Flow("order").then(process_order).then(send_confirmation).build()
+
+# Checkpoints after each task — resume from last checkpoint on crash
+status = run_durable_workflow(workflow, "order-123", 42)
+print(status.output)
+```
+
+## With PostgreSQL
+
+Swap to `PostgresBackend` for production — everything else stays the same:
+
+```python
+from sayiir import PostgresBackend
+
+# Connects and runs migrations automatically
+backend = PostgresBackend("postgresql://localhost/sayiir")
+status = run_durable_workflow(workflow, "order-123", 42, backend=backend)
+```
+
+## Pydantic integration
+
+Sayiir automatically validates inputs and outputs when you use Pydantic models:
+
+```python
+from pydantic import BaseModel
+from sayiir import task, Flow, run_workflow
+
+class OrderInput(BaseModel):
+    order_id: int
+    amount: float
+
+class OrderResult(BaseModel):
+    status: str
+    message: str
+
+@task
+def process(order: OrderInput) -> OrderResult:
+    return OrderResult(status="ok", message=f"Processed ${order.amount}")
+
+workflow = Flow("typed").then(process).build()
+result = run_workflow(workflow, {"order_id": 1, "amount": 99.99})
+```
+
+Pydantic models are serialized and deserialized automatically at each checkpoint boundary.
+
+## Next steps
+
+- [Retries & Timeouts](/guides/retries-and-timeouts/) — exponential backoff, timeout behavior
+- [Signals & Events](/guides/signals-and-events/) — wait for external events
+- [Parallel Workflows](/guides/parallel-workflows/) — fork/join parallelism
+- [Durable Workflows](/guides/durable-workflows/) — lifecycle operations, delays
+- [PostgreSQL in Production](/guides/postgres-production/) — connection pooling, operational tips

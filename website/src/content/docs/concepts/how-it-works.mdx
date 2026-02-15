@@ -1,0 +1,63 @@
+---
+title: How Sayiir Works
+description: Why Sayiir is the fastest, simplest durable workflow engine — zero learning curve, native Rust performance, no infrastructure overhead
+---
+
+Most workflow engines force you to learn their mental model, their DSL, their way of thinking. You end up writing code *for the engine* instead of writing code *for your business*. The learning curve is steep, the infrastructure burden is heavy, and performance suffers under layers of abstraction.
+
+**Sayiir is different.** Write async Rust or plain Python. That's it. Your existing code, your existing patterns, your existing tests — they all just work. There's virtually **zero learning curve** because there's nothing new to learn. If you can write a function, you can build a durable workflow.
+
+## No Deterministic Replay
+
+This is the big one. Temporal, Restate, Azure Durable Functions, and most durable execution engines use **replay-based recovery**: when a workflow resumes, they re-execute your code from the beginning and skip completed steps. This requires your workflow code to be **deterministic** — no system time, no random values, no direct I/O, no side effects outside SDK-approved APIs.
+
+Developers consistently report this as the #1 source of production incidents, versioning nightmares, and onboarding friction.
+
+**Sayiir doesn't replay.** It checkpoints after each task and resumes from the last checkpoint. Your tasks can call any API, use any library, read the clock, generate random values — there are no determinism constraints. When a process crashes, Sayiir loads the last snapshot and picks up from where it left off. No re-execution. No replay storms. No versioning headaches.
+
+Execution is also **panic-safe** — if a Rust task panics or a Python task raises an unhandled exception, Sayiir catches it, records the failure, and the workflow can be retried or resumed without corrupting state.
+
+## A Library, Not a Platform
+
+Temporal requires a multi-service cluster (frontend, history, matching, workers) plus a database. Airflow needs a scheduler, webserver, workers, and database. Even "lightweight" options like Inngest and Hatchet run a centralized server.
+
+**Sayiir is a library you import.** Add it as a dependency, write your workflow, run it. Works in a single process, across a cluster, or on serverless — no separate infrastructure to deploy, monitor, or operate. Your application *is* the workflow engine.
+
+## Rust Core, Thin Language Bindings
+
+Temporal recognized this was the right architecture — their newer Python, TypeScript, and .NET SDKs all wrap a shared Rust core (`sdk-core`). Sayiir was built this way from day one.
+
+The Rust runtime handles all orchestration, checkpointing, serialization, and execution. Language bindings are thin: you define tasks in your language, Rust does everything else. This means every language gets the same performance, correctness, and safety guarantees — because they share the same battle-tested core.
+
+## Hexagonal Architecture
+
+Sayiir's internals follow hexagonal (ports & adapters) architecture. The core domain (`sayiir-core`) has **zero infrastructure dependencies** — pure business logic. All dependencies flow inward:
+
+```
+core ← persistence ← runtime ← language bindings
+```
+
+Every integration point is a trait-based port with swappable adapters:
+
+- **`Codec`** — rkyv, JSON, or your own serializer
+- **`PersistentBackend`** — InMemory, PostgreSQL, or your own storage
+- **`CoreTask`** — closures, registry lookups, or your own execution model
+- **`WorkflowRunner`** — single-process, distributed, or your own topology
+
+This isn't accidental. It means you can swap any layer without touching the others. Test with InMemory, deploy with PostgreSQL. Prototype with JSON, optimize with rkyv, or any custom Codec of your choice (protobuf, avro ..). Run single-process locally, distribute across machines in production. Same workflow code, different adapters.
+
+## Fast by Design
+
+Sayiir is built for **native performance** from the ground up:
+
+- **Zero-copy deserialization** — The default rkyv codec deserializes without allocations, giving sub-millisecond checkpoint reads
+- **No replay overhead** — Other engines re-execute your entire workflow history on resume. Sayiir loads one snapshot. Recovery time is constant, not proportional to history length
+- **Minimal coordination** — Distributed workers claim tasks independently with optimistic concurrency. No global locks, no central scheduler bottleneck
+- **Lightweight footprint** — No JVM, no orchestrator process, no message broker. Your application binary is the workflow engine. Memory and CPU overhead is minimal
+- **Scales to hundreds of thousands of concurrent activities** with per-task checkpointing and fine-grained durability
+
+## Pluggable Everything
+
+- **Storage backends** — InMemory for testing, PostgreSQL for production, or implement the `PersistentBackend` trait for anything else (Redis, DynamoDB, SQLite, Cloudflare Durable Objects)
+- **Codecs** — rkyv (zero-copy, default), JSON (human-readable), or bring your own (Protobuf, MessagePack)
+- **No lock-in** — MIT licensed, standard async patterns, portable across any runtime

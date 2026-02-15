@@ -1,28 +1,41 @@
-# Architecture
+---
+title: Architecture
+description: Sayiir's lightweight architecture — hexagonal design, pluggable backends, zero-copy serialization, and the fast checkpoint-resume lifecycle
+---
 
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│                        Your Application                          │
-│               (Rust, Python, or future bindings)                 │
-├──────────────────────────────────────────────────────────────────┤
-│  Language Bindings (thin layer — workflow definition only)        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐                        │
-│  │  Rust    │  │  Python  │  │  Node.js │                        │
-│  │ (native) │  │  (PyO3)  │  │ (planned)│                        │
-│  └──────────┘  └──────────┘  └──────────┘                        │
-├──────────────────────────────────────────────────────────────────┤
-│                    Sayiir Runtime (Rust)                          │
-│  ┌─────────────────────┐  ┌──────────────────────────────────┐   │
-│  │ CheckpointingRunner │  │          PooledWorker            │   │
-│  │  (single process)   │  │  (distributed, multi-machine)    │   │
-│  └─────────────────────┘  └──────────────────────────────────┘   │
-├──────────────────────────────────────────────────────────────────┤
-│                      Persistence Layer                           │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐     │
-│  │ InMemory │  │ Postgres │  │  Custom  │  │  Enterprise   │     │
-│  │ Backend  │  │ Backend  │  │ Backend  │  │  gRPC Server  │     │
-│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘     │
-└──────────────────────────────────────────────────────────────────┘
+## Layer Overview
+
+```mermaid
+graph TB
+    App[Your Application<br/>Rust, Python, or future bindings]
+    Bindings[Language Bindings<br/>thin layer — workflow definition only]
+    Rust[Rust Bindings<br/>native]
+    Python[Python Bindings<br/>PyO3]
+    Node[Node.js<br/>planned]
+    Runtime[Sayiir Runtime Rust]
+    CheckpointRunner[CheckpointingRunner<br/>single process]
+    PooledWorker[PooledWorker<br/>distributed, multi-machine]
+    Persistence[Persistence Layer]
+    InMem[InMemory Backend]
+    Postgres[Postgres Backend]
+    Custom[Custom Backend]
+    Enterprise[Enterprise gRPC Server]
+
+    App --> Bindings
+    Bindings --> Rust
+    Bindings --> Python
+    Bindings --> Node
+    Rust --> Runtime
+    Python --> Runtime
+    Node --> Runtime
+    Runtime --> CheckpointRunner
+    Runtime --> PooledWorker
+    CheckpointRunner --> Persistence
+    PooledWorker --> Persistence
+    Persistence --> InMem
+    Persistence --> Postgres
+    Persistence --> Custom
+    Persistence --> Enterprise
 ```
 
 ## Core Concepts
@@ -52,13 +65,24 @@ In **distributed mode** (`PooledWorker`), a run is split across multiple workers
 
 Both modes use the same workflow definition, the same persistence traits, and the same snapshot format. The only difference is who drives the execution loop.
 
----
+## The Checkpoint-Resume Lifecycle
 
-**One problem, solved well.** Sayiir is an orchestrator, not a compute engine. It coordinates steps, handles retries, and checkpoints progress — while the actual heavy lifting (ETL, data pipelines, GPU training, API calls) runs in external systems you call from your tasks. We don't try to be a platform, a UI, or a kitchen sink. We make your workflows durable and let you focus on your business logic.
+```mermaid
+graph LR
+    Start([Start]) --> Execute[Execute Task]
+    Execute --> Checkpoint[Checkpoint State]
+    Checkpoint --> More{More tasks?}
+    More -->|Yes| Execute
+    More -->|No| Complete([Complete])
 
-**Why Rust?** The core runtime is written in Rust for safety, performance, and correctness — the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Python bindings are available today, with TypeScript and Go planned — so you get Rust's reliability without leaving your ecosystem. The binding is a thin layer: you write task functions in your language, Rust handles all orchestration, checkpointing, and execution.
+    Crash([Process Crash]) -.-> Load[Load Last Checkpoint]
+    Load --> Resume[Resume from Last Task]
+    Resume --> Execute
+```
 
----
+When a workflow runs, Sayiir executes tasks sequentially. After each task completes, the workflow state is checkpointed to the persistence backend. If the process crashes, the workflow can be resumed from the last checkpoint — no replay, no re-execution of completed tasks.
+
+This checkpoint-resume model is what eliminates the need for deterministic code. Your tasks can have side effects, call external APIs, generate random values, or read the system time — because Sayiir never re-executes completed work.
 
 ## Hexagonal Design
 
@@ -76,8 +100,6 @@ Every integration point is a trait-based port with swappable adapters:
 - **`WorkflowRunner`** — single-process, distributed, or your own topology
 
 This isn't accidental. It means you can swap any layer without touching the others. Test with InMemory, deploy with PostgreSQL. Prototype with JSON, optimize with rkyv, or any custom Codec of your choice (protobuf, avro ..). Run single-process locally, distribute across machines in production. Same workflow code, different adapters.
-
----
 
 ## Pluggable Codecs
 
@@ -98,8 +120,6 @@ let codec = MyCustomCodec::new();
 - **JSON** — Human-readable, enable with `--features json`
 - **Custom** — Implement the `Codec` trait for any format (Protobuf, MessagePack, etc.)
 
----
-
 ## Pluggable Storage Backends
 
 ```rust
@@ -117,7 +137,9 @@ impl PersistentBackend for MyBackend { ... }
 - **PostgreSQL** — For production
 - **Custom** — Implement the `PersistentBackend` trait for anything else (Redis, DynamoDB, SQLite, Cloudflare Durable Objects)
 
----
+## Why Rust?
+
+The core runtime is written in Rust for safety, performance, and correctness — the properties that matter most for infrastructure that runs your critical business processes. But Sayiir is not a Rust-only tool. Python bindings are available today, with TypeScript and Go planned — so you get Rust's reliability without leaving your ecosystem. The binding is a thin layer: you write task functions in your language, Rust handles all orchestration, checkpointing, and execution.
 
 ## Performance
 
@@ -127,8 +149,6 @@ Designed to scale to **hundreds of thousands of concurrent activities**:
 - **Minimal coordination** — workers claim tasks independently
 - **Per-task checkpointing** — fine-grained durability
 - **No global locks** — optimistic concurrency
-
----
 
 ## Distributed Retry Resilience
 

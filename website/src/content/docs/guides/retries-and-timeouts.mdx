@@ -1,0 +1,179 @@
+---
+title: Retries & Timeouts
+description: Automatic retries with exponential backoff, timeout behavior, and durable retry state
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## How retries work
+
+When a task fails or times out, Sayiir automatically retries it with exponential backoff. The retry state—including the current retry count and next retry time—is checkpointed along with the workflow state.
+
+This means that if your process crashes during a backoff period, the retry will resume correctly after recovery, preserving the retry count and backoff timing.
+
+## Configuring retries
+
+You can configure retry behavior per task using `RetryPolicy`. The policy specifies:
+
+- `max_retries`: Maximum number of retry attempts
+- `initial_delay`: First backoff duration
+- `backoff_multiplier`: Multiplier for exponential backoff (e.g., 2.0 doubles the delay each retry)
+
+<Tabs>
+<TabItem label="Python">
+
+### Using the decorator
+
+```python
+from sayiir import task, Flow, RetryPolicy, run_durable_workflow
+import requests
+
+@task(
+    timeout_secs=10,
+    retries=RetryPolicy(
+        max_retries=2,
+        initial_delay_secs=1.0,
+        backoff_multiplier=2.0
+    )
+)
+def call_api(url: str) -> dict:
+    return requests.get(url).json()
+
+@task
+def process(data: dict) -> str:
+    return f"processed {len(data)} items"
+
+workflow = Flow("resilient").then(call_api).then(process).build()
+status = run_durable_workflow(workflow, "job-1", "https://api.example.com/data")
+```
+
+With this configuration:
+- First failure: retry after 1 second
+- Second failure: retry after 2 seconds (1.0 × 2.0)
+- Third failure: workflow fails (max_retries=2)
+
+</TabItem>
+<TabItem label="Rust">
+
+### Using TaskMetadata
+
+```rust
+use sayiir_core::task::{TaskMetadata, RetryPolicy};
+use std::time::Duration;
+
+let workflow = WorkflowBuilder::new(ctx)
+    .with_registry()
+    .then("call_api", |url: String| async move {
+        Ok(reqwest::get(&url).await?.json::<serde_json::Value>().await?)
+    })
+    .with_metadata(TaskMetadata {
+        timeout: Some(Duration::from_secs(10)),
+        retries: Some(RetryPolicy {
+            max_retries: 2,
+            initial_delay: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+        }),
+        ..Default::default()
+    })
+    .then("process", |data: serde_json::Value| async move {
+        Ok(format!("processed {} keys", data.as_object().map_or(0, |o| o.len())))
+    })
+    .build()?;
+```
+
+### Using the macro
+
+```rust
+use sayiir_macros::task;
+use sayiir_core::BoxError;
+
+#[task(timeout = "10s", retries = 2, backoff = "1s")]
+async fn call_api(url: String) -> Result<serde_json::Value, BoxError> {
+    Ok(reqwest::get(&url).await?.json().await?)
+}
+
+#[task]
+async fn process(data: serde_json::Value) -> Result<String, BoxError> {
+    Ok(format!("processed {} keys", data.as_object().map_or(0, |o| o.len())))
+}
+
+let workflow = WorkflowBuilder::new(ctx)
+    .with_registry()
+    .then_fn(call_api)
+    .then_fn(process)
+    .build()?;
+```
+
+</TabItem>
+</Tabs>
+
+## Timeout behavior
+
+When a task exceeds its configured timeout, Sayiir treats it as a failure and applies the retry policy. The task is cancelled and retried with exponential backoff, just like any other error.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task(timeout_secs=5, retries=RetryPolicy(max_retries=3, initial_delay_secs=2.0))
+def slow_operation(data: str) -> str:
+    # If this takes >5 seconds, it will be retried
+    time.sleep(10)
+    return data
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+#[task(timeout = "5s", retries = 3, backoff = "2s")]
+async fn slow_operation(data: String) -> Result<String, BoxError> {
+    // If this takes >5 seconds, it will be retried
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    Ok(data)
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Durable retry state
+
+Retry state is fully durable. If your process crashes during a backoff period, the workflow will resume with:
+
+- The correct retry count preserved
+- The remaining backoff time calculated correctly
+- No duplicate executions
+
+For example, if a task fails and is scheduled to retry in 10 seconds, but the process crashes after 3 seconds, resuming the workflow will wait the remaining 7 seconds before retrying the task.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import run_durable_workflow, resume_workflow
+
+# Start workflow with retries
+status = run_durable_workflow(workflow, "job-1", "https://flaky-api.com", backend=backend)
+
+# Process crashes during backoff...
+
+# Resume later - retry state is preserved
+status = resume_workflow(workflow, "job-1", backend=backend)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Start workflow with retries
+let status = runner.run(&workflow, "job-1", "https://flaky-api.com".to_string()).await?;
+
+// Process crashes during backoff...
+
+// Resume later - retry state is preserved
+let status = runner.resume(&workflow, "job-1").await?;
+```
+
+</TabItem>
+</Tabs>

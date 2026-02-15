@@ -1,0 +1,80 @@
+---
+title: Sayiir Server
+description: Managed platform tier for Sayiir — web dashboard, multi-tenancy, scheduling, observability, encryption, and Kubernetes-native deployment. Under active development.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+> Sayiir Server is under active development. [Join the Discord](https://discord.gg/MWSzsHeg) for early access and to shape the roadmap.
+
+Sayiir's open-source core gives you a fast, simple durable workflow library. **Sayiir Server** adds the operational layer — a managed platform for teams that need visibility, scheduling, multi-tenancy, and production-grade security without building it themselves.
+
+Same workflows. Same code. Just deploy to the server instead of running standalone.
+
+---
+
+## Planned Features
+
+<CardGrid>
+  <Card title="Web Dashboard" icon="laptop">
+    Visual workflow monitoring with real-time execution status, task-level drill-down, execution history, and searchable workflow instances.
+  </Card>
+  <Card title="Multi-Tenant Isolation" icon="approve-check-circle">
+    Namespace-based tenant isolation with per-tenant resource quotas, role-based access control (RBAC), and API key management.
+  </Card>
+  <Card title="Managed Scheduling" icon="seti:clock">
+    Cron-based triggers, event-driven workflow starts, webhook ingestion endpoints, and recurring workflow schedules — all configurable from the dashboard.
+  </Card>
+  <Card title="Observability" icon="open-book">
+    Native OpenTelemetry traces, Prometheus metrics endpoints, structured logging, and configurable alerting rules for workflow failures and SLA breaches.
+  </Card>
+</CardGrid>
+
+---
+
+## Security & Encryption
+
+- **Encryption at rest** — Workflow state, checkpoints, and signal payloads encrypted with AES-256-GCM
+- **Encryption in transit** — Mutual TLS (mTLS) between workers, server, and storage backends
+- **Secret management** — Inject secrets into tasks without persisting them in workflow state
+- **Audit logging** — Tamper-evident audit trail for all workflow operations (start, pause, cancel, signal, admin actions)
+
+## Kubernetes-Native Deployment
+
+- **Helm chart** — Single `helm install sayiir` for the full stack (server, dashboard, workers, PostgreSQL)
+- **Worker affinity / anti-affinity** — Schedule workers on specific nodes based on labels, taints, or topology constraints. Ensure GPU tasks land on GPU nodes, keep memory-heavy workers spread across zones
+- **Horizontal Pod Autoscaler** — Auto-scale workers based on task queue depth metrics
+- **Rolling upgrades** — Zero-downtime workflow deployments with graceful worker drain
+
+## Time-Critical Task Scheduling
+
+- **Priority queues** — Assign priority levels to workflows and tasks. High-priority tasks are claimed before low-priority ones, even under load
+- **Deadline-aware scheduling** — Tasks with approaching deadlines are automatically promoted in the queue
+- **Preemption** — Optional preemptive scheduling where time-critical tasks can interrupt lower-priority work
+- **SLA monitoring** — Define SLA targets per workflow. The dashboard tracks compliance and alerts on breaches before they happen
+
+## Architecture
+
+Sayiir Server runs as a lightweight gRPC service alongside your existing PostgreSQL backend. Workers connect to the server instead of polling the database directly, enabling centralized scheduling, authentication, and observability.
+
+```
+Your App → Sayiir Server (gRPC) → PostgreSQL
+               ↕
+         Worker Pool (auto-scaled)
+               ↕
+         Dashboard (web UI)
+```
+
+Your workflow code doesn't change. The same `#[task]` functions, the same `Flow` builder, the same `workflow!` macro — just pointed at the server endpoint instead of a direct database connection.
+
+---
+
+## Get Involved
+
+Sayiir Server is being designed in the open. We're looking for:
+
+- **Design partners** — Teams with production workflow needs who want to shape the feature set
+- **Early adopters** — Try pre-release builds and provide feedback
+- **Contributors** — Help build the server, dashboard, or Helm charts
+
+[Join the Discord](https://discord.gg/MWSzsHeg) or [open an issue](https://github.com/sayiir/sayiir/issues) to get started.
