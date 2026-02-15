@@ -1,0 +1,135 @@
+---
+title: Parallel Workflows
+description: Fork/join parallelism, branch composition, and join handlers
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Fork/Join Model
+
+Sayiir supports fork/join parallelism, allowing you to run multiple branches in parallel and collect their results in a join task. This pattern is ideal for independent operations that can execute concurrently, such as validating payment while checking inventory.
+
+## Basic Fork/Join
+
+The fork/join pattern splits execution into multiple parallel branches, then merges the results:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def validate_payment(order: dict) -> dict:
+    return {"payment": "valid"}
+
+@task
+def check_inventory(order: dict) -> dict:
+    return {"stock": "available"}
+
+@task
+def finalize(results: dict) -> str:
+    return f"Order complete: {results}"
+
+workflow = (
+    Flow("checkout")
+    .fork()
+        .branch(validate_payment)
+        .branch(check_inventory)
+    .join(finalize)
+    .build()
+)
+
+result = run_workflow(workflow, {"order_id": 1})
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let workflow = WorkflowBuilder::new(ctx)
+    .then("fetch_order", fetch_order)
+    .fork(|fork| {
+        fork.branch("validate_payment", validate_payment)
+            .branch("check_inventory", check_inventory)
+            .branch("calculate_shipping", calculate_shipping)
+    })
+    .join("finalize_order", |results| async move {
+        let payment = results.get("validate_payment")?;
+        let inventory = results.get("check_inventory")?;
+        let shipping = results.get("calculate_shipping")?;
+        Ok(Order::finalize(payment, inventory, shipping))
+    })
+    .build();
+```
+
+</TabItem>
+</Tabs>
+
+### Workflow Macro Syntax
+
+Rust also supports a concise macro syntax for fork/join:
+
+```rust
+workflow! {
+    validate_payment || check_inventory => finalize
+}
+```
+
+The `||` operator denotes parallel execution, and `=>` connects the fork to the join handler.
+
+## Multi-Step Branches
+
+In Python, you can chain multiple steps within a single branch using `.branch(step_a, step_b)`:
+
+```python
+workflow = (
+    Flow("complex_checkout")
+    .fork()
+        .branch(validate_payment, charge_card)
+        .branch(check_inventory, reserve_items)
+        .branch(calculate_shipping, book_courier)
+    .join(finalize_order)
+    .build()
+)
+```
+
+Each branch executes its steps sequentially, but branches run in parallel with each other.
+
+## Join Handler
+
+The join task receives a dictionary (Python) or map (Rust) containing the results from all branches. Each entry is keyed by the branch's task name:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task
+def finalize(results: dict) -> str:
+    payment = results["validate_payment"]
+    inventory = results["check_inventory"]
+    shipping = results["calculate_shipping"]
+
+    return f"Order processed: payment={payment}, stock={inventory}, shipping={shipping}"
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+.join("finalize_order", |results| async move {
+    let payment = results.get("validate_payment")?;
+    let inventory = results.get("check_inventory")?;
+    let shipping = results.get("calculate_shipping")?;
+
+    Ok(format!(
+        "Order processed: payment={:?}, stock={:?}, shipping={:?}",
+        payment, inventory, shipping
+    ))
+})
+```
+
+</TabItem>
+</Tabs>
+
+The join task only executes after all branches complete successfully. If any branch fails, the entire fork/join fails and triggers workflow retry logic.

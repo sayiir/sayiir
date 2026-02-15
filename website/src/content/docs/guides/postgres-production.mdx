@@ -1,0 +1,172 @@
+---
+title: PostgreSQL in Production
+description: PostgresBackend setup, migrations, connection pooling, and operational tips
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Setup
+
+`PostgresBackend` connects to a PostgreSQL database and automatically runs migrations on first connection. Sayiir requires PostgreSQL 13 or later.
+
+The backend stores workflow state, task checkpoints, and execution history in a set of tables that it creates and manages automatically.
+
+## Connection String
+
+Use standard PostgreSQL URL format:
+
+```
+postgresql://[user[:password]@][host][:port][/database][?parameters]
+```
+
+Examples:
+
+- `postgresql://localhost/sayiir`
+- `postgresql://user:pass@db.example.com:5432/workflows`
+- `postgresql://localhost/sayiir?sslmode=require`
+
+## Python Setup
+
+Create a `PostgresBackend` instance and pass it to `run_durable_workflow`:
+
+```python
+from sayiir import PostgresBackend, Flow, run_durable_workflow
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+status = run_durable_workflow(workflow, "order-123", 42, backend=backend)
+```
+
+The backend connects to the database and initializes tables on first use.
+
+## Rust Setup
+
+Use the `sayiir_postgres` crate and await the connection:
+
+<Tabs>
+<TabItem label="Basic">
+
+```rust
+use sayiir_postgres::PostgresBackend;
+use sayiir_runtime::prelude::*;
+
+let backend = PostgresBackend::<JsonCodec>::connect("postgresql://localhost/sayiir").await?;
+let runner = CheckpointingRunner::new(backend);
+let status = runner.run(&workflow, "order-123", input).await?;
+```
+
+</TabItem>
+<TabItem label="With Custom Codec">
+
+```rust
+use sayiir_postgres::PostgresBackend;
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+let codec = Arc::new(JsonCodec);
+let backend = PostgresBackend::connect_with_codec("postgresql://localhost/sayiir", codec).await?;
+let runner = CheckpointingRunner::new(backend);
+```
+
+</TabItem>
+</Tabs>
+
+The `connect` method is async and returns a `Result`. It establishes the connection pool and runs migrations automatically.
+
+## Automatic Migrations
+
+Sayiir creates its schema automatically on first connection. The migration system:
+
+- Creates tables if they don't exist
+- Applies incremental schema updates for new Sayiir versions
+- Is idempotent and safe to run concurrently from multiple processes
+
+You don't need to run manual migration scripts. Just connect and start using the backend.
+
+### Schema Tables
+
+Sayiir creates the following tables:
+
+- `workflow_instances` — Workflow execution state and metadata
+- `task_executions` — Individual task execution records
+- `checkpoints` — Task output data for workflow progression
+- `workflow_signals` — External signals waiting to be delivered
+
+All table names are prefixed with `sayiir_` by default to avoid conflicts.
+
+## Operational Tips
+
+### Use a Dedicated Database
+
+Create a separate PostgreSQL database for Sayiir:
+
+```sql
+CREATE DATABASE sayiir;
+```
+
+This isolates workflow state from application data and simplifies backup/restore operations.
+
+### Connection Pooling
+
+The `PostgresBackend` uses an internal connection pool. In Rust, you can configure pool parameters:
+
+```rust
+use sqlx::postgres::PgPoolOptions;
+
+let pool = PgPoolOptions::new()
+    .max_connections(20)
+    .connect("postgresql://localhost/sayiir")
+    .await?;
+
+let backend = PostgresBackend::from_pool(pool);
+```
+
+For Python, connection pooling is managed automatically with sensible defaults.
+
+### Monitoring
+
+Monitor these metrics in production:
+
+- **Workflow throughput** — Query `workflow_instances` for completion rates
+- **Task execution time** — Track `task_executions` duration
+- **Failure rates** — Count failed tasks and workflows
+- **Checkpoint growth** — Monitor `checkpoints` table size
+
+Example query for active workflows:
+
+```sql
+SELECT status, COUNT(*)
+FROM sayiir_workflow_instances
+WHERE created_at > NOW() - INTERVAL '1 hour'
+GROUP BY status;
+```
+
+### Backup and Recovery
+
+Sayiir's state is fully contained in PostgreSQL. Use standard PostgreSQL backup tools:
+
+- `pg_dump` for logical backups
+- Continuous archiving with WAL for point-in-time recovery
+- Regular snapshots for development/staging environments
+
+### Performance Tuning
+
+For high-throughput workloads:
+
+- Increase connection pool size to match worker count
+- Add indexes on `workflow_id` and `task_id` columns if querying frequently
+- Use `VACUUM ANALYZE` regularly to maintain query performance
+- Consider partitioning large tables by creation timestamp
+
+### Security
+
+- Use SSL/TLS connections in production (`sslmode=require`)
+- Create a dedicated PostgreSQL user for Sayiir with minimal privileges
+- Restrict network access to the database
+- Rotate credentials regularly
+
+Example user setup:
+
+```sql
+CREATE USER sayiir_app WITH PASSWORD 'secure_password';
+GRANT ALL PRIVILEGES ON DATABASE sayiir TO sayiir_app;
+```

@@ -68,54 +68,19 @@ No annotations. No YAML. No separate worker processes. Just code.
 
 ---
 
-## Features
-
-### Core (Open Source)
-
-| Feature                        | Status |
-| ------------------------------ | ------ |
-| Durable task execution         | ✅ |
-| Automatic checkpointing        | ✅ |
-| Fork/join parallelism          | ✅ |
-| Crash recovery and resume      | ✅ |
-| Pause and resume workflows     | ✅ |
-| Panic-safe execution           | ✅ |
-| Pluggable storage backends     | ✅ |
-| Durable timers/delays          | ✅ |
-| Signals / external events      | ✅ |
-| Automatic retries with backoff | ✅ |
-| Distributed worker pools       | ✅ |
-| Claim-based task distribution  | ✅ |
-| Zero-copy serialization (rkyv) | ✅ |
-| PostgreSQL backend (13+)       | ✅ |
-| Proc macros (`#[task]`, `workflow!`) | ✅ |
-
-### Python Bindings
-
-| Feature | Status |
-|---|---|
-| `@task` decorator with metadata | Done |
-| Fluent `Flow` builder API | Done |
-| Durable execution with checkpointing | Done |
-| Resume, cancel, pause and unpause | Done |
-| Fork/join with multi-step branches | Done |
-| Durable delays (`.delay()`) | Done |
-| Signals / external events (`.wait_for_signal()`, `send_signal()`) | Done |
-| Pydantic integration (automatic validation) | Done |
-| Type stubs and PEP 561 compliance | Done |
-| Async task support | Done |
-
----
-
 ## Documentation
+
+**[docs.sayiir.dev](https://docs.sayiir.dev)** — Full documentation with guides, tutorials, and API reference.
 
 | Topic | Description |
 |---|---|
-| [Why Sayiir](docs/why-sayiir.md) | How Sayiir is different, competitor comparison |
-| [Quick Start: Python](docs/quick-start-python.md) | Installation, examples (durable, delays, retries, fork/join, pydantic) |
-| [Quick Start: Rust](docs/quick-start-rust.md) | Examples (checkpointing, distributed, delays, retries, fork/join, registry) |
-| [Architecture](docs/architecture.md) | Hexagonal design, pluggable backends/codecs, performance |
-| [Use Cases](docs/use-cases.md) | Fintech, e-commerce, SaaS, healthcare, data/ML, AI agents, devops |
+| [Python Quick Start](https://docs.sayiir.dev/getting-started/python/) | Install, define tasks, build durable workflows |
+| [Rust Quick Start](https://docs.sayiir.dev/getting-started/rust/) | `#[task]` macro, `workflow!` DSL, CheckpointingRunner |
+| [How Sayiir Works](https://docs.sayiir.dev/concepts/how-it-works/) | The 3 design decisions that make Sayiir different |
+| [Architecture](https://docs.sayiir.dev/concepts/architecture/) | Hexagonal design, pluggable backends/codecs |
+| [Guides](https://docs.sayiir.dev/guides/durable-workflows/) | Retries, signals, fork/join, distributed workers, Postgres |
+| [Tutorials](https://docs.sayiir.dev/tutorials/order-processing-python/) | End-to-end walkthroughs with runnable examples |
+| [API Reference](https://docs.sayiir.dev/reference/python-api/) | Python and Rust API docs |
 | [Roadmap](ROADMAP.md) | What's planned next |
 | [Contributing](CONTRIBUTING.md) | How to set up, build, test, and submit PRs |
 

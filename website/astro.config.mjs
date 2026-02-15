@@ -1,0 +1,109 @@
+import { defineConfig } from "astro/config";
+import starlight from "@astrojs/starlight";
+import mermaid from "astro-mermaid";
+
+export default defineConfig({
+  site: "https://docs.sayiir.dev",
+  integrations: [
+    mermaid(),
+    starlight({
+      title: "Sayiir",
+      logo: {
+        src: "./public/favicon.png",
+      },
+      favicon: "/favicon.png",
+      social: [
+        { label: "GitHub", icon: "github", href: "https://github.com/sayiir/sayiir" },
+        { label: "Discord", icon: "discord", href: "https://discord.gg/MWSzsHeg" },
+      ],
+      editLink: {
+        baseUrl: "https://github.com/sayiir/sayiir/edit/main/website/",
+      },
+      customCss: ["./src/styles/custom.css"],
+      sidebar: [
+        {
+          label: "Getting Started",
+          items: [
+            { label: "Python Quick Start", slug: "getting-started/python" },
+            { label: "Rust Quick Start", slug: "getting-started/rust" },
+          ],
+        },
+        {
+          label: "Concepts",
+          items: [
+            { label: "How Sayiir Works", slug: "concepts/how-it-works" },
+            { label: "Architecture", slug: "concepts/architecture" },
+          ],
+        },
+        {
+          label: "Guides",
+          items: [
+            {
+              label: "Durable Workflows",
+              slug: "guides/durable-workflows",
+            },
+            {
+              label: "Retries & Timeouts",
+              slug: "guides/retries-and-timeouts",
+            },
+            {
+              label: "Signals & Events",
+              slug: "guides/signals-and-events",
+            },
+            {
+              label: "Parallel Workflows",
+              slug: "guides/parallel-workflows",
+            },
+            {
+              label: "Distributed Workers",
+              slug: "guides/distributed-workers",
+            },
+            {
+              label: "PostgreSQL in Production",
+              slug: "guides/postgres-production",
+            },
+          ],
+        },
+        {
+          label: "Tutorials",
+          items: [
+            {
+              label: "Order Processing (Python)",
+              slug: "tutorials/order-processing-python",
+            },
+            {
+              label: "Background Jobs (Rust)",
+              slug: "tutorials/background-jobs-rust",
+            },
+            {
+              label: "Approval Workflow (Signals)",
+              slug: "tutorials/approval-workflow",
+            },
+          ],
+        },
+        {
+          label: "API Reference",
+          items: [
+            { label: "Python API", slug: "reference/python-api" },
+            { label: "Rust API", slug: "reference/rust-api" },
+            { label: "Configuration", slug: "reference/configuration" },
+          ],
+        },
+        {
+          label: "Comparisons",
+          items: [
+            { label: "Overview", slug: "comparisons/overview" },
+            { label: "vs Temporal", slug: "comparisons/vs-temporal" },
+            { label: "vs Airflow", slug: "comparisons/vs-airflow" },
+          ],
+        },
+        {
+          label: "Sayiir Server",
+          items: [
+            { label: "Platform Overview", slug: "server", badge: "Soon" },
+          ],
+        },
+      ],
+    }),
+  ],
+});

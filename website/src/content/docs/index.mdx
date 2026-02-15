@@ -1,0 +1,78 @@
+---
+title: Sayiir — Fast, Simple Durable Workflow Engine
+description: Fast, lightweight durable workflow engine for Python and Rust. Zero learning curve — write normal async code with automatic checkpointing, retries, and crash recovery. No DSL, no infrastructure, native performance.
+template: splash
+hero:
+  tagline: The fast, simple durable workflow engine. Zero learning curve — just write normal Python or Rust. Native performance, automatic checkpointing, no infrastructure to deploy.
+  actions:
+    - text: Get Started (Python)
+      link: /getting-started/python/
+      icon: right-arrow
+      variant: primary
+    - text: Get Started (Rust)
+      link: /getting-started/rust/
+      icon: right-arrow
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Zero Learning Curve" icon="rocket">
+    No new DSL. No replay constraints. Write normal async code — Sayiir makes it durable automatically.
+  </Card>
+  <Card title="Simple — Library Not Platform" icon="puzzle">
+    `pip install sayiir` or add a Cargo dependency. No orchestrator to deploy, no infrastructure to manage.
+  </Card>
+  <Card title="Fast — Native Rust Performance" icon="star">
+    Rust core with zero-copy serialization (rkyv). Sub-millisecond checkpointing, hundreds of thousands of concurrent activities.
+  </Card>
+  <Card title="Pluggable & Lightweight" icon="setting">
+    Swap backends, codecs, and runners. InMemory for tests, Postgres for production. Minimal footprint.
+  </Card>
+</CardGrid>
+
+## Python
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def fetch_user(user_id: int) -> dict:
+    return {"id": user_id, "name": "Alice"}
+
+@task
+def send_email(user: dict) -> str:
+    return f"Sent welcome to {user['name']}"
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+result = run_workflow(workflow, 42)
+```
+
+## Rust
+
+```rust
+use sayiir_runtime::prelude::*;
+
+#[task(timeout = "30s", retries = 3)]
+async fn fetch_user(id: u64) -> Result<User, BoxError> {
+    db.get_user(id).await
+}
+
+#[task]
+async fn send_email(user: User) -> Result<(), BoxError> {
+    email_service.send_welcome(&user).await
+}
+
+let workflow = workflow!("welcome", JsonCodec, registry,
+    fetch_user => send_email
+).unwrap();
+```
+
+---
+
+## Need More?
+
+<Card title="Sayiir Server — Coming Soon" icon="laptop">
+  Same workflows, same code — plus a managed platform with a **web dashboard**, **multi-tenancy**, **scheduled triggers**, **observability**, and **Kubernetes-native deployment**. [Learn more →](/server/)
+</Card>
