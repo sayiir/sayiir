@@ -71,6 +71,7 @@ impl PyFlowBuilder {
     /// Add a sequential task.
     #[pyo3(signature = (task_id, metadata=None))]
     fn then(&mut self, task_id: String, metadata: Option<PyTaskMetadata>) {
+        tracing::trace!(workflow_id = %self.workflow_id, %task_id, "adding sequential task");
         self.tasks.push(BuilderTask::Sequential {
             task_id,
             metadata: metadata.map(Into::into).unwrap_or_default(),
@@ -104,6 +105,12 @@ impl PyFlowBuilder {
                 "Fork must have at least one branch",
             ));
         }
+        tracing::trace!(
+            workflow_id = %self.workflow_id,
+            branch_count = branches.len(),
+            %join_id,
+            "adding fork"
+        );
         for (i, branch) in branches.iter().enumerate() {
             if branch.is_empty() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -130,9 +137,20 @@ impl PyFlowBuilder {
 
     /// Build the workflow.
     fn build(&self) -> PyResult<PyWorkflow> {
+        tracing::debug!(
+            workflow_id = %self.workflow_id,
+            task_count = self.tasks.len(),
+            "building workflow"
+        );
         let continuation = self.build_continuation()?;
         let serializable = continuation.to_serializable();
         let definition_hash = serializable.compute_definition_hash();
+
+        tracing::info!(
+            workflow_id = %self.workflow_id,
+            %definition_hash,
+            "workflow built"
+        );
 
         Ok(PyWorkflow {
             workflow_id: self.workflow_id.clone(),

@@ -159,14 +159,16 @@ impl PyWorkflowEngine {
         let input_bytes = encode_pyobject(py, input)?;
         let continuation = Arc::clone(&workflow.continuation);
 
-        // Use shared execution logic from sayiir-runtime.
-        // Preserve the Python traceback through the Rust execution loop.
+        tracing::info!(workflow_id = %workflow.workflow_id, "starting workflow execution");
+
         let result = execute_continuation_sync(&continuation, input_bytes, &|task_id, input| {
             execute_python_task(py, task_id, &input, task_registry).map_err(|e| {
                 let traceback = e
                     .traceback(py)
                     .and_then(|tb| tb.format().ok())
                     .unwrap_or_default();
+
+                // Preserve the Python traceback through the Rust execution loop.
                 let msg: sayiir_core::error::BoxError = if traceback.is_empty() {
                     e.to_string().into()
                 } else {
@@ -176,6 +178,8 @@ impl PyWorkflowEngine {
             })
         })
         .map_err(|e| PyErr::new::<crate::exceptions::TaskError, _>(e.to_string()))?;
+
+        tracing::info!(workflow_id = %workflow.workflow_id, "workflow execution completed");
 
         decode_to_pyobject(py, &result)
     }
@@ -192,27 +196,65 @@ pub(crate) fn execute_python_task(
     input: &Bytes,
     registry: &Bound<'_, PyDict>,
 ) -> PyResult<Bytes> {
-    // Look up task — the registry maps task_id to the callable directly
     let callable = registry.get_item(task_id)?.ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Task '{task_id}' not found"))
     })?;
 
-    // Decode input
-    let input_obj = decode_to_pyobject(py, input)?;
+    tracing::debug!(task_id, input_bytes = input.len(), "executing python task");
 
-    // Call function
+    let input_obj = decode_to_pyobject(py, input)?;
     let result = callable.call1((input_obj,))?;
 
-    // Handle async (coroutine) — run synchronously via asyncio.run().
-    // This creates a new event loop, so it must NOT be called from within
-    // an already-running loop (e.g. Jupyter). For that use case, the planned
-    // async execution path will be needed.
     let result = if result.getattr(intern!(py, "__await__")).is_ok() {
+        tracing::debug!(task_id, "task returned coroutine, awaiting synchronously");
+
         let asyncio = py.import(intern!(py, "asyncio"))?;
-        asyncio.call_method1(intern!(py, "run"), (result,))?
+        let has_running_loop = asyncio
+            .call_method0(intern!(py, "get_running_loop"))
+            .is_ok();
+
+        if has_running_loop {
+            tracing::trace!(
+                task_id,
+                "event loop already running, using background thread"
+            );
+            py.run(
+                c"
+def _run_coro_in_thread(coro):
+    import asyncio, threading
+    result = [None]
+    exc = [None]
+    def target():
+        loop = asyncio.new_event_loop()
+        try:
+            result[0] = loop.run_until_complete(coro)
+        except BaseException as e:
+            exc[0] = e
+        finally:
+            loop.close()
+    t = threading.Thread(target=target)
+    t.start()
+    t.join()
+    if exc[0] is not None:
+        raise exc[0]
+    return result[0]
+",
+                None,
+                None,
+            )?;
+            let globals = py
+                .import(intern!(py, "__main__"))?
+                .getattr(intern!(py, "__dict__"))?;
+            let run_fn = globals.get_item("_run_coro_in_thread")?;
+            run_fn.call1((result,))?
+        } else {
+            asyncio.call_method1(intern!(py, "run"), (result,))?
+        }
     } else {
         result
     };
+
+    tracing::debug!(task_id, "python task completed");
 
     encode_pyobject(py, &result)
 }

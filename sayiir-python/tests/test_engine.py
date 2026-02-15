@@ -409,3 +409,143 @@ class TestValidation:
     def test_fork_with_no_branches_raises(self):
         with pytest.raises(ValueError, match="at least one branch"):
             Flow("bad").fork().join(join_branches).build()
+
+
+# ── Async task tests ────────────────────────────────────────────
+
+
+@task
+async def async_double(x):
+    return x * 2
+
+
+@task
+async def async_add_one(x):
+    return x + 1
+
+
+@task
+async def async_failing(_x):
+    raise ValueError("async failure")
+
+
+class TestAsyncSimpleEngine:
+    def test_single_async_task(self):
+        wf = Flow("async-single").then(async_double).build()
+        assert run_workflow(wf, 21) == 42
+
+    def test_chained_async_tasks(self):
+        wf = Flow("async-chain").then(async_double).then(async_add_one).build()
+        assert run_workflow(wf, 10) == 21
+
+    def test_mixed_sync_and_async(self):
+        wf = Flow("mixed").then(double).then(async_add_one).build()
+        assert run_workflow(wf, 10) == 21
+
+    def test_async_fork_join(self):
+        @task
+        async def async_branch_a(x):
+            return x + 10
+
+        @task
+        async def async_branch_b(x):
+            return x + 20
+
+        @task
+        async def async_sum_join(data):
+            return data["async_branch_a"] + data["async_branch_b"]
+
+        wf = (
+            Flow("async-fork")
+            .fork()
+            .branch(async_branch_a)
+            .branch(async_branch_b)
+            .join(async_sum_join)
+            .build()
+        )
+        assert run_workflow(wf, 5) == 40  # (5+10) + (5+20)
+
+    def test_async_task_error_propagates(self):
+        wf = Flow("async-fail").then(async_failing).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+
+
+class TestInlineTasks:
+    """Tests for inline (non-@task) callables in Flow."""
+
+    def test_single_lambda(self):
+        wf = Flow("lambda-single").then(lambda x: x * 2).build()
+        assert run_workflow(wf, 21) == 42
+
+    def test_chained_lambdas_no_collision(self):
+        wf = Flow("lambda-chain").then(lambda x: x * 2).then(lambda x: x + 1).build()
+        assert run_workflow(wf, 10) == 21  # (10 * 2) + 1
+
+    def test_mixed_task_and_lambda(self):
+        wf = (
+            Flow("mixed-lambda")
+            .then(double)
+            .then(lambda x: x + 1)
+            .then(to_string)
+            .build()
+        )
+        assert run_workflow(wf, 5) == "11"  # str((5 * 2) + 1)
+
+    def test_plain_undecorated_function(self):
+        def triple(x):
+            return x * 3
+
+        wf = Flow("plain-func").then(triple).build()
+        assert run_workflow(wf, 7) == 21
+
+    def test_explicit_name(self):
+        wf = Flow("named-lambda").then(lambda x: x * 2, name="my_double").build()
+        assert run_workflow(wf, 5) == 10
+        assert "my_double" in wf._task_registry
+
+    def test_lambda_in_fork_branches(self):
+        @task
+        def sum_join_inline(data):
+            return data["lambda_0"] + data["lambda_1"]
+
+        wf = (
+            Flow("lambda-fork")
+            .fork()
+            .branch(lambda x: x + 10)
+            .branch(lambda x: x + 20)
+            .join(sum_join_inline)
+            .build()
+        )
+        assert run_workflow(wf, 5) == 40  # (5+10) + (5+20)
+
+    def test_lambda_error_propagation(self):
+        wf = Flow("lambda-fail").then(lambda _: 1 / 0).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+
+
+class TestAsyncDurableEngine:
+    def test_async_single_task(self):
+        wf = Flow("async-durable").then(async_double).build()
+        status = run_durable_workflow(wf, "async-inst-1", 21)
+        assert status.is_completed()
+        assert status.output == 42
+
+    def test_async_chained_tasks(self):
+        wf = Flow("async-durable-chain").then(async_double).then(async_add_one).build()
+        status = run_durable_workflow(wf, "async-inst-2", 10)
+        assert status.is_completed()
+        assert status.output == 21
+
+    def test_async_failed_status(self):
+        wf = Flow("async-durable-fail").then(async_failing).build()
+        status = run_durable_workflow(wf, "async-inst-fail", 0)
+        assert status.is_failed()
+        assert "async failure" in status.error
+
+    def test_mixed_sync_async_durable(self):
+        wf = Flow("mixed-durable").then(async_double).then(add_one).build()
+        status = run_durable_workflow(wf, "mixed-inst", 10)
+        assert status.is_completed()
+        assert status.output == 21

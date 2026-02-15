@@ -52,6 +52,24 @@ Requires a Rust toolchain (`rustup`) for building from source.
 
 ## Quickstart
 
+### Inline lambdas — zero boilerplate
+
+```python
+from sayiir import Flow, run_workflow
+
+workflow = (
+    Flow("pipeline")
+    .then(lambda x: x * 2)
+    .then(lambda x: x + 1)
+    .then(lambda x: str(x))
+    .build()
+)
+result = run_workflow(workflow, 5)
+# "11"  (5 * 2 = 10, 10 + 1 = 11, str(11))
+```
+
+No decorators, no registration — just pass any callable. Use `@task` when you need metadata (retries, timeouts, tags) or explicit naming.
+
 ### Sequential workflow
 
 ```python
@@ -203,7 +221,7 @@ def process_payment(order: dict) -> dict:
 ### Flow Builder
 
 - **`Flow(name)`** — Create a new workflow builder.
-- **`.then(task_fn)`** — Append a task to the workflow.
+- **`.then(task_fn, *, name=None)`** — Append a task to the workflow. Accepts `@task`-decorated functions, plain functions, or lambdas. Use `name` to set an explicit task ID.
 - **`.fork()`** — Start parallel branches. Returns a `ForkBuilder`.
 - **`.branch(task_fn, ...)`** — Add a branch (one or more chained tasks).
 - **`.join(task_fn)`** — Merge parallel branches. Join function receives `dict[str, value]`.

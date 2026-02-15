@@ -22,6 +22,7 @@ sayiir-core = { path = "../sayiir-core" }
 sayiir-persistence = { path = "../sayiir-persistence" }
 sayiir-postgres = { path = "../sayiir-postgres" }
 sayiir-runtime = { path = "../sayiir-runtime" }
+tracing = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = "0.28"
