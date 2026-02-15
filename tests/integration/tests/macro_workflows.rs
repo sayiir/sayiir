@@ -79,6 +79,35 @@ async fn process(order: Order) -> Result<Receipt, BoxError> {
     })
 }
 
+// ─── Custom error type ───────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct MyError(String);
+
+impl std::fmt::Display for MyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MyError: {}", self.0)
+    }
+}
+
+impl std::error::Error for MyError {}
+
+#[task]
+async fn fallible_custom_err(input: u32) -> Result<u32, MyError> {
+    if input == 0 {
+        Err(MyError("zero not allowed".into()))
+    } else {
+        Ok(input + 1)
+    }
+}
+
+// ─── Infallible task ─────────────────────────────────────────────────────────
+
+#[task]
+async fn infallible_add(input: u32) -> u32 {
+    input + 42
+}
+
 // ─── 1. #[task] basic — struct generation, CoreTask impl ────────────────────
 
 #[test]
@@ -135,6 +164,36 @@ fn original_fn_preserved() {
         .block_on(add_ten(5u32))
         .unwrap();
     assert_eq!(result, 15);
+}
+
+#[test]
+fn task_custom_error_type_ok() {
+    let task = FallibleCustomErr::new();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(task.run(5u32))
+        .unwrap();
+    assert_eq!(result, 6);
+}
+
+#[test]
+fn task_custom_error_type_err() {
+    let task = FallibleCustomErr::new();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(task.run(0u32));
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("zero not allowed"));
+}
+
+#[test]
+fn task_infallible_return() {
+    let task = InfallibleAdd::new();
+    let result = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(task.run(8u32))
+        .unwrap();
+    assert_eq!(result, 50);
 }
 
 // ─── 2. #[task] registration with codec ──────────────────────────────────────

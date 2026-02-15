@@ -46,6 +46,11 @@ mod workflow;
 /// - Exactly **one** non-`#[inject]` parameter: the task input type
 /// - Zero or more `#[inject]` parameters: dependency-injected fields
 ///
+/// # Return Types
+///
+/// - `Result<T, E>` — fallible; `E` is converted via `Into<BoxError>`
+/// - `T` — infallible; automatically wrapped in `Ok(...)`
+///
 /// # Generated Code
 ///
 /// - A PascalCase struct (e.g., `fn charge` → `struct Charge`)

@@ -141,7 +141,7 @@ jobs:
   bench:
     name: Benchmarks
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' && contains(github.event.pull_request.labels.*.name, 'benchmarks')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR branch

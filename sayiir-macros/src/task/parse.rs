@@ -43,6 +43,16 @@ pub struct Param {
     pub is_inject: bool,
 }
 
+/// How the task function returns its output.
+#[derive(Debug)]
+pub enum ReturnKind {
+    /// `Result<T, BoxError>` or `Result<T, E>` — the function is fallible.
+    /// The error type will be converted via `Into<BoxError>`.
+    Fallible,
+    /// Plain `T` — the function is infallible; output is wrapped in `Ok(...)`.
+    Infallible,
+}
+
 /// The fully parsed task definition.
 #[derive(Debug)]
 pub struct ParsedTask {
@@ -53,6 +63,7 @@ pub struct ParsedTask {
     pub input_param: Param,
     pub inject_params: Vec<Param>,
     pub output_type: Box<Type>,
+    pub return_kind: ReturnKind,
     pub original_fn: ItemFn,
 }
 
@@ -114,8 +125,9 @@ impl ParsedTask {
             )
         })?;
 
-        // Validation 3: return type must be Result<T, _>
-        let output_type = extract_result_ok_type(&item_fn.sig.output, item_fn.sig.fn_token.span)?;
+        // Validation 3: extract return type — Result<T, E> or plain T
+        let (output_type, return_kind) =
+            extract_output_type(&item_fn.sig.output, item_fn.sig.fn_token.span)?;
 
         let fn_name = item_fn.sig.ident.clone();
         let task_id = attrs.id.clone().unwrap_or_else(|| fn_name.to_string());
@@ -129,6 +141,7 @@ impl ParsedTask {
             input_param,
             inject_params,
             output_type,
+            return_kind,
             original_fn: item_fn,
         })
     }
@@ -155,27 +168,32 @@ fn extract_ident(pat: &Pat) -> syn::Result<syn::Ident> {
     }
 }
 
-/// Extract the `T` from `Result<T, _>` in the return type.
-fn extract_result_ok_type(ret: &ReturnType, fn_span: Span) -> syn::Result<Box<Type>> {
+/// Extract the output type and return kind from the function's return type.
+///
+/// - `Result<T, E>` → `(T, Fallible)` — error converted via `Into<BoxError>`
+/// - `T`            → `(T, Infallible)` — wrapped in `Ok(...)`
+/// - No return type → error
+fn extract_output_type(ret: &ReturnType, fn_span: Span) -> syn::Result<(Box<Type>, ReturnKind)> {
     let ty = match ret {
         ReturnType::Default => {
-            return Err(err(fn_span, "#[task] function must return Result<T, _>"));
+            return Err(err(
+                fn_span,
+                "#[task] function must have a return type (e.g. `-> Result<T, E>` or `-> T`)",
+            ));
         }
         ReturnType::Type(_, ty) => ty,
     };
 
-    // Walk through the type to find Result<T, E>
+    // Try to extract Result<T, E>
     if let Type::Path(type_path) = ty.as_ref()
         && let Some(segment) = type_path.path.segments.last()
         && segment.ident == "Result"
         && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
         && let Some(syn::GenericArgument::Type(ok_ty)) = args.args.first()
     {
-        return Ok(Box::new(ok_ty.clone()));
+        return Ok((Box::new(ok_ty.clone()), ReturnKind::Fallible));
     }
 
-    Err(err(
-        syn::spanned::Spanned::span(ty.as_ref()),
-        "#[task] function must return Result<T, _> (e.g. Result<Receipt, BoxError>)",
-    ))
+    // Not a Result — treat the whole type as infallible output
+    Ok((ty.clone(), ReturnKind::Infallible))
 }

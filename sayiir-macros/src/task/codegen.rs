@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::task::parse::ParsedTask;
+use crate::task::parse::{ParsedTask, ReturnKind};
 use crate::util::snake_to_pascal;
 
 /// Generate all output code from a parsed task definition.
@@ -190,6 +190,18 @@ fn gen_core_task(parsed: &ParsedTask) -> TokenStream {
         .chain(parsed.inject_params.iter())
         .map(|p| &p.ident);
 
+    // How we convert the function's return value into Result<Output, BoxError>
+    let call_expr = match parsed.return_kind {
+        // Result<T, E> → .map_err(Into::into) handles both E = BoxError (no-op) and custom errors
+        ReturnKind::Fallible => quote! {
+            #fn_name(#(#all_args),*).await.map_err(::std::convert::Into::into)
+        },
+        // Plain T → wrap in Ok(...)
+        ReturnKind::Infallible => quote! {
+            Ok(#fn_name(#(#all_args),*).await)
+        },
+    };
+
     quote! {
         impl ::sayiir_core::task::CoreTask for #name {
             type Input = #input_ty;
@@ -200,7 +212,7 @@ fn gen_core_task(parsed: &ParsedTask) -> TokenStream {
 
             fn run(&self, #input_ident: #input_ty) -> Self::Future {
                 #(#clone_stmts)*
-                Box::pin(async move { #fn_name(#(#all_args),*).await })
+                Box::pin(async move { #call_expr })
             }
         }
     }
