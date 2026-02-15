@@ -121,12 +121,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-workspaces
+        run: cargo install cargo-workspaces
+
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: |
-          cargo publish -p sayiir-core
-          cargo publish -p sayiir-macros
-          cargo publish -p sayiir-persistence
-          cargo publish -p sayiir-postgres
-          cargo publish -p sayiir-runtime
+        run: cargo ws publish --from-git --yes --token "$CARGO_REGISTRY_TOKEN"
