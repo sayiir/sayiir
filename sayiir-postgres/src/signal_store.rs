@@ -40,7 +40,7 @@ where
                 .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
         let status: String = row.get("status");
-        validate_signal_allowed(&status, &kind)?;
+        validate_signal_allowed(&status, kind)?;
 
         sqlx::query(
             "INSERT INTO sayiir_workflow_signals (instance_id, kind, reason, requested_by)
@@ -378,7 +378,7 @@ where
 }
 
 /// Validate that a signal can be sent to a workflow in the given state.
-fn validate_signal_allowed(status: &str, kind: &SignalKind) -> Result<(), BackendError> {
+fn validate_signal_allowed(status: &str, kind: SignalKind) -> Result<(), BackendError> {
     use std::str::FromStr;
 
     let Ok(status) = SnapshotStatus::from_str(status) else {

@@ -50,8 +50,10 @@ where
             instance_id: r.get("instance_id"),
             task_id: r.get("task_id"),
             worker_id: r.get("worker_id"),
-            claimed_at: r.get::<i64, _>("claimed_epoch") as u64,
-            expires_at: r.get::<Option<i64>, _>("expires_epoch").map(|e| e as u64),
+            claimed_at: r.get::<i64, _>("claimed_epoch").cast_unsigned(),
+            expires_at: r
+                .get::<Option<i64>, _>("expires_epoch")
+                .map(i64::cast_unsigned),
         }))
     }
 
@@ -174,7 +176,7 @@ where
              ORDER BY s.updated_at ASC
              LIMIT $1",
         )
-        .bind(limit as i64)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(&self.pool)
         .await
         .map_err(PgError)?;

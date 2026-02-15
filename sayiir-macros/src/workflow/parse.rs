@@ -89,6 +89,7 @@ fn parse_step_or_parallel(input: ParseStream) -> syn::Result<WorkflowStep> {
 /// Parse a single step (not parallel).
 fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
     // delay "5s"  OR  delay "my_id" "5s"
+    // signal "approval"  OR  signal "my_id" "approval"  OR  signal "approval" timeout "30s"
     if input.peek(Ident) && input.peek2(LitStr) {
         let ident: Ident = input.parse()?;
         if ident == "delay" {
@@ -115,11 +116,45 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
                 span: ident.span(),
             });
         }
-        // Not "delay", fall through — but we consumed the ident, so we need to handle it
+        if ident == "signal" {
+            let first_lit: LitStr = input.parse()?;
+
+            // Check if there's a second string literal (custom ID + signal name)
+            if input.peek(LitStr) {
+                let second_lit: LitStr = input.parse()?;
+                let id = first_lit.value();
+                let signal_name = second_lit.value();
+
+                // Optional timeout: `timeout "30s"`
+                let timeout = parse_optional_timeout(input)?;
+
+                return Ok(WorkflowStep::AwaitSignal {
+                    id,
+                    signal_name,
+                    timeout,
+                    span: ident.span(),
+                });
+            }
+
+            // Single string literal — signal name only, auto-generate ID
+            let signal_name = first_lit.value();
+            let id = format!("signal_{signal_name}");
+
+            // Optional timeout: `timeout "30s"`
+            let timeout = parse_optional_timeout(input)?;
+
+            return Ok(WorkflowStep::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                span: ident.span(),
+            });
+        }
+        // Not "delay" or "signal", fall through — but we consumed the ident, so we need to handle it
         return Err(err(
             ident.span(),
             format!(
-                "unexpected identifier `{ident}` followed by string literal; did you mean `delay`?"
+                "unexpected identifier `{ident}` followed by string literal; did you mean `delay` or `signal`?"
             ),
         ));
     }
@@ -158,7 +193,23 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         });
     }
 
-    Err(input.error("expected a task name, inline task, `delay`, or `(`"))
+    Err(input.error("expected a task name, inline task, `delay`, `signal`, or `(`"))
+}
+
+/// Parse an optional `timeout "30s"` suffix.
+fn parse_optional_timeout(input: ParseStream) -> syn::Result<Option<DurationLit>> {
+    if input.peek(Ident) {
+        let fork = input.fork();
+        let kw: Ident = fork.parse()?;
+        if kw == "timeout" {
+            // Consume from real stream
+            let _: Ident = input.parse()?;
+            let lit: LitStr = input.parse()?;
+            let dur = DurationLit::parse(&lit.value(), lit.span())?;
+            return Ok(Some(dur));
+        }
+    }
+    Ok(None)
 }
 
 impl WorkflowStep {
@@ -167,7 +218,8 @@ impl WorkflowStep {
             Self::TaskRef { span, .. }
             | Self::InlineTask { span, .. }
             | Self::Parallel { span, .. }
-            | Self::Delay { span, .. } => *span,
+            | Self::Delay { span, .. }
+            | Self::AwaitSignal { span, .. } => *span,
         }
     }
 }
