@@ -1,8 +1,28 @@
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::Ident;
 
 use super::ast::WorkflowStep;
 use crate::util::err;
+
+/// Collect all `TaskRef` struct names from the pipeline (including inside forks).
+pub fn collect_task_refs(steps: &[WorkflowStep]) -> Vec<&Ident> {
+    let mut refs = Vec::new();
+    for step in steps {
+        match step {
+            WorkflowStep::TaskRef { struct_name, .. } => {
+                refs.push(struct_name);
+            }
+            WorkflowStep::Parallel { branches, .. } => {
+                refs.extend(collect_task_refs(branches));
+            }
+            WorkflowStep::InlineTask { .. }
+            | WorkflowStep::Delay { .. }
+            | WorkflowStep::AwaitSignal { .. } => {}
+        }
+    }
+    refs
+}
 
 /// Generate the chained method calls, handling fork-join grouping.
 pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
@@ -98,6 +118,24 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                 let dur = duration.to_tokens();
                 tokens.extend(quote! {
                     .delay(#id, #dur)
+                });
+                i += 1;
+            }
+            WorkflowStep::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                ..
+            } => {
+                let timeout_expr = match timeout {
+                    Some(dur) => {
+                        let dur_tokens = dur.to_tokens();
+                        quote! { ::core::option::Option::Some(#dur_tokens) }
+                    }
+                    None => quote! { ::core::option::Option::None },
+                };
+                tokens.extend(quote! {
+                    .wait_for_signal(#id, #signal_name, #timeout_expr)
                 });
                 i += 1;
             }

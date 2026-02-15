@@ -52,4 +52,13 @@ pub enum WorkflowStep {
         duration: DurationLit,
         span: Span,
     },
+
+    /// Wait for an external signal.
+    /// e.g. `signal "approval"` or `signal "my_id" "approval" timeout "30s"`
+    AwaitSignal {
+        id: String,
+        signal_name: String,
+        timeout: Option<DurationLit>,
+        span: Span,
+    },
 }

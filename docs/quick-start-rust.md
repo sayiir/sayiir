@@ -84,15 +84,8 @@ async fn send_email(receipt: Receipt) -> Result<(), BoxError> {
     Ok(())
 }
 
-// Register tasks
-let codec = Arc::new(JsonCodec);
-let mut registry = TaskRegistry::new();
-Validate::register(&mut registry, codec.clone(), Validate::new());
-Charge::register(&mut registry, codec.clone(), Charge::new());
-SendEmail::register(&mut registry, codec.clone(), SendEmail::new());
-
-// Build the workflow
-let workflow = workflow!("order-process", JsonCodec, registry,
+// Build the workflow — tasks are auto-registered by the macro
+let workflow = workflow!("order-process", JsonCodec, TaskRegistry::new(),
     validate => charge => send_email
 ).unwrap();
 ```
@@ -105,6 +98,7 @@ let workflow = workflow!("order-process", JsonCodec, registry,
 | `name(param: Type) { expr }` | Inline task (no registration needed) |
 | `a \|\| b` | Parallel fork (branches) |
 | `delay "5s"` | Durable delay |
+| `signal "name"` | Wait for external signal |
 | `=>` | Sequential chain (or join after `\|\|`) |
 
 ### Fork-join example

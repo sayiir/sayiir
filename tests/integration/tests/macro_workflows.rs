@@ -271,12 +271,7 @@ async fn workflow_macro_linear() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let codec = Arc::new(JsonCodec);
-    let mut registry = TaskRegistry::new();
-    AddTen::register(&mut registry, codec.clone(), AddTen::new());
-    Double::register(&mut registry, codec.clone(), Double::new());
-
-    let workflow = workflow!("linear-test", JsonCodec, registry,
+    let workflow = workflow!("linear-test", JsonCodec, TaskRegistry::new(),
         add_ten => double
     )
     .unwrap();
@@ -296,11 +291,7 @@ async fn workflow_macro_inline_task() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let codec = Arc::new(JsonCodec);
-    let mut registry = TaskRegistry::new();
-    Double::register(&mut registry, codec.clone(), Double::new());
-
-    let workflow = workflow!("inline-test", JsonCodec, registry,
+    let workflow = workflow!("inline-test", JsonCodec, TaskRegistry::new(),
         add_five(x: u32) { Ok(x + 5) }
         => double
     )
@@ -344,14 +335,7 @@ async fn workflow_macro_fork_join() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let codec = Arc::new(JsonCodec);
-    let mut registry = TaskRegistry::new();
-    AddTen::register(&mut registry, codec.clone(), AddTen::new());
-    BranchA::register(&mut registry, codec.clone(), BranchA::new());
-    BranchB::register(&mut registry, codec.clone(), BranchB::new());
-    JoinBranches::register(&mut registry, codec.clone(), JoinBranches::new());
-
-    let workflow = workflow!("fork-join-test", JsonCodec, registry,
+    let workflow = workflow!("fork-join-test", JsonCodec, TaskRegistry::new(),
         add_ten
         => branch_a || branch_b
         => join_branches
@@ -360,6 +344,43 @@ async fn workflow_macro_fork_join() {
 
     let status = runner
         .run(workflow.workflow(), "fork-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── 7. workflow! macro — signal step ────────────────────────────────────────
+
+#[tokio::test]
+async fn workflow_macro_signal() {
+    use sayiir_persistence::SignalStore;
+
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow!("signal-test", JsonCodec, TaskRegistry::new(),
+        add_ten => signal "approval" => double
+    )
+    .unwrap();
+
+    // 5 + 10 = 15, then parks at signal
+    let status = runner
+        .run(workflow.workflow(), "signal-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::AwaitingSignal { .. }));
+
+    // Send the signal with the current value as payload
+    let payload: bytes::Bytes = serde_json::to_vec(&15u32).unwrap().into();
+    runner
+        .backend()
+        .send_event("signal-inst-1", "approval", payload)
+        .await
+        .unwrap();
+
+    // Resume — consumes the signal, then 15 * 2 = 30
+    let status = runner
+        .resume(workflow.workflow(), "signal-inst-1")
         .await
         .unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
