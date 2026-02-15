@@ -88,12 +88,26 @@ fn parse_step_or_parallel(input: ParseStream) -> syn::Result<WorkflowStep> {
 
 /// Parse a single step (not parallel).
 fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
-    // delay "5s"
+    // delay "5s"  OR  delay "my_id" "5s"
     if input.peek(Ident) && input.peek2(LitStr) {
         let ident: Ident = input.parse()?;
         if ident == "delay" {
-            let lit: LitStr = input.parse()?;
-            let duration = DurationLit::parse(&lit.value(), lit.span())?;
+            let first_lit: LitStr = input.parse()?;
+
+            // Check if there's a second string literal (custom ID + duration)
+            if input.peek(LitStr) {
+                let second_lit: LitStr = input.parse()?;
+                let id = first_lit.value();
+                let duration = DurationLit::parse(&second_lit.value(), second_lit.span())?;
+                return Ok(WorkflowStep::Delay {
+                    id,
+                    duration,
+                    span: ident.span(),
+                });
+            }
+
+            // Single string literal — auto-generate ID from duration
+            let duration = DurationLit::parse(&first_lit.value(), first_lit.span())?;
             let id = format!("delay_{}", duration.millis);
             return Ok(WorkflowStep::Delay {
                 id,

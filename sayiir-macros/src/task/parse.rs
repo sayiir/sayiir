@@ -13,6 +13,14 @@ pub struct TaskAttrs {
     #[darling(default)]
     pub id: Option<String>,
 
+    /// Human-readable display name.
+    #[darling(default)]
+    pub display_name: Option<String>,
+
+    /// Task description.
+    #[darling(default)]
+    pub description: Option<String>,
+
     /// Timeout duration, e.g. `"30s"`.
     #[darling(default)]
     pub timeout: Option<DurationLit>,

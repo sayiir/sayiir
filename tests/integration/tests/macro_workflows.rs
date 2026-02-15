@@ -79,6 +79,13 @@ async fn process(order: Order) -> Result<Receipt, BoxError> {
     })
 }
 
+// ─── Task with display_name and description ──────────────────────────────────
+
+#[task(display_name = "Add Ten", description = "Adds 10 to the input")]
+async fn described_task(input: u32) -> Result<u32, BoxError> {
+    Ok(input + 10)
+}
+
 // ─── Custom error type ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -155,6 +162,13 @@ fn task_with_inject() {
 #[test]
 fn task_custom_id() {
     assert_eq!(Process::task_id(), "process_order");
+}
+
+#[test]
+fn task_display_name_and_description() {
+    let meta = DescribedTask::metadata();
+    assert_eq!(meta.display_name.as_deref(), Some("Add Ten"));
+    assert_eq!(meta.description.as_deref(), Some("Adds 10 to the input"));
 }
 
 #[test]
@@ -287,7 +301,7 @@ async fn workflow_macro_inline_task() {
     Double::register(&mut registry, codec.clone(), Double::new());
 
     let workflow = workflow!("inline-test", JsonCodec, registry,
-        add_five(x: u32) { x + 5 }
+        add_five(x: u32) { Ok(x + 5) }
         => double
     )
     .unwrap();

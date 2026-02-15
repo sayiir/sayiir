@@ -89,7 +89,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                 let id_str = name.to_string();
                 tokens.extend(quote! {
                     .then(#id_str, |#param_name: #param_type| async move {
-                        Ok({ #body })
+                        #body
                     })
                 });
                 i += 1;

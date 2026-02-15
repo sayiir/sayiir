@@ -108,9 +108,12 @@ let workflow = workflow!("process", JsonCodec, registry,
 
 ### Inline tasks
 
+Inline tasks must return `Result` — use `Ok(...)` to wrap infallible expressions,
+or `?` for fallible calls:
+
 ```rust
 let workflow = workflow!("pipeline", JsonCodec, registry,
-    transform(x: u32) { x * 2 }
+    transform(x: u32) { Ok(x * 2) }
     => charge
 ).unwrap();
 ```

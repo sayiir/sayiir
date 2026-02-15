@@ -103,6 +103,14 @@ fn gen_helpers(parsed: &ParsedTask) -> TokenStream {
 fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
     let attrs = &parsed.attrs;
 
+    let display_name = attrs.display_name.as_ref().map(|s| {
+        quote! { display_name: Some(#s.to_string()), }
+    });
+
+    let description = attrs.description.as_ref().map(|s| {
+        quote! { description: Some(#s.to_string()), }
+    });
+
     let timeout = attrs.timeout.as_ref().map(|d| {
         let dur = d.to_tokens();
         quote! { timeout: Some(#dur), }
@@ -136,6 +144,8 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
 
     quote! {
         ::sayiir_core::task::TaskMetadata {
+            #display_name
+            #description
             #timeout
             #retries
             #tags

@@ -35,6 +35,8 @@ mod workflow;
 /// # Attributes
 ///
 /// - `id = "custom_name"` — override the task ID (default: function name)
+/// - `display_name = "Charge Card"` — human-readable name
+/// - `description = "Charges the customer's card"` — task description
 /// - `timeout = "30s"` — task timeout (supports `ms`, `s`, `m`, `h` suffixes)
 /// - `retries = 3` — maximum retry count
 /// - `backoff = "100ms"` — initial retry delay
@@ -85,7 +87,8 @@ pub fn task(
 /// - `task_name` — reference to a `#[task]`-generated struct
 /// - `name(param: Type) { expr }` — inline task
 /// - `step || step` — parallel fork (branches)
-/// - `delay "5s"` — durable delay
+/// - `delay "5s"` — durable delay (auto-generated ID)
+/// - `delay "wait_24h" "5s"` — durable delay with custom ID
 /// - `=>` — sequential chain (or join after `||`)
 ///
 /// # Returns
