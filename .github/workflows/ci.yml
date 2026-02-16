@@ -143,6 +143,28 @@ jobs:
           uv pip install --system pytest pydantic
           pytest sayiir-python/tests/ -v
 
+  node-lockfile:
+    name: Node.js Lockfile Sync
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check lockfile is up to date
+        working-directory: sayiir-nodejs
+        run: |
+          pnpm install --no-frozen-lockfile
+          git diff --exit-code pnpm-lock.yaml
+
   node:
     name: Node.js Binding
     needs: changes
