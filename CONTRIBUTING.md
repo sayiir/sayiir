@@ -12,6 +12,8 @@ Thanks for your interest in contributing to Sayiir! Whether it's a bug fix, new 
 - **Python** 3.10+
 - **maturin** — for building Python bindings
 - **uv** — for Python dependency management
+- **Node.js** 18+ — for Node.js bindings
+- **pnpm** — for Node.js dependency management
 
 ### Clone and Build
 
@@ -31,6 +33,24 @@ maturin develop
 pip install -e ".[dev]"
 ```
 
+### Node.js Bindings
+
+```bash
+# Build the native addon
+cd sayiir-node
+cargo build --release
+
+# Copy the native binary
+mkdir -p ../sayiir-nodejs/native
+cp ../target/release/libsayiir_node.dylib ../sayiir-nodejs/native/sayiir-node.node  # macOS
+# cp ../target/release/libsayiir_node.so ../sayiir-nodejs/native/sayiir-node.node  # Linux
+
+# Install dependencies and build TypeScript
+cd ../sayiir-nodejs
+pnpm install
+pnpm run build:ts
+```
+
 ---
 
 ## Running Tests
@@ -45,6 +65,14 @@ cargo test --workspace --all-features
 
 ```bash
 pytest sayiir-python/tests/ -v
+```
+
+### Node.js
+
+```bash
+cd sayiir-nodejs
+pnpm vitest run                                          # unit tests
+pnpm vitest run --config vitest.integration.config.mts   # integration tests (requires Docker)
 ```
 
 ---
@@ -66,6 +94,13 @@ uvx ruff format sayiir-python/
 uvx pyright --project sayiir-python/
 ```
 
+### Node.js
+
+```bash
+cd sayiir-nodejs
+pnpm typecheck   # TypeScript type checking (tsc --noEmit)
+```
+
 ---
 
 ## CI Checks
@@ -82,6 +117,8 @@ Every pull request runs the following checks automatically:
 | `ruff format --check` | Python formatting |
 | `pyright` | Python type checking |
 | `pytest` (Python 3.10–3.13) | Python tests across all supported versions |
+| `tsc --noEmit` | TypeScript type checking |
+| `vitest run` (Node 18/20/22) | Node.js tests across all supported versions |
 
 All checks must pass before a PR can be merged.
 
