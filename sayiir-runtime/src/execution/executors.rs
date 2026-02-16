@@ -396,7 +396,6 @@ where
                     signal_name,
                     timeout.as_ref(),
                     next.as_deref(),
-                    current_input.clone(),
                     snapshot,
                     backend,
                 )

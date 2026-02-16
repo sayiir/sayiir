@@ -178,7 +178,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: sayiir-nodejs
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile --no-optional
 
       - name: Type check
         working-directory: sayiir-nodejs
