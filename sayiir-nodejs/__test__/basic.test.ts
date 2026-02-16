@@ -135,6 +135,58 @@ describe.skipIf(!hasNative)("runWorkflow (native)", () => {
     expect(result).toBe(12);
   });
 
+  it("executes async tasks (microtask-only)", () => {
+    const asyncDouble = task("async-double", async (x: number) => x * 2);
+    const wf = flow<number>("async-micro").then(asyncDouble).build();
+    const result = runWorkflow(wf, 21);
+    expect(result).toBe(42);
+  });
+
+  it("executes truly async tasks (event loop I/O)", () => {
+    const delayed = task(
+      "delayed-double",
+      (x: number) =>
+        new Promise<number>((resolve) =>
+          setTimeout(() => resolve(x * 2), 50),
+        ),
+    );
+    const wf = flow<number>("async-io").then(delayed).build();
+    const result = runWorkflow(wf, 21);
+    expect(result).toBe(42);
+  });
+
+  it("chains sync and async tasks", () => {
+    const asyncFetch = task(
+      "async-fetch",
+      (id: number) =>
+        new Promise<{ id: number; name: string }>((resolve) =>
+          setTimeout(() => resolve({ id, name: "Alice" }), 30),
+        ),
+    );
+    const format = task(
+      "format",
+      (user: { id: number; name: string }) => `Hello ${user.name} (#${user.id})`,
+    );
+    const wf = flow<number>("mixed")
+      .then(asyncFetch)
+      .then(format)
+      .build();
+    const result = runWorkflow(wf, 42);
+    expect(result).toBe("Hello Alice (#42)");
+  });
+
+  it("propagates async task rejections", () => {
+    const failing = task(
+      "async-fail",
+      (_x: number) =>
+        new Promise<number>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("async boom")), 10),
+        ),
+    );
+    const wf = flow<number>("async-fail-test").then(failing).build();
+    expect(() => runWorkflow(wf, 1)).toThrow("async boom");
+  });
+
   it("propagates task errors", () => {
     const failing = task("fail", (_x: number) => {
       throw new Error("task failed!");

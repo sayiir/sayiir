@@ -29,8 +29,12 @@ describe("delay", () => {
 
     const status = runDurableWorkflow(wf, "delay-1", 5, backend);
 
-    // Should hit the delay and return waiting
+    // Should hit the delay and return waiting with structured fields
     expect(status.status).toBe("waiting");
+    if (status.status === "waiting") {
+      expect(status.delayId).toBe("wait");
+      expect(status.wakeAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    }
   });
 });
 
@@ -53,9 +57,13 @@ describe("signals", () => {
       .build();
     const backend = new InMemoryBackend();
 
-    // First run — should park at signal
+    // First run — should park at signal with structured fields
     const status1 = runDurableWorkflow(wf, "sig-1", 5, backend);
     expect(status1.status).toBe("awaiting_signal");
+    if (status1.status === "awaiting_signal") {
+      expect(status1.signalId).toBe("approval");
+      expect(status1.signalName).toBe("user_approval");
+    }
 
     // Send the signal
     sendSignal("sig-1", "user_approval", "go", backend);

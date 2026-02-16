@@ -173,9 +173,22 @@ function parseWorkflowStatus<TOut>(
       return {
         status: "paused",
         reason: raw.reason,
-        pausedBy: raw.cancelledBy,
+        pausedBy: raw.pausedBy,
+      };
+    case "waiting":
+      return {
+        status: "waiting",
+        wakeAt: raw.wakeAt!,
+        delayId: raw.delayId!,
+      };
+    case "awaiting_signal":
+      return {
+        status: "awaiting_signal",
+        signalId: raw.signalId!,
+        signalName: raw.signalName!,
+        wakeAt: raw.wakeAt,
       };
     default:
-      return { status: raw.status as "in_progress" };
+      throw new WorkflowError(`unknown workflow status: ${raw.status}`);
   }
 }

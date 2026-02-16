@@ -9,6 +9,15 @@ use napi::{Env, JsBoolean, JsFunction, JsObject, JsUnknown};
 use napi_derive::napi;
 use std::sync::Arc;
 
+// libuv FFI — Node.js links libuv statically, so these symbols are always available.
+const UV_RUN_DEFAULT: std::ffi::c_int = 0;
+const UV_RUN_ONCE: std::ffi::c_int = 1;
+const UV_RUN_NOWAIT: std::ffi::c_int = 2;
+
+unsafe extern "C" {
+    fn uv_run(loop_: *mut napi::sys::uv_loop_s, mode: std::ffi::c_int) -> std::ffi::c_int;
+}
+
 use sayiir_runtime::execute_continuation_sync;
 
 use crate::codec::{decode_to_js_value, encode_js_value};
@@ -100,25 +109,46 @@ fn is_promise(value: &JsUnknown) -> Result<bool> {
     }
 }
 
-/// Synchronously await a Promise by attaching `.then()`/`.catch()` callbacks
-/// and draining microtasks via `env.run_script`.
+/// Get the libuv event loop handle from the napi environment.
+#[allow(clippy::borrow_as_ptr)]
+fn get_uv_event_loop(env: &Env) -> Result<*mut napi::sys::uv_loop_s> {
+    let mut uv_loop: *mut napi::sys::uv_loop_s = std::ptr::null_mut();
+    let status = unsafe { napi::sys::napi_get_uv_event_loop(env.raw(), &mut uv_loop) };
+    if status != napi::sys::Status::napi_ok {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "Failed to get libuv event loop",
+        ));
+    }
+    if uv_loop.is_null() {
+        return Err(Error::new(
+            Status::GenericFailure,
+            "libuv event loop is null",
+        ));
+    }
+    Ok(uv_loop)
+}
+
+/// Await a JS Promise by pumping the libuv event loop.
 ///
-/// This works because in the synchronous engine we run on the main JS thread,
-/// and resolved/rejected promise callbacks are microtasks that get processed
-/// when we re-enter the JS engine.
+/// Attaches `.then()`/`.catch()` callbacks to the promise, then runs
+/// `uv_run(UV_RUN_ONCE)` in a loop until the promise settles. This allows
+/// truly async tasks (fetch, timers, file I/O) to complete — not just
+/// microtask-only promises.
+///
+/// SAFETY: Must be called on the main JS thread (guaranteed by our
+/// `current_thread` tokio runtime + `block_on`).
 fn await_promise_sync(env: &Env, promise: &JsUnknown) -> Result<JsUnknown> {
     let obj = unsafe { promise.cast::<JsObject>() };
     let then_fn: JsFunction = obj.get_named_property("then")?;
 
-    // Create a container object to store the result
+    // Container to store the result across callbacks
     let container: JsObject =
         env.run_script("({ value: undefined, error: undefined, done: false })")?;
 
-    // Create references for the callbacks (Ref<()> requires create_reference)
     let resolve_ref = env.create_reference(&container)?;
     let reject_ref = env.create_reference(&container)?;
 
-    // Create resolve callback
     let resolve_cb = env.create_function_from_closure("resolve", move |ctx| {
         let mut container: JsObject = ctx.env.get_reference_value(&resolve_ref)?;
         let val = ctx.get::<JsUnknown>(0)?;
@@ -127,7 +157,6 @@ fn await_promise_sync(env: &Env, promise: &JsUnknown) -> Result<JsUnknown> {
         ctx.env.get_undefined()
     })?;
 
-    // Create reject callback
     let reject_cb = env.create_function_from_closure("reject", move |ctx| {
         let mut container: JsObject = ctx.env.get_reference_value(&reject_ref)?;
         let val = ctx.get::<JsUnknown>(0)?;
@@ -142,20 +171,46 @@ fn await_promise_sync(env: &Env, promise: &JsUnknown) -> Result<JsUnknown> {
         &[resolve_cb.into_unknown(), reject_cb.into_unknown()],
     )?;
 
-    // Drain microtasks — resolved promise callbacks fire as microtasks
-    // which are processed when we call back into the JS engine
-    let _: JsUnknown = env.run_script("void 0")?;
+    // Pump the libuv event loop until the promise settles.
+    //
+    // Challenge: V8 microtasks (Promise.then callbacks) are NOT drained by
+    // libuv — they're a V8 concept. But `uv_run` triggers microtask draining
+    // as part of each event loop iteration. The trick: we need at least one
+    // libuv handle active for `uv_run` to process a tick (otherwise it
+    // returns immediately with alive=0).
+    //
+    // Strategy:
+    // 1. Create a `setImmediate` sentinel → ensures a libuv "check" handle
+    //    exists so `uv_run(UV_RUN_ONCE)` processes one full tick, draining
+    //    microtasks in the process. This handles microtask-only promises.
+    // 2. If the promise didn't settle, there's real async I/O pending (timer,
+    //    fetch, fs). Call `uv_run(UV_RUN_ONCE)` without a sentinel — it
+    //    blocks until the I/O completes, then we repeat from step 1 to drain
+    //    the resulting microtasks.
+    let uv_loop = get_uv_event_loop(env)?;
 
-    let done: bool = container
-        .get_named_property::<JsBoolean>("done")?
-        .get_value()?;
+    loop {
+        // Drain microtasks: setImmediate creates a check handle that fires
+        // on the next tick, ensuring uv_run processes at least one iteration.
+        let _: JsUnknown = env.run_script("setImmediate(()=>{})")?;
+        unsafe { uv_run(uv_loop, UV_RUN_ONCE) };
 
-    if !done {
-        return Err(Error::new(
-            Status::GenericFailure,
-            "Async task did not resolve synchronously. \
-             Use the durable engine for truly async tasks.",
-        ));
+        let done: bool = container
+            .get_named_property::<JsBoolean>("done")?
+            .get_value()?;
+        if done {
+            break;
+        }
+
+        // Promise needs real I/O — block until something fires.
+        let alive = unsafe { uv_run(uv_loop, UV_RUN_ONCE) };
+        if alive == 0 {
+            return Err(Error::new(
+                Status::GenericFailure,
+                "Async task promise did not resolve — \
+                 event loop drained with no pending work.",
+            ));
+        }
     }
 
     let error: JsUnknown = container.get_named_property("error")?;

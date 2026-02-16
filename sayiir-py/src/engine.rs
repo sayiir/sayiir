@@ -28,7 +28,21 @@ pub struct PyWorkflowStatus {
     #[pyo3(get)]
     pub cancelled_by: Option<String>,
     #[pyo3(get)]
+    pub paused_by: Option<String>,
+    #[pyo3(get)]
     pub output: Option<Py<PyAny>>,
+    /// ISO-8601 wake-up timestamp for `waiting` and `awaiting_signal` statuses.
+    #[pyo3(get)]
+    pub wake_at: Option<String>,
+    /// Delay step identifier (present when status is `waiting`).
+    #[pyo3(get)]
+    pub delay_id: Option<String>,
+    /// Signal step identifier (present when status is `awaiting_signal`).
+    #[pyo3(get)]
+    pub signal_id: Option<String>,
+    /// Signal name (present when status is `awaiting_signal`).
+    #[pyo3(get)]
+    pub signal_name: Option<String>,
 }
 
 #[pymethods]
@@ -53,6 +67,14 @@ impl PyWorkflowStatus {
         self.status == "paused"
     }
 
+    fn is_waiting(&self) -> bool {
+        self.status == "waiting"
+    }
+
+    fn is_awaiting_signal(&self) -> bool {
+        self.status == "awaiting_signal"
+    }
+
     fn __repr__(&self) -> String {
         match self.status.as_str() {
             "completed" => "WorkflowStatus::Completed".to_string(),
@@ -66,7 +88,15 @@ impl PyWorkflowStatus {
             ),
             "paused" => format!(
                 "WorkflowStatus::Paused(reason={:?}, by={:?})",
-                self.reason, self.cancelled_by
+                self.reason, self.paused_by
+            ),
+            "waiting" => format!(
+                "WorkflowStatus::Waiting(delay_id={:?}, wake_at={:?})",
+                self.delay_id, self.wake_at
+            ),
+            "awaiting_signal" => format!(
+                "WorkflowStatus::AwaitingSignal(signal_name={:?}, signal_id={:?}, wake_at={:?})",
+                self.signal_name, self.signal_id, self.wake_at
             ),
             _ => format!("WorkflowStatus::{}", self.status),
         }
@@ -81,21 +111,36 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 error: None,
                 reason: None,
                 cancelled_by: None,
+                paused_by: None,
                 output: None,
+                wake_at: None,
+                delay_id: None,
+                signal_id: None,
+                signal_name: None,
             },
             WorkflowStatus::InProgress => PyWorkflowStatus {
                 status: "in_progress".to_string(),
                 error: None,
                 reason: None,
                 cancelled_by: None,
+                paused_by: None,
                 output: None,
+                wake_at: None,
+                delay_id: None,
+                signal_id: None,
+                signal_name: None,
             },
             WorkflowStatus::Failed(e) => PyWorkflowStatus {
                 status: "failed".to_string(),
                 error: Some(e.clone()),
                 reason: None,
                 cancelled_by: None,
+                paused_by: None,
                 output: None,
+                wake_at: None,
+                delay_id: None,
+                signal_id: None,
+                signal_name: None,
             },
             WorkflowStatus::Cancelled {
                 reason,
@@ -105,21 +150,36 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
                 error: None,
                 reason,
                 cancelled_by,
+                paused_by: None,
                 output: None,
+                wake_at: None,
+                delay_id: None,
+                signal_id: None,
+                signal_name: None,
             },
             WorkflowStatus::Paused { reason, paused_by } => PyWorkflowStatus {
                 status: "paused".to_string(),
                 error: None,
                 reason,
-                cancelled_by: paused_by,
+                cancelled_by: None,
+                paused_by,
                 output: None,
+                wake_at: None,
+                delay_id: None,
+                signal_id: None,
+                signal_name: None,
             },
             WorkflowStatus::Waiting { wake_at, delay_id } => PyWorkflowStatus {
                 status: "waiting".to_string(),
                 error: None,
-                reason: Some(format!("Delay '{delay_id}' until {wake_at}")),
+                reason: None,
                 cancelled_by: None,
+                paused_by: None,
                 output: None,
+                wake_at: Some(wake_at.to_rfc3339()),
+                delay_id: Some(delay_id),
+                signal_id: None,
+                signal_name: None,
             },
             WorkflowStatus::AwaitingSignal {
                 signal_id,
@@ -128,13 +188,14 @@ impl From<WorkflowStatus> for PyWorkflowStatus {
             } => PyWorkflowStatus {
                 status: "awaiting_signal".to_string(),
                 error: None,
-                reason: Some(if let Some(at) = wake_at {
-                    format!("Signal '{signal_name}' (node '{signal_id}') until {at}")
-                } else {
-                    format!("Signal '{signal_name}' (node '{signal_id}')")
-                }),
+                reason: None,
                 cancelled_by: None,
+                paused_by: None,
                 output: None,
+                wake_at: wake_at.map(|t| t.to_rfc3339()),
+                delay_id: None,
+                signal_id: Some(signal_id),
+                signal_name: Some(signal_name),
             },
         }
     }

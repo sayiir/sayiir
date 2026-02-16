@@ -12,6 +12,7 @@ pub struct NapiRetryPolicy {
     pub max_retries: u32,
     pub initial_delay_secs: f64,
     pub backoff_multiplier: f64,
+    pub max_delay_secs: Option<f64>,
 }
 
 impl From<NapiRetryPolicy> for RetryPolicy {
@@ -21,6 +22,7 @@ impl From<NapiRetryPolicy> for RetryPolicy {
             max_retries: n.max_retries,
             initial_delay: Duration::from_secs_f64(n.initial_delay_secs),
             backoff_multiplier: n.backoff_multiplier as f32,
+            max_delay: n.max_delay_secs.map(Duration::from_secs_f64),
         }
     }
 }

@@ -83,6 +83,8 @@ function buildRetryPolicy(policy: RetryPolicy): NapiRetryPolicy {
     maxRetries: policy.maxAttempts,
     initialDelaySecs: parseDuration(policy.initialDelay) / 1000,
     backoffMultiplier: policy.backoffMultiplier ?? 2.0,
+    maxDelaySecs:
+      policy.maxDelay != null ? parseDuration(policy.maxDelay) / 1000 : undefined,
   };
 }
 

@@ -83,5 +83,10 @@ export interface NativeWorkflowStatus {
   error?: string;
   reason?: string;
   cancelledBy?: string;
+  pausedBy?: string;
   outputJson?: string;
+  wakeAt?: string;
+  delayId?: string;
+  signalId?: string;
+  signalName?: string;
 }

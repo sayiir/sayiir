@@ -29,66 +29,82 @@ pub struct NapiWorkflowStatus {
     pub error: Option<String>,
     pub reason: Option<String>,
     pub cancelled_by: Option<String>,
+    pub paused_by: Option<String>,
     /// JSON-serialized output (decoded in TypeScript layer).
     pub output_json: Option<String>,
+    /// ISO-8601 wake-up timestamp for `waiting` and `awaiting_signal` statuses.
+    pub wake_at: Option<String>,
+    /// Delay step identifier (present when status is `waiting`).
+    pub delay_id: Option<String>,
+    /// Signal step identifier (present when status is `awaiting_signal`).
+    pub signal_id: Option<String>,
+    /// Signal name (present when status is `awaiting_signal`).
+    pub signal_name: Option<String>,
 }
 
 impl NapiWorkflowStatus {
     fn from_core(status: WorkflowStatus, output: Option<Bytes>) -> Self {
-        let (status_str, error, reason, cancelled_by) = match &status {
-            WorkflowStatus::Completed => ("completed".to_string(), None, None, None),
-            WorkflowStatus::InProgress => ("in_progress".to_string(), None, None, None),
-            WorkflowStatus::Failed(e) => ("failed".to_string(), Some(e.clone()), None, None),
-            WorkflowStatus::Cancelled {
-                reason,
-                cancelled_by,
-            } => (
-                "cancelled".to_string(),
-                None,
-                reason.clone(),
-                cancelled_by.clone(),
-            ),
-            WorkflowStatus::Paused { reason, paused_by } => (
-                "paused".to_string(),
-                None,
-                reason.clone(),
-                paused_by.clone(),
-            ),
-            WorkflowStatus::Waiting { wake_at, delay_id } => (
-                "waiting".to_string(),
-                None,
-                Some(format!("Delay '{delay_id}' until {wake_at}")),
-                None,
-            ),
-            WorkflowStatus::AwaitingSignal {
-                signal_id,
-                signal_name,
-                wake_at,
-            } => (
-                "awaiting_signal".to_string(),
-                None,
-                Some(if let Some(at) = wake_at {
-                    format!("Signal '{signal_name}' (node '{signal_id}') until {at}")
-                } else {
-                    format!("Signal '{signal_name}' (node '{signal_id}')")
-                }),
-                None,
-            ),
-        };
-
         let output_json = output.and_then(|bytes| {
             std::str::from_utf8(&bytes)
                 .ok()
                 .map(std::string::ToString::to_string)
         });
 
-        Self {
-            status: status_str,
-            error,
-            reason,
-            cancelled_by,
+        let mut result = Self {
+            status: String::new(),
+            error: None,
+            reason: None,
+            cancelled_by: None,
+            paused_by: None,
             output_json,
+            wake_at: None,
+            delay_id: None,
+            signal_id: None,
+            signal_name: None,
+        };
+
+        match status {
+            WorkflowStatus::Completed => {
+                result.status = "completed".to_string();
+            }
+            WorkflowStatus::InProgress => {
+                result.status = "in_progress".to_string();
+            }
+            WorkflowStatus::Failed(e) => {
+                result.status = "failed".to_string();
+                result.error = Some(e);
+            }
+            WorkflowStatus::Cancelled {
+                reason,
+                cancelled_by,
+            } => {
+                result.status = "cancelled".to_string();
+                result.reason = reason;
+                result.cancelled_by = cancelled_by;
+            }
+            WorkflowStatus::Paused { reason, paused_by } => {
+                result.status = "paused".to_string();
+                result.reason = reason;
+                result.paused_by = paused_by;
+            }
+            WorkflowStatus::Waiting { wake_at, delay_id } => {
+                result.status = "waiting".to_string();
+                result.wake_at = Some(wake_at.to_rfc3339());
+                result.delay_id = Some(delay_id);
+            }
+            WorkflowStatus::AwaitingSignal {
+                signal_id,
+                signal_name,
+                wake_at,
+            } => {
+                result.status = "awaiting_signal".to_string();
+                result.signal_id = Some(signal_id);
+                result.signal_name = Some(signal_name);
+                result.wake_at = wake_at.map(|t| t.to_rfc3339());
+            }
         }
+
+        result
     }
 }
 

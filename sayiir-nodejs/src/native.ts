@@ -11,6 +11,7 @@ export interface NapiRetryPolicy {
   maxRetries: number;
   initialDelaySecs: number;
   backoffMultiplier: number;
+  maxDelaySecs?: number;
 }
 
 export interface NapiTaskMetadata {

@@ -200,7 +200,6 @@ const workflow = flow<number>("approval")
 - `id` (string) — Step identifier
 - `signalName` (string) — The named signal to wait for
 - `opts.timeout` (Duration, optional) — Timeout duration
-- `opts.schema` (ZodLike\<TSignal\>, optional) — Zod schema for signal validation
 
 **Returns:** `Flow<TInput, TSignal>` — Output type becomes the signal payload type.
 

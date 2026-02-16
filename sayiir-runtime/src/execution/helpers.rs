@@ -386,11 +386,16 @@ pub(super) fn policy_to_backoff(
     policy: Option<&sayiir_core::task::RetryPolicy>,
 ) -> backon::ExponentialBuilder {
     match policy {
-        Some(rp) => backon::ExponentialBuilder::default()
-            .with_min_delay(rp.initial_delay)
-            .with_factor(rp.backoff_multiplier)
-            .with_max_times(rp.max_retries as usize)
-            .without_max_delay(),
+        Some(rp) => {
+            let builder = backon::ExponentialBuilder::default()
+                .with_min_delay(rp.initial_delay)
+                .with_factor(rp.backoff_multiplier)
+                .with_max_times(rp.max_retries as usize);
+            match rp.max_delay {
+                Some(max) => builder.with_max_delay(max),
+                None => builder.without_max_delay(),
+            }
+        }
         None => backon::ExponentialBuilder::default().with_max_times(0),
     }
 }

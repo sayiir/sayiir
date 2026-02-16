@@ -12,7 +12,7 @@
  * ```
  */
 
-import type { Duration, StepOptions, ZodLike } from "./types.js";
+import type { Duration, StepOptions } from "./types.js";
 import type { TaskFn } from "./task.js";
 import { parseDuration } from "./duration.js";
 import type {
@@ -195,7 +195,7 @@ export class Flow<TInput, TLast = TInput> {
   waitForSignal<TSignal = unknown>(
     id: string,
     signalName: string,
-    opts?: { timeout?: Duration; schema?: ZodLike<TSignal> },
+    opts?: { timeout?: Duration },
   ): Flow<TInput, TSignal> {
     const timeoutSecs =
       opts?.timeout != null ? parseDuration(opts.timeout) / 1000 : undefined;
@@ -282,6 +282,10 @@ function buildStepMetadata(
       maxRetries: opts.retry.maxAttempts,
       initialDelaySecs: parseDuration(opts.retry.initialDelay) / 1000,
       backoffMultiplier: opts.retry.backoffMultiplier ?? 2.0,
+      maxDelaySecs:
+        opts.retry.maxDelay != null
+          ? parseDuration(opts.retry.maxDelay) / 1000
+          : undefined,
     };
   } else if (opts.retries != null) {
     metadata.retries = {
