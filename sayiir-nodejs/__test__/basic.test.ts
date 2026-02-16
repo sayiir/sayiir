@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { task, flow, runWorkflow } from "../src/index.js";
+import { task, flow, runWorkflow, runWorkflowSync } from "../src/index.js";
 
 describe("flow builder (type-level only)", () => {
   it("builds a single-task workflow", () => {
@@ -110,11 +110,11 @@ const hasNative = (() => {
   }
 })();
 
-describe.skipIf(!hasNative)("runWorkflow (native)", () => {
+describe.skipIf(!hasNative)("runWorkflowSync (native)", () => {
   it("executes a single task", () => {
     const double = task("double", (x: number) => x * 2);
     const wf = flow<number>("test").then(double).build();
-    const result = runWorkflow(wf, 21);
+    const result = runWorkflowSync(wf, 21);
     expect(result).toBe(42);
   });
 
@@ -122,7 +122,7 @@ describe.skipIf(!hasNative)("runWorkflow (native)", () => {
     const double = task("double", (x: number) => x * 2);
     const addOne = task("add-one", (x: number) => x + 1);
     const wf = flow<number>("chain").then(double).then(addOne).build();
-    const result = runWorkflow(wf, 10);
+    const result = runWorkflowSync(wf, 10);
     expect(result).toBe(21);
   });
 
@@ -131,18 +131,49 @@ describe.skipIf(!hasNative)("runWorkflow (native)", () => {
       .then("add-one", (x: number) => x + 1)
       .then("double", (x: number) => x * 2)
       .build();
-    const result = runWorkflow(wf, 5);
+    const result = runWorkflowSync(wf, 5);
     expect(result).toBe(12);
   });
 
-  it("executes async tasks (microtask-only)", () => {
+  it("rejects async tasks with helpful error", () => {
     const asyncDouble = task("async-double", async (x: number) => x * 2);
-    const wf = flow<number>("async-micro").then(asyncDouble).build();
-    const result = runWorkflow(wf, 21);
+    const wf = flow<number>("async-test").then(asyncDouble).build();
+    expect(() => runWorkflowSync(wf, 21)).toThrow("returned a Promise");
+  });
+
+  it("propagates task errors", () => {
+    const failing = task("fail", (_x: number) => {
+      throw new Error("task failed!");
+    });
+    const wf = flow<number>("fail-test").then(failing).build();
+    expect(() => runWorkflowSync(wf, 1)).toThrow("task failed!");
+  });
+});
+
+describe.skipIf(!hasNative)("runWorkflow — async stepper (native)", () => {
+  it("executes sync tasks", async () => {
+    const double = task("double", (x: number) => x * 2);
+    const wf = flow<number>("test").then(double).build();
+    const result = await runWorkflow(wf, 21);
     expect(result).toBe(42);
   });
 
-  it("executes truly async tasks (event loop I/O)", () => {
+  it("executes chained sync tasks", async () => {
+    const double = task("double", (x: number) => x * 2);
+    const addOne = task("add-one", (x: number) => x + 1);
+    const wf = flow<number>("chain").then(double).then(addOne).build();
+    const result = await runWorkflow(wf, 10);
+    expect(result).toBe(21);
+  });
+
+  it("executes async tasks (microtask-only)", async () => {
+    const asyncDouble = task("async-double", async (x: number) => x * 2);
+    const wf = flow<number>("async-micro").then(asyncDouble).build();
+    const result = await runWorkflow(wf, 21);
+    expect(result).toBe(42);
+  });
+
+  it("executes truly async tasks (setTimeout)", async () => {
     const delayed = task(
       "delayed-double",
       (x: number) =>
@@ -151,11 +182,11 @@ describe.skipIf(!hasNative)("runWorkflow (native)", () => {
         ),
     );
     const wf = flow<number>("async-io").then(delayed).build();
-    const result = runWorkflow(wf, 21);
+    const result = await runWorkflow(wf, 21);
     expect(result).toBe(42);
   });
 
-  it("chains sync and async tasks", () => {
+  it("chains sync and async tasks", async () => {
     const asyncFetch = task(
       "async-fetch",
       (id: number) =>
@@ -165,17 +196,15 @@ describe.skipIf(!hasNative)("runWorkflow (native)", () => {
     );
     const format = task(
       "format",
-      (user: { id: number; name: string }) => `Hello ${user.name} (#${user.id})`,
+      (user: { id: number; name: string }) =>
+        `Hello ${user.name} (#${user.id})`,
     );
-    const wf = flow<number>("mixed")
-      .then(asyncFetch)
-      .then(format)
-      .build();
-    const result = runWorkflow(wf, 42);
+    const wf = flow<number>("mixed").then(asyncFetch).then(format).build();
+    const result = await runWorkflow(wf, 42);
     expect(result).toBe("Hello Alice (#42)");
   });
 
-  it("propagates async task rejections", () => {
+  it("propagates async task rejections", async () => {
     const failing = task(
       "async-fail",
       (_x: number) =>
@@ -184,14 +213,14 @@ describe.skipIf(!hasNative)("runWorkflow (native)", () => {
         ),
     );
     const wf = flow<number>("async-fail-test").then(failing).build();
-    expect(() => runWorkflow(wf, 1)).toThrow("async boom");
+    await expect(runWorkflow(wf, 1)).rejects.toThrow("async boom");
   });
 
-  it("propagates task errors", () => {
+  it("propagates sync task errors", async () => {
     const failing = task("fail", (_x: number) => {
       throw new Error("task failed!");
     });
     const wf = flow<number>("fail-test").then(failing).build();
-    expect(() => runWorkflow(wf, 1)).toThrow("task failed!");
+    await expect(runWorkflow(wf, 1)).rejects.toThrow("task failed!");
   });
 });

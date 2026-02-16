@@ -56,6 +56,18 @@ export interface NapiWorkflowEngine {
   ): unknown;
 }
 
+export interface NapiStepResult {
+  kind: "task" | "done";
+  taskId?: string;
+  inputJson?: string;
+  outputJson?: string;
+}
+
+export interface NapiContinuationStepper {
+  current(): NapiStepResult;
+  submitResult(output: unknown): NapiStepResult;
+}
+
 export interface NapiInMemoryBackend {}
 
 export interface NapiPostgresBackend {}
@@ -93,6 +105,10 @@ export interface NapiDurableEngine {
 export interface NativeAddon {
   NapiFlowBuilder: new (name: string) => NapiFlowBuilder;
   NapiWorkflowEngine: new () => NapiWorkflowEngine;
+  NapiContinuationStepper: new (
+    workflow: NapiWorkflow,
+    input: unknown,
+  ) => NapiContinuationStepper;
   NapiInMemoryBackend: new () => NapiInMemoryBackend;
   NapiPostgresBackend: { connect(url: string): NapiPostgresBackend };
   NapiDurableEngine: {

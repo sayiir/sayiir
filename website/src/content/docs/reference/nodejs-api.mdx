@@ -18,20 +18,20 @@ const myTask = task("my-task", (input: { value: number }) => {
   return { result: input.value * 2 };
 });
 
-const configured = task("configured-task", async (input: string) => {
-  return await fetchData(input);
+const configured = task("configured-task", (input: string) => {
+  return processData(input);
 }, {
   timeout: "30s",
   retries: 3,
   tags: ["io", "external"],
-  description: "Fetches data from external API",
+  description: "Processes input data",
 });
 ```
 
 **Parameters:**
 
 - `id` (string) — Unique task identifier
-- `fn` ((input: TIn) => TOut | Promise\<TOut\>) — The task function
+- `fn` ((input: TIn) => TOut | Promise\<TOut\>) — The task function (sync or async)
 - `opts` (TaskOptions, optional) — Configuration options
 
 **TaskOptions:**
@@ -90,7 +90,7 @@ const workflow = flow<number>("pipeline")
 
 **Parameters (overload 2):**
 - `id` (string) — Step identifier
-- `fn` ((input: TLast) => TOut | Promise\<TOut\>) — Task function
+- `fn` ((input: TLast) => TOut | Promise\<TOut\>) — Task function (sync or async)
 - `opts` (StepOptions, optional) — Step-level `timeout`, `retries`, or `retry`
 
 **Returns:** `Flow<TInput, Awaited<TOut>>` — Updated flow with new output type.
@@ -228,13 +228,29 @@ Compiled workflow with task registry. Produced by `Flow.build()`.
 
 ### runWorkflow(workflow, input)
 
-Run a workflow to completion without persistence. Returns the result directly.
+Run a workflow to completion without persistence. Supports both sync and async task functions.
 
 ```typescript
 import { runWorkflow } from "sayiir";
 
-const result = runWorkflow(workflow, 42);
+const result = await runWorkflow(workflow, 42);
 console.log(result); // The final output
+```
+
+**Parameters:**
+- `workflow` (Workflow\<TIn, TOut\>) — The workflow to run
+- `input` (TIn) — Input to the first task
+
+**Returns:** Promise\<TOut\> — The workflow result
+
+### runWorkflowSync(workflow, input)
+
+Run a workflow synchronously. All tasks must return plain values, not Promises. For async tasks, use `runWorkflow()` instead.
+
+```typescript
+import { runWorkflowSync } from "sayiir";
+
+const result = runWorkflowSync(workflow, 42);
 ```
 
 **Parameters:**
@@ -493,7 +509,7 @@ Base error for all Sayiir workflow errors.
 import { WorkflowError } from "sayiir";
 
 try {
-  runWorkflow(workflow, input);
+  await runWorkflow(workflow, input);
 } catch (e) {
   if (e instanceof WorkflowError) {
     console.error(`Workflow error: ${e.message}`);
@@ -533,11 +549,15 @@ If Zod is not installed or schemas are not provided, validation is skipped.
 
 ## Async Tasks
 
-Tasks can be `async` functions. Sayiir detects promises automatically:
+`runWorkflow()` supports both sync and async task functions. Tasks can use `fetch`, timers, file I/O, or any async operation:
 
 ```typescript
 const fetchData = task("fetch", async (url: string) => {
   const res = await fetch(url);
   return res.json();
 });
+
+const result = await runWorkflow(workflow, "https://api.example.com/data");
 ```
+
+For sync-only workflows, `runWorkflowSync()` provides a faster synchronous path. It throws if any task returns a Promise.

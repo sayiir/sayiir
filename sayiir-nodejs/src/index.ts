@@ -27,6 +27,7 @@ export type { BranchDef, InferBranchOutputs } from "./flow.js";
 // Executor
 export {
   runWorkflow,
+  runWorkflowSync,
   runDurableWorkflow,
   resumeWorkflow,
   cancelWorkflow,

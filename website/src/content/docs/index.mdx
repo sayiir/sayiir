@@ -58,7 +58,7 @@ result = run_workflow(workflow, 42)
 ```typescript
 import { task, flow, runWorkflow } from "sayiir";
 
-const fetchUser = task("fetch-user", async (userId: number) => {
+const fetchUser = task("fetch-user", (userId: number) => {
   return { id: userId, name: "Alice" };
 });
 
@@ -71,7 +71,7 @@ const workflow = flow<number>("welcome")
   .then(sendEmail)
   .build();
 
-const result = runWorkflow(workflow, 42);
+const result = await runWorkflow(workflow, 42);
 ```
 
 ## Rust

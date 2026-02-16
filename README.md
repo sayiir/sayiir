@@ -69,7 +69,7 @@ runner.run(workflow.workflow(), "welcome-user-123", user_id).await?;
 ```typescript
 import { task, flow, runWorkflow } from "sayiir";
 
-const fetchUser = task("fetch-user", async (id: number) => {
+const fetchUser = task("fetch-user", (id: number) => {
   return { id, name: "Alice" };
 });
 
@@ -82,7 +82,7 @@ const workflow = flow<number>("welcome")
   .then(sendEmail)
   .build();
 
-const result = runWorkflow(workflow, 42);
+const result = await runWorkflow(workflow, 42);
 ```
 
 No annotations. No YAML. No separate worker processes. Just code.

@@ -11,7 +11,7 @@ Write plain TypeScript functions. Sayiir makes them durable — automatic checkp
 ```typescript
 import { task, flow, runWorkflow } from "sayiir";
 
-const fetchUser = task("fetch-user", async (id: number) => {
+const fetchUser = task("fetch-user", (id: number) => {
   return { id, name: "Alice" };
 });
 
@@ -24,7 +24,7 @@ const workflow = flow<number>("welcome")
   .then(sendEmail)
   .build();
 
-const result = runWorkflow(workflow, 42);
+const result = await runWorkflow(workflow, 42);
 // "Sent welcome to Alice"
 ```
 
@@ -59,7 +59,7 @@ const workflow = flow<number>("pipeline")
   .then("stringify", (x) => String(x))
   .build();
 
-const result = runWorkflow(workflow, 5);
+const result = await runWorkflow(workflow, 5);
 // "11"  (5 * 2 = 10, 10 + 1 = 11, String(11))
 ```
 
@@ -78,7 +78,7 @@ const workflow = flow<number>("math")
   .then(addTen)
   .build();
 
-const result = runWorkflow(workflow, 5);
+const result = await runWorkflow(workflow, 5);
 // 20  (5 * 2 = 10, 10 + 10 = 20)
 ```
 
@@ -125,9 +125,8 @@ const status = runDurableWorkflow(workflow, "run-001", 21, backend);
 ```typescript
 import { task } from "sayiir";
 
-const flakyCall = task("flaky-call", async (url: string) => {
-  const res = await fetch(url);
-  return res.json();
+const flakyCall = task("flaky-call", (input: string) => {
+  return callExternalApi(input);
 }, {
   retry: { maxAttempts: 3, initialDelay: "500ms", backoffMultiplier: 2.0 },
 });
@@ -156,7 +155,7 @@ const workflow = flow<{ id: number }>("checkout")
   })
   .build();
 
-const result = runWorkflow(workflow, { id: 1 });
+const result = await runWorkflow(workflow, { id: 1 });
 ```
 
 ### Delays and signals
@@ -197,14 +196,14 @@ const processOrder = task("process-order", (order) => {
 });
 
 const workflow = flow("checkout").then(processOrder).build();
-const result = runWorkflow(workflow, { id: "abc", amount: 99.99 });
+const result = await runWorkflow(workflow, { id: "abc", amount: 99.99 });
 // Zod validates input before the task runs
 ```
 
 ### Task metadata
 
 ```typescript
-const processPayment = task("process-payment", async (order) => {
+const processPayment = task("process-payment", (order) => {
   // ...
 }, {
   timeout: "60s",
@@ -232,7 +231,8 @@ const processPayment = task("process-payment", async (order) => {
 
 ### Execution
 
-- **`runWorkflow(workflow, input)`** — Execute in-memory. Returns the final output.
+- **`await runWorkflow(workflow, input)`** — Execute in-memory (async). Returns `Promise<TOut>`.
+- **`runWorkflowSync(workflow, input)`** — Execute in-memory (sync-only tasks). Returns `TOut`.
 - **`runDurableWorkflow(workflow, instanceId, input, backend)`** — Execute with checkpointing. Returns `WorkflowStatus<TOut>`.
 - **`resumeWorkflow(workflow, instanceId, backend)`** — Resume from last checkpoint.
 - **`cancelWorkflow(instanceId, backend, opts?)`** — Cancel a running workflow.

@@ -16,7 +16,7 @@ Define tasks with `task()` and chain them with `flow()`:
 ```typescript
 import { task, flow, runWorkflow } from "sayiir";
 
-const fetchUser = task("fetch-user", async (userId: number) => {
+const fetchUser = task("fetch-user", (userId: number) => {
   return { id: userId, name: "Alice" };
 });
 
@@ -29,7 +29,7 @@ const workflow = flow<number>("welcome")
   .then(sendEmail)
   .build();
 
-const result = runWorkflow(workflow, 42);
+const result = await runWorkflow(workflow, 42);
 console.log(result); // "Sent welcome to Alice"
 ```
 
@@ -98,7 +98,7 @@ const processOrder = task("process-order", (order) => {
 });
 
 const workflow = flow("typed").then(processOrder).build();
-const result = runWorkflow(workflow, { orderId: "1", amount: 99.99 });
+const result = await runWorkflow(workflow, { orderId: "1", amount: 99.99 });
 ```
 
 Install Zod separately: `pnpm add zod`.
@@ -113,7 +113,7 @@ const workflow = flow<number>("quick")
   .then("format", (x) => `Result: ${x}`)
   .build();
 
-const result = runWorkflow(workflow, 21);
+const result = await runWorkflow(workflow, 21);
 // "Result: 42"
 ```
 
@@ -139,7 +139,7 @@ const workflow = flow<{ id: number }>("checkout")
   })
   .build();
 
-const result = runWorkflow(workflow, { id: 1 });
+const result = await runWorkflow(workflow, { id: 1 });
 ```
 
 ## Next steps

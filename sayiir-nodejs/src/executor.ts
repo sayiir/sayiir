@@ -1,7 +1,11 @@
 /**
  * Workflow execution utilities.
  *
- * Thin wrappers around the native addon, mirroring the Python executor.
+ * Two execution paths:
+ *   - `runWorkflow()` — async, uses a stepper pattern that yields control to
+ *     JS between each task. Supports both sync and async tasks.
+ *   - `runDurableWorkflow()` — sync, uses the native durable engine with
+ *     checkpointing. Async tasks require the stepper-based approach (planned).
  */
 
 import type { Workflow } from "./flow.js";
@@ -45,9 +49,43 @@ export class PostgresBackend {
 /**
  * Run a workflow to completion (no persistence).
  *
- * Returns the workflow output directly.
+ * Uses a stepper pattern that yields control to JavaScript between each task,
+ * enabling both sync and async task functions (fetch, timers, file I/O).
+ *
+ * Returns a Promise that resolves with the workflow output.
  */
-export function runWorkflow<TIn, TOut>(
+export async function runWorkflow<TIn, TOut>(
+  workflow: Workflow<TIn, TOut>,
+  input: TIn,
+): Promise<TOut> {
+  const native = getNative();
+  const stepper = new native.NapiContinuationStepper(workflow._inner, input);
+  let step = stepper.current();
+
+  while (step.kind === "task") {
+    const taskFn = workflow._taskRegistry[step.taskId!];
+    if (!taskFn) {
+      throw new WorkflowError(`Task '${step.taskId}' not found in registry`);
+    }
+    const taskInput = step.inputJson != null ? JSON.parse(step.inputJson) : undefined;
+    const output = await taskFn(taskInput);
+    step = stepper.submitResult(output);
+  }
+
+  if (step.kind === "done") {
+    return (step.outputJson != null ? JSON.parse(step.outputJson) : undefined) as TOut;
+  }
+
+  throw new WorkflowError(`Unexpected step kind: ${step.kind}`);
+}
+
+/**
+ * Run a workflow to completion synchronously (no persistence).
+ *
+ * All tasks must return plain values, not Promises. For async tasks,
+ * use `runWorkflow()` (async) instead.
+ */
+export function runWorkflowSync<TIn, TOut>(
   workflow: Workflow<TIn, TOut>,
   input: TIn,
 ): TOut {
@@ -173,19 +211,19 @@ function parseWorkflowStatus<TOut>(
       return {
         status: "paused",
         reason: raw.reason,
-        pausedBy: raw.pausedBy,
+        pausedBy: raw.cancelledBy,
       };
     case "waiting":
       return {
         status: "waiting",
-        wakeAt: raw.wakeAt!,
-        delayId: raw.delayId!,
+        wakeAt: raw.wakeAt ?? "",
+        delayId: raw.delayId ?? "",
       };
     case "awaiting_signal":
       return {
         status: "awaiting_signal",
-        signalId: raw.signalId!,
-        signalName: raw.signalName!,
+        signalId: raw.signalId ?? "",
+        signalName: raw.signalName ?? "",
         wakeAt: raw.wakeAt,
       };
     default:
