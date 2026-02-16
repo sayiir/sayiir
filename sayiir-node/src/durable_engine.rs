@@ -17,6 +17,9 @@ use sayiir_runtime::{
     prepare_run,
 };
 
+use sayiir_postgres::PostgresBackend;
+use sayiir_runtime::serialization::JsonCodec;
+
 use crate::backend::{BackendKind, NapiInMemoryBackend, NapiPostgresBackend, with_backend};
 use crate::codec::encode_js_value;
 use crate::exceptions;
@@ -134,13 +137,19 @@ impl NapiDurableEngine {
     /// Create a new durable engine with a Postgres backend.
     #[napi(factory)]
     pub fn with_postgres(backend: &NapiPostgresBackend) -> Result<Self> {
+        // Create a fresh pool on the engine's own runtime to avoid
+        // cross-runtime PgPool affinity issues.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
+        let fresh_backend = runtime
+            .block_on(PostgresBackend::<JsonCodec>::connect(&backend.url))
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+
         Ok(Self {
-            backend: BackendKind::Postgres(Arc::clone(&backend.inner)),
+            backend: BackendKind::Postgres(Arc::new(fresh_backend)),
             runtime,
         })
     }

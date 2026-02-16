@@ -76,7 +76,10 @@ pub use execution::{
 pub use runner::WorkflowRunner;
 pub use runner::distributed::CheckpointingRunner;
 pub use runner::in_process::InProcessRunner;
-pub use worker::{PooledWorker, WorkerHandle, WorkflowRegistry};
+pub use worker::{
+    ExternalTaskExecutor, ExternalWorkflow, PooledWorker, WorkerHandle, WorkflowIndex,
+    WorkflowRegistry,
+};
 
 pub use sayiir_core::sayiir_ctx;
 #[cfg(feature = "macros")]

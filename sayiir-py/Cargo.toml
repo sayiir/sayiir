@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 bytes = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 serde_json = { workspace = true }
 sayiir-core = { path = "../sayiir-core" }

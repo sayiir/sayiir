@@ -12,61 +12,68 @@
  * const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
  * const worker = new Worker("worker-1", backend, [orderFlow], {
  *   pollInterval: "5s",
- *   maxConcurrency: 4,
  * });
- * const handle = await worker.start();
+ * const handle = worker.start();
  * process.on("SIGTERM", () => handle.shutdown());
  * ```
  */
 
-import type { Duration } from "./types.js";
+import type { Duration, TaskCallback } from "./types.js";
 import type { Workflow } from "./flow.js";
-import type { Backend } from "./executor.js";
+import {
+  type Backend,
+  InMemoryBackend,
+  PostgresBackend,
+} from "./executor.js";
+import type { NapiWorker, NapiWorkerHandle } from "./native.js";
+import { getNative } from "./native.js";
+import { parseDuration } from "./duration.js";
 
 /** Worker configuration options. */
 export interface WorkerOptions {
   pollInterval?: Duration;
   claimTtl?: Duration;
-  batchSize?: number;
-  maxConcurrency?: number;
 }
 
 /** Handle for controlling a running worker. */
 export class WorkerHandle {
+  /** @internal */
+  private readonly _native: NapiWorkerHandle;
+
+  /** @internal */
+  constructor(native: NapiWorkerHandle) {
+    this._native = native;
+  }
+
   /** Request a graceful shutdown. */
-  async shutdown(): Promise<void> {
-    // Will be implemented when the native worker bridge is ready
-    throw new Error("Worker not yet implemented — use runDurableWorkflow for now");
+  shutdown(): void {
+    this._native.shutdown();
   }
 
   /** Cancel a workflow via the worker's backend. */
-  async cancelWorkflow(
+  cancelWorkflow(
     instanceId: string,
     opts?: { reason?: string; cancelledBy?: string },
-  ): Promise<void> {
-    throw new Error("Worker not yet implemented — use cancelWorkflow() directly");
+  ): void {
+    this._native.cancelWorkflow(instanceId, opts?.reason, opts?.cancelledBy);
   }
 
   /** Pause a workflow via the worker's backend. */
-  async pauseWorkflow(
+  pauseWorkflow(
     instanceId: string,
     opts?: { reason?: string; pausedBy?: string },
-  ): Promise<void> {
-    throw new Error("Worker not yet implemented — use pauseWorkflow() directly");
+  ): void {
+    this._native.pauseWorkflow(instanceId, opts?.reason, opts?.pausedBy);
   }
 
   /** Unpause a workflow via the worker's backend. */
-  async unpauseWorkflow(instanceId: string): Promise<void> {
-    throw new Error("Worker not yet implemented — use unpauseWorkflow() directly");
+  unpauseWorkflow(instanceId: string): void {
+    this._native.unpauseWorkflow(instanceId);
   }
 
   /** Send a signal to a workflow via the worker's backend. */
-  async sendSignal(
-    instanceId: string,
-    signalName: string,
-    payload: unknown,
-  ): Promise<void> {
-    throw new Error("Worker not yet implemented — use sendSignal() directly");
+  sendSignal(instanceId: string, signalName: string, payload: unknown): void {
+    this._native.sendSignal(instanceId, signalName, JSON.stringify(payload));
   }
 }
 
@@ -74,13 +81,13 @@ export class WorkerHandle {
 export class Worker {
   readonly workerId: string;
   readonly backend: Backend;
-  readonly workflows: Workflow<any, any>[];
+  readonly workflows: readonly Workflow<any, any>[];
   readonly options: WorkerOptions;
 
   constructor(
     workerId: string,
     backend: Backend,
-    workflows: Workflow<any, any>[],
+    workflows: readonly Workflow<any, any>[],
     opts?: WorkerOptions,
   ) {
     this.workerId = workerId;
@@ -92,14 +99,70 @@ export class Worker {
   /**
    * Start the worker and return a handle for lifecycle control.
    *
-   * **Not yet implemented.** The distributed worker requires the native
-   * PooledWorker bridge which is planned for a future release.
-   * For now, use `runDurableWorkflow()` / `resumeWorkflow()` directly.
+   * Spawns a background thread that polls for available tasks, claims them,
+   * and dispatches them to the registered task functions.
    */
-  async start(): Promise<WorkerHandle> {
-    throw new Error(
-      "Worker.start() not yet implemented. " +
-        "Use runDurableWorkflow() and resumeWorkflow() for single-process durable execution.",
+  start(): WorkerHandle {
+    const napiWorker = this.createNapiWorker();
+
+    // Build a combined task registry from all workflows
+    const registry: Record<string, TaskCallback> = {};
+    for (const wf of this.workflows) {
+      Object.assign(registry, wf._taskRegistry);
+    }
+
+    // The native worker calls this dispatcher from a background thread.
+    // It receives a JSON payload `{ taskId, input }` and must return
+    // a JSON-serialized output string.
+    const dispatcher = async (payload: string): Promise<string> => {
+      const { taskId, input } = JSON.parse(payload) as {
+        taskId: string;
+        input: unknown;
+      };
+      const fn = registry[taskId];
+      if (!fn) {
+        throw new Error(`Task '${taskId}' not found in any workflow registry`);
+      }
+      const result = await fn(input);
+      return JSON.stringify(result);
+    };
+
+    const napiHandle = napiWorker.start(
+      this.workflows.map((wf) => wf._inner),
+      dispatcher,
     );
+
+    return new WorkerHandle(napiHandle);
+  }
+
+  /** @internal Create the native worker with the appropriate backend. */
+  private createNapiWorker(): NapiWorker {
+    const native = getNative();
+    const pollMs = this.options.pollInterval
+      ? parseDuration(this.options.pollInterval)
+      : undefined;
+    const claimMs = this.options.claimTtl
+      ? parseDuration(this.options.claimTtl)
+      : undefined;
+
+    if (this.backend instanceof InMemoryBackend) {
+      return native.NapiWorker.withInMemory(
+        this.workerId,
+        this.backend._inner,
+        pollMs,
+        claimMs,
+      );
+    }
+
+    if (this.backend instanceof PostgresBackend) {
+      return native.NapiWorker.withPostgres(
+        this.workerId,
+        this.backend._inner,
+        pollMs,
+        claimMs,
+      );
+    }
+
+    throw new Error("Unsupported backend type");
   }
 }

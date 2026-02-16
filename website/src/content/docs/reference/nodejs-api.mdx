@@ -499,6 +499,114 @@ interface StepOptions {
 }
 ```
 
+## Distributed Worker
+
+### Worker
+
+Create a distributed workflow worker that polls the backend for available tasks.
+
+```typescript
+import { Worker, PostgresBackend } from "sayiir";
+
+const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
+const worker = new Worker("worker-1", backend, [workflow], {
+  pollInterval: "2s",
+  claimTtl: "10m",
+});
+```
+
+**Constructor Parameters:**
+
+- `workerId` (string) — Unique identifier for this worker instance
+- `backend` (Backend) — Shared persistence backend (`InMemoryBackend` or `PostgresBackend`)
+- `workflows` (Workflow[]) — Compiled workflows whose tasks this worker can execute
+- `opts` (WorkerOptions, optional) — Configuration options
+
+**WorkerOptions:**
+
+- `pollInterval` (Duration, optional) — How often to poll for tasks (`"5s"`, `"1m"`, `2000`)
+- `claimTtl` (Duration, optional) — Task claim time-to-live (`"5m"`, `"10m"`, `300000`)
+
+**Properties:**
+
+- `workerId` (string) — The worker's unique identifier
+- `backend` (Backend) — The persistence backend
+- `workflows` (Workflow[]) — The registered workflows
+- `options` (WorkerOptions) — The configuration options
+
+#### .start()
+
+Start the worker and return a handle for lifecycle control. Spawns a background thread that polls for tasks, claims them, and dispatches them to registered task functions.
+
+```typescript
+const handle = worker.start();
+process.on("SIGTERM", () => handle.shutdown());
+```
+
+**Returns:** `WorkerHandle`
+
+### WorkerHandle
+
+Handle for controlling a running worker. Obtained from `Worker.start()`.
+
+#### .shutdown()
+
+Request a graceful shutdown. The worker finishes in-flight tasks before stopping.
+
+```typescript
+handle.shutdown();
+```
+
+#### .cancelWorkflow(instanceId, opts?)
+
+Request cancellation of a workflow instance via the worker's backend.
+
+```typescript
+handle.cancelWorkflow("order-42", {
+  reason: "Out of stock",
+  cancelledBy: "admin@example.com",
+});
+```
+
+**Parameters:**
+- `instanceId` (string) — The workflow instance ID
+- `opts.reason` (string, optional) — Reason for cancellation
+- `opts.cancelledBy` (string, optional) — Identifier of who requested cancellation
+
+#### .pauseWorkflow(instanceId, opts?)
+
+Pause a workflow instance at the next checkpoint.
+
+```typescript
+handle.pauseWorkflow("order-42", { reason: "Maintenance window" });
+```
+
+**Parameters:**
+- `instanceId` (string) — The workflow instance ID
+- `opts.reason` (string, optional) — Reason for pause
+- `opts.pausedBy` (string, optional) — Identifier of who requested pause
+
+#### .unpauseWorkflow(instanceId)
+
+Unpause a paused workflow instance.
+
+```typescript
+handle.unpauseWorkflow("order-42");
+```
+
+#### .sendSignal(instanceId, signalName, payload)
+
+Send an external signal to a workflow instance.
+
+```typescript
+handle.sendSignal("order-42", "manager_approval", { approved: true });
+```
+
+**Parameters:**
+- `instanceId` (string) — The workflow instance ID
+- `signalName` (string) — The signal name
+- `payload` (unknown) — The signal payload (serialized to JSON)
+
 ## Exceptions
 
 ### WorkflowError

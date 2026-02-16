@@ -8,6 +8,7 @@
 export type {
   Duration,
   RetryPolicy,
+  TaskCallback,
   TaskOptions,
   StepOptions,
   WorkflowStatus,

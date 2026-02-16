@@ -11,13 +11,15 @@
 //! **Use [`CheckpointingRunner`](crate::runner::distributed::CheckpointingRunner) instead when**:
 //! You want a single process to run an entire workflow with crash recovery.
 
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use chrono;
 use futures::FutureExt;
 use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
 use sayiir_core::context::with_context;
-use sayiir_core::error::WorkflowError;
+use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::registry::TaskRegistry;
 use sayiir_core::snapshot::{
     ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, WorkflowSnapshot,
@@ -27,6 +29,7 @@ use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::{PersistentBackend, SignalStore, TaskClaimStore};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -34,6 +37,33 @@ use tokio::time;
 
 /// A list of workflow definitions keyed by their definition hash.
 pub type WorkflowRegistry<C, Input, M> = Vec<(String, Arc<Workflow<C, Input, M>>)>;
+
+/// Workflow definition for binding-friendly worker API.
+///
+/// Contains only the structural information (definition hash + continuation tree)
+/// needed by `PooledWorker` for position tracking, completion detection, retry
+/// policies, and timeouts. Task execution is delegated to an external executor.
+pub struct ExternalWorkflow {
+    /// The continuation tree describing the workflow structure.
+    pub continuation: Arc<WorkflowContinuation>,
+}
+
+/// Workflow index keyed by definition hash for O(1) lookup during task dispatch.
+pub type WorkflowIndex = HashMap<String, ExternalWorkflow>;
+
+/// External task executor function signature.
+///
+/// Receives the task ID and input bytes, returns the output bytes.
+/// Used by language bindings (Python, Node.js) to delegate task execution
+/// to the host language's runtime.
+pub type ExternalTaskExecutor = Arc<
+    dyn Fn(
+            &str,
+            Bytes,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<Bytes, BoxError>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Internal command sent from [`WorkerHandle`] to the actor loop.
 enum WorkerCommand {
@@ -398,6 +428,297 @@ where
                 shutdown_tx: tx,
                 join_handle: tokio::sync::Mutex::new(Some(join_handle)),
             }),
+        }
+    }
+
+    /// Spawn the worker with an external executor and return a handle.
+    ///
+    /// Like [`spawn`](Self::spawn) but instead of executing tasks via typed
+    /// `Workflow` closures, delegates all task execution to the provided
+    /// `executor`. This is used by language bindings (Python, Node.js) where
+    /// task functions live in the host language.
+    ///
+    /// # Parameters
+    ///
+    /// - `poll_interval`: How often to poll for new tasks
+    /// - `workflows`: Workflow definitions (hash + continuation tree)
+    /// - `executor`: Closure that executes a task by ID given input bytes
+    #[must_use]
+    pub fn spawn_with_executor(
+        self,
+        poll_interval: Duration,
+        workflows: WorkflowIndex,
+        executor: ExternalTaskExecutor,
+    ) -> WorkerHandle<B> {
+        let (tx, rx) = mpsc::channel(1);
+        let backend = Arc::clone(&self.backend);
+        let join_handle = tokio::spawn(async move {
+            self.run_external_actor_loop(poll_interval, workflows, executor, rx)
+                .await
+        });
+        WorkerHandle {
+            inner: Arc::new(WorkerHandleInner {
+                backend,
+                shutdown_tx: tx,
+                join_handle: tokio::sync::Mutex::new(Some(join_handle)),
+            }),
+        }
+    }
+
+    /// Actor loop for external executor mode.
+    async fn run_external_actor_loop(
+        &self,
+        poll_interval: Duration,
+        workflows: WorkflowIndex,
+        executor: ExternalTaskExecutor,
+        mut cmd_rx: mpsc::Receiver<WorkerCommand>,
+    ) -> Result<(), crate::error::RuntimeError> {
+        let mut interval = time::interval(poll_interval);
+
+        loop {
+            tokio::select! {
+                biased;
+
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(WorkerCommand::Shutdown) | None => {
+                            tracing::info!(worker_id = %self.worker_id, "Worker shutting down");
+                            return Ok(());
+                        }
+                    }
+                }
+
+                _ = interval.tick() => {
+                    tracing::trace!(worker_id = %self.worker_id, "Will poll for available tasks");
+                }
+            }
+
+            let available_tasks = self
+                .backend
+                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .await?;
+
+            for task in available_tasks {
+                if let Ok(WorkerCommand::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) =
+                    cmd_rx.try_recv()
+                {
+                    tracing::info!(worker_id = %self.worker_id, "Worker shutting down mid-batch");
+                    return Ok(());
+                }
+
+                if let Some(ext_wf) = workflows.get(&task.workflow_definition_hash) {
+                    match self
+                        .execute_external_task(
+                            &ext_wf.continuation,
+                            &task.workflow_definition_hash,
+                            &executor,
+                            &task,
+                        )
+                        .await
+                    {
+                        Err(ref e) if e.is_timeout() => {
+                            tracing::error!(
+                                worker_id = %self.worker_id,
+                                error = %e,
+                                "Task timed out — worker shutting down"
+                            );
+                            return Ok(());
+                        }
+                        Ok(_) => {
+                            tracing::info!("Worker {} completed a task", self.worker_id);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Worker {} task execution failed: {}",
+                                self.worker_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Execute a single task using an external executor.
+    async fn execute_external_task(
+        &self,
+        continuation: &WorkflowContinuation,
+        definition_hash: &str,
+        executor: &ExternalTaskExecutor,
+        available_task: &AvailableTask,
+    ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        let mut snapshot = self
+            .backend
+            .load_snapshot(&available_task.instance_id)
+            .await?;
+        let already_completed = Self::validate_task_preconditions(
+            definition_hash,
+            continuation,
+            available_task,
+            &snapshot,
+        )?;
+        if already_completed {
+            return Ok(WorkflowStatus::InProgress);
+        }
+
+        let Some(claim) = self.claim_task(available_task).await? else {
+            return Ok(WorkflowStatus::InProgress);
+        };
+
+        if let Some(status) = self.check_post_claim_guards(available_task).await? {
+            claim.release_quietly().await;
+            return Ok(status);
+        }
+
+        tracing::debug!(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            "Executing task (external)"
+        );
+
+        let execution_result = self
+            .execute_with_deadline_ext(
+                continuation,
+                executor,
+                available_task,
+                &mut snapshot,
+                &claim,
+            )
+            .await;
+
+        self.settle_execution_result_ext(
+            execution_result,
+            continuation,
+            available_task,
+            &mut snapshot,
+            claim,
+        )
+        .await
+    }
+
+    /// Run the external executor with an optional deadline.
+    async fn execute_with_deadline_ext(
+        &self,
+        continuation: &WorkflowContinuation,
+        executor: &ExternalTaskExecutor,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: &ActiveTaskClaim<'_, B>,
+    ) -> ExecutionOutcome {
+        let task_id = available_task.task_id.clone();
+        let input = available_task.input.clone();
+
+        let deadline = if let Some(timeout) = continuation.get_task_timeout(&task_id) {
+            snapshot.set_task_deadline(task_id.clone(), timeout);
+            let _ = self.backend.save_snapshot(snapshot).await;
+            snapshot.refresh_task_deadline();
+            snapshot.task_deadline.clone()
+        } else {
+            None
+        };
+
+        let execution_future = executor(&task_id, input);
+
+        let heartbeat_result = self
+            .run_with_heartbeat(
+                claim,
+                deadline.as_ref(),
+                AssertUnwindSafe(execution_future).catch_unwind(),
+            )
+            .await;
+
+        snapshot.clear_task_deadline();
+
+        match heartbeat_result {
+            Err(timeout_err) => ExecutionOutcome::Timeout(timeout_err),
+            Ok(Err(panic_payload)) => ExecutionOutcome::Panic(panic_payload),
+            Ok(Ok(Err(e))) => ExecutionOutcome::TaskError(e.into()),
+            Ok(Ok(Ok(output))) => ExecutionOutcome::Success(output),
+        }
+    }
+
+    /// Settle execution result for external executor mode.
+    async fn settle_execution_result_ext(
+        &self,
+        outcome: ExecutionOutcome,
+        continuation: &WorkflowContinuation,
+        available_task: &AvailableTask,
+        snapshot: &mut WorkflowSnapshot,
+        claim: ActiveTaskClaim<'_, B>,
+    ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        match outcome {
+            ExecutionOutcome::Timeout(err) => {
+                if let Ok(Some(status)) = self
+                    .try_schedule_retry(continuation, available_task, snapshot, &err.to_string())
+                    .await
+                {
+                    claim.release_quietly().await;
+                    return Ok(status);
+                }
+
+                tracing::warn!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    error = %err,
+                    "Task timed out via heartbeat — marking workflow failed, shutting down"
+                );
+                snapshot.mark_failed(err.to_string());
+                let _ = self.backend.save_snapshot(snapshot).await;
+                claim.release_quietly().await;
+                Err(err)
+            }
+            ExecutionOutcome::Panic(panic_payload) => {
+                let panic_msg = extract_panic_message(&panic_payload);
+
+                if let Ok(Some(status)) = self
+                    .try_schedule_retry(continuation, available_task, snapshot, &panic_msg)
+                    .await
+                {
+                    claim.release_quietly().await;
+                    return Ok(status);
+                }
+
+                tracing::error!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    panic = %panic_msg,
+                    "Task panicked - releasing claim"
+                );
+                claim.release_quietly().await;
+                Err(WorkflowError::TaskPanicked(panic_msg).into())
+            }
+            ExecutionOutcome::TaskError(e) => {
+                if let Ok(Some(status)) = self
+                    .try_schedule_retry(continuation, available_task, snapshot, &e.to_string())
+                    .await
+                {
+                    claim.release_quietly().await;
+                    return Ok(status);
+                }
+
+                tracing::error!(
+                    instance_id = %available_task.instance_id,
+                    task_id = %available_task.task_id,
+                    error = %e,
+                    "Task execution failed"
+                );
+                claim.release_quietly().await;
+                Err(e)
+            }
+            ExecutionOutcome::Success(output) => {
+                snapshot.clear_retry_state(&available_task.task_id);
+                self.commit_task_result(
+                    continuation,
+                    available_task,
+                    snapshot,
+                    output.clone(),
+                    claim,
+                )
+                .await?;
+                self.determine_post_task_status(continuation, available_task, snapshot, output)
+                    .await
+            }
         }
     }
 

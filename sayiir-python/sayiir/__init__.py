@@ -23,6 +23,7 @@ from .executor import (
     unpause_workflow,
 )
 from .flow import Flow, Workflow
+from .worker import Worker, WorkerHandle
 
 __all__ = [
     "BackendError",
@@ -46,6 +47,8 @@ __all__ = [
     "send_signal",
     "unpause_workflow",
     "task",
+    "Worker",
+    "WorkerHandle",
 ]
 
-__version__ = "0.1.0-alpha.5"
+__version__ = "0.1.0-alpha.6"

@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-core"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytes",
  "chrono",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-integration-tests"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytes",
  "sayiir-core",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-macros"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-node"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytes",
  "chrono",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-persistence"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytes",
  "chrono",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-postgres"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytes",
  "chrono",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-py"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytes",
  "chrono",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "sayiir-runtime"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "backon",
  "bytecheck",

@@ -549,3 +549,151 @@ class TestAsyncDurableEngine:
         status = run_durable_workflow(wf, "mixed-inst", 10)
         assert status.is_completed()
         assert status.output == 21
+
+
+# ── Error propagation & stack trace tests ─────────────────────
+
+
+def _helper_that_raises():
+    """Helper with a distinct name so we can check it in the traceback."""
+    raise ValueError("deep error from helper")
+
+
+@task
+def task_calls_helper(_x):
+    _helper_that_raises()
+
+
+@task
+def task_raises_type_error(_x):
+    raise TypeError("wrong type provided")
+
+
+@task
+def task_raises_key_error(_x):
+    d = {}
+    return d["missing"]
+
+
+@task
+def task_raises_with_message(_x):
+    raise RuntimeError("custom runtime error with context: abc-123")
+
+
+class TestErrorPropagationSync:
+    """Error propagation through the sync (non-durable) engine."""
+
+    def test_traceback_preserved_in_sync_engine(self):
+        """Sync engine preserves Python traceback across Rust FFI."""
+        wf = Flow("tb-sync").then(task_calls_helper).build()
+        with pytest.raises(TaskError, match="deep error from helper") as exc_info:
+            run_workflow(wf, 0)
+        # The traceback text should be embedded in the error message
+        msg = str(exc_info.value)
+        assert "_helper_that_raises" in msg
+
+    def test_type_error_preserved(self):
+        wf = Flow("type-err").then(task_raises_type_error).build()
+        with pytest.raises(TaskError, match="wrong type provided"):
+            run_workflow(wf, 0)
+
+    def test_key_error_preserved(self):
+        wf = Flow("key-err").then(task_raises_key_error).build()
+        with pytest.raises(TaskError, match="missing"):
+            run_workflow(wf, 0)
+
+    def test_error_in_second_task(self):
+        """Error in the second task of a chain still propagates."""
+        wf = Flow("mid-fail").then(double).then(failing_task).build()
+        with pytest.raises(TaskError, match="intentional failure"):
+            run_workflow(wf, 5)
+
+    def test_error_in_last_task(self):
+        wf = Flow("last-fail").then(double).then(add_one).then(failing_task).build()
+        with pytest.raises(TaskError, match="intentional failure"):
+            run_workflow(wf, 1)
+
+    def test_error_message_content_preserved(self):
+        """Full error message with specific content survives FFI round-trip."""
+        wf = Flow("msg-content").then(task_raises_with_message).build()
+        with pytest.raises(TaskError, match="abc-123"):
+            run_workflow(wf, 0)
+
+
+class TestErrorPropagationDurable:
+    """Error propagation through the durable engine."""
+
+    def test_error_message_preserved_in_failed_status(self):
+        wf = Flow("dur-err").then(task_raises_with_message).build()
+        status = run_durable_workflow(wf, "dur-err-1", 0)
+        assert status.is_failed()
+        assert "custom runtime error with context: abc-123" in status.error
+
+    def test_type_error_in_durable(self):
+        wf = Flow("dur-type").then(task_raises_type_error).build()
+        status = run_durable_workflow(wf, "dur-type-1", 0)
+        assert status.is_failed()
+        assert "wrong type provided" in status.error
+
+    def test_key_error_in_durable(self):
+        wf = Flow("dur-key").then(task_raises_key_error).build()
+        status = run_durable_workflow(wf, "dur-key-1", 0)
+        assert status.is_failed()
+        assert "missing" in status.error
+
+    def test_error_in_middle_of_chain_durable(self):
+        wf = Flow("dur-mid").then(double).then(failing_task).then(add_one).build()
+        status = run_durable_workflow(wf, "dur-mid-1", 5)
+        assert status.is_failed()
+        assert "intentional failure" in status.error
+
+    def test_failed_status_has_no_output(self):
+        wf = Flow("dur-no-out").then(task_calls_helper).build()
+        status = run_durable_workflow(wf, "dur-no-out-1", 0)
+        assert status.is_failed()
+        assert status.output is None
+
+    def test_resume_preserves_failed_error(self):
+        """Resuming a failed workflow still shows the original error."""
+        backend = InMemoryBackend()
+        wf = Flow("dur-resume-err").then(failing_task).build()
+        status = run_durable_workflow(wf, "dur-resume-err-1", 0, backend=backend)
+        assert status.is_failed()
+        original_error = status.error
+
+        status2 = resume_workflow(wf, "dur-resume-err-1", backend)
+        assert status2.is_failed()
+        assert status2.error == original_error
+
+
+class TestErrorTypes:
+    """Verify the correct exception subclass is raised for each error source."""
+
+    def test_task_failure_raises_task_error_not_workflow_error_only(self):
+        """TaskError is specifically a TaskError, not just WorkflowError."""
+        wf = Flow("specific-type").then(failing_task).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+        # Also verify it IS a WorkflowError (inheritance)
+        with pytest.raises(WorkflowError):
+            run_workflow(wf, 0)
+
+    def test_backend_not_found_raises_backend_error(self):
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        with pytest.raises(BackendError):
+            engine.cancel("does-not-exist")
+
+    def test_backend_error_not_task_error(self):
+        """BackendError is not a TaskError — they're siblings."""
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        with pytest.raises(BackendError):
+            engine.cancel("does-not-exist")
+        # Should NOT match TaskError
+        try:
+            engine.cancel("does-not-exist-2")
+        except TaskError:
+            pytest.fail("BackendError was caught as TaskError — wrong hierarchy")
+        except Exception:
+            pass  # expected: BackendError, not TaskError
