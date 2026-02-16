@@ -171,13 +171,7 @@ class TestWorkerIntegration:
             handle.join()
 
     def test_worker_pause_unpause_via_handle(self, backend):
-        wf = (
-            Flow("pause")
-            .then(identity)
-            .wait_for_signal("gate")
-            .then(identity)
-            .build()
-        )
+        wf = Flow("pause").then(identity).wait_for_signal("gate").then(identity).build()
         iid = uid("pause")
 
         run_durable_workflow(wf, iid, "data", backend)
