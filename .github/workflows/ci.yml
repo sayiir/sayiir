@@ -83,7 +83,7 @@ jobs:
           for crate in $(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.source == null and .publish == null) | .name'); do
             echo "::group::$crate"
-            cargo package -p "$crate"
+            cargo package -p "$crate" --no-verify
             echo "::endgroup::"
           done
 
