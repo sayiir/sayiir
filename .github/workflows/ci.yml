@@ -78,6 +78,15 @@ jobs:
       - name: Run cargo test
         run: cargo test --workspace --all-features
 
+      - name: Dry-run crate publish
+        run: |
+          for crate in $(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.source == null and .publish == null) | .name'); do
+            echo "::group::$crate"
+            cargo package --list -p "$crate"
+            echo "::endgroup::"
+          done
+
   python-lint:
     name: Python Lint
     needs: changes
@@ -143,6 +152,11 @@ jobs:
           uv pip install --system pytest pydantic
           pytest sayiir-python/tests/ -v
 
+      - name: Dry-run PyPI publish
+        run: |
+          uv pip install --system twine
+          twine check sayiir-python/dist/*
+
   node:
     name: Node.js Binding
     needs: changes
@@ -187,6 +201,10 @@ jobs:
       - name: Run tests
         working-directory: sayiir-nodejs
         run: pnpm vitest run
+
+      - name: Dry-run npm publish
+        working-directory: sayiir-nodejs
+        run: pnpm publish --dry-run --no-git-checks
 
   bench:
     name: Benchmarks

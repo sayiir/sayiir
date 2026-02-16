@@ -14,6 +14,22 @@ importers:
       zod:
         specifier: ^3.0.0
         version: 3.25.76
+    optionalDependencies:
+      '@sayiir/node-darwin-arm64':
+        specifier: workspace:*
+        version: link:npm/darwin-arm64
+      '@sayiir/node-darwin-x64':
+        specifier: workspace:*
+        version: link:npm/darwin-x64
+      '@sayiir/node-linux-arm64-gnu':
+        specifier: workspace:*
+        version: link:npm/linux-arm64-gnu
+      '@sayiir/node-linux-x64-gnu':
+        specifier: workspace:*
+        version: link:npm/linux-x64-gnu
+      '@sayiir/node-win32-x64-msvc':
+        specifier: workspace:*
+        version: link:npm/win32-x64-msvc
     devDependencies:
       '@testcontainers/postgresql':
         specifier: ^10.0.0
@@ -33,6 +49,16 @@ importers:
       vitest:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@25.2.3)(yaml@2.8.2)
+
+  npm/darwin-arm64: {}
+
+  npm/darwin-x64: {}
+
+  npm/linux-arm64-gnu: {}
+
+  npm/linux-x64-gnu: {}
+
+  npm/win32-x64-msvc: {}
 
 packages:
 

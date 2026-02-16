@@ -1,6 +1,6 @@
 {
   "name": "sayiir",
-  "version": "0.1.0-alpha.7",
+  "version": "0.1.0-alpha.8",
   "description": "Durable workflow engine for Node.js — type-safe, fault-tolerant task orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,11 +18,11 @@
     "ms": "^2.1.3"
   },
   "optionalDependencies": {
-    "@sayiir/node-linux-x64-gnu": "0.1.0-alpha.7",
-    "@sayiir/node-linux-arm64-gnu": "0.1.0-alpha.7",
-    "@sayiir/node-darwin-x64": "0.1.0-alpha.7",
-    "@sayiir/node-darwin-arm64": "0.1.0-alpha.7",
-    "@sayiir/node-win32-x64-msvc": "0.1.0-alpha.7"
+    "@sayiir/node-linux-x64-gnu": "workspace:*",
+    "@sayiir/node-linux-arm64-gnu": "workspace:*",
+    "@sayiir/node-darwin-x64": "workspace:*",
+    "@sayiir/node-darwin-arm64": "workspace:*",
+    "@sayiir/node-win32-x64-msvc": "workspace:*"
   },
   "peerDependencies": {
     "zod": "^3.0.0"

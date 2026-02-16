@@ -16,8 +16,10 @@ name = "sayiir_persistence"
 path = "src/lib.rs"
 
 [dependencies]
-sayiir-core = { version = "0.1.0-alpha.7", path = "../sayiir-core" }
+sayiir-core = { workspace = true }
 thiserror = "2"
 bytes = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

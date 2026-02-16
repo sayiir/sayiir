@@ -16,8 +16,8 @@ name = "sayiir_postgres"
 path = "src/lib.rs"
 
 [dependencies]
-sayiir-core = { version = "0.1.0-alpha.7", path = "../sayiir-core" }
-sayiir-persistence = { version = "0.1.0-alpha.7", path = "../sayiir-persistence" }
+sayiir-core = { workspace = true }
+sayiir-persistence = { workspace = true }
 sqlx = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -30,8 +30,8 @@ harness = false
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-sayiir-core = { path = "../sayiir-core" }
-sayiir-runtime = { path = "../sayiir-runtime", features = ["json"] }
+sayiir-core = { workspace = true }
+sayiir-runtime = { workspace = true, features = ["rkyv", "json", "macros"] }
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 serde_json = { workspace = true }
 bytes = { workspace = true }

@@ -66,7 +66,9 @@ runs:
     # Publish the main package.
     # The native binary is pulled in via optionalDependencies
     # on @sayiir/node-<platform>.
+    # Uses pnpm (not npm) so that workspace:* refs in
+    # optionalDependencies are resolved to real versions.
     - name: Publish root package
       shell: bash
       working-directory: ${{ inputs.package-dir }}
-      run: npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
+      run: pnpm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }} --no-git-checks
