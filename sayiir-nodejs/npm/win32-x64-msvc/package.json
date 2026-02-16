@@ -1,6 +1,6 @@
 {
   "name": "@sayiir/node-win32-x64-msvc",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "os": ["win32"],
   "cpu": ["x64"],
   "main": "sayiir-node.node",
