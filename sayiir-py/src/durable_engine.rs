@@ -16,6 +16,9 @@ use sayiir_runtime::{
     prepare_run,
 };
 
+use sayiir_postgres::PostgresBackend;
+use sayiir_runtime::serialization::JsonCodec;
+
 use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend, with_backend};
 use crate::codec::{decode_to_pyobject, encode_pyobject};
 use crate::engine::{PyWorkflowStatus, execute_python_task};
@@ -53,15 +56,19 @@ impl PyDurableEngine {
                 runtime,
             })
         } else if let Ok(pg) = backend.extract::<PyPostgresBackend>() {
-            // Reuse the Postgres backend's runtime for connection keepalive.
-            // Build a new current-thread runtime for engine operations.
+            // Create a fresh pool on the engine's own runtime to avoid
+            // cross-runtime PgPool affinity issues.
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
+            let fresh_backend = runtime
+                .block_on(PostgresBackend::<JsonCodec>::connect(&pg.url))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
             Ok(Self {
-                backend: BackendKind::Postgres(Arc::clone(&pg.inner)),
+                backend: BackendKind::Postgres(Arc::new(fresh_backend)),
                 runtime,
             })
         } else {

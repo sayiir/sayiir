@@ -33,6 +33,7 @@ impl NapiInMemoryBackend {
 #[derive(Clone)]
 pub struct NapiPostgresBackend {
     pub(crate) inner: Arc<PostgresBackend<JsonCodec>>,
+    pub(crate) url: String,
     #[allow(dead_code)]
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
 }
@@ -60,6 +61,7 @@ impl NapiPostgresBackend {
 
         Ok(Self {
             inner: Arc::new(backend),
+            url,
             runtime: Arc::new(runtime),
         })
     }

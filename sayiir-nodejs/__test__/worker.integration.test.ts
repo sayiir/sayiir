@@ -5,7 +5,7 @@
  * Requires Docker to be running.
  *
  * Usage:
- *   pnpm vitest run __test__/worker.integration.test.ts
+ *   pnpm vitest run --config vitest.integration.config.mts
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";

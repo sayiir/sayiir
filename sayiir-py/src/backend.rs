@@ -37,6 +37,7 @@ impl PyInMemoryBackend {
 #[derive(Clone)]
 pub struct PyPostgresBackend {
     pub(crate) inner: Arc<PostgresBackend<JsonCodec>>,
+    pub(crate) url: String,
     /// Kept alive for connection pool background tasks.
     #[allow(dead_code)]
     pub(crate) runtime: Arc<tokio::runtime::Runtime>,
@@ -69,6 +70,7 @@ impl PyPostgresBackend {
 
         Ok(Self {
             inner: Arc::new(backend),
+            url: url.to_owned(),
             runtime: Arc::new(runtime),
         })
     }
