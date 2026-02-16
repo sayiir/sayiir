@@ -63,12 +63,12 @@ runs:
         pnpm install
         pnpm tsc
 
-    # Publish the main package.
-    # The native binary is pulled in via optionalDependencies
-    # on @sayiir/node-<platform>.
-    # Uses pnpm (not npm) so that workspace:* refs in
-    # optionalDependencies are resolved to real versions.
+    # Resolve workspace:* refs to real versions before publishing.
+    # pnpm pack handles this automatically, then we publish the tarball
+    # with npm (required for OIDC trusted publishing / provenance).
     - name: Publish root package
       shell: bash
       working-directory: ${{ inputs.package-dir }}
-      run: pnpm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }} --no-git-checks
+      run: |
+        tarball=$(pnpm pack --no-git-checks 2>/dev/null | tail -1)
+        npm publish "$tarball" --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
