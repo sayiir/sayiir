@@ -144,7 +144,7 @@ jobs:
           pytest sayiir-python/tests/ -v
 
   node-lockfile:
-    name: Node.js Lockfile Sync
+    name: Check Node.js Lockfile Sync
     needs: changes
     if: needs.changes.outputs.node == 'true'
     runs-on: ubuntu-latest
