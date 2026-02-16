@@ -24,7 +24,7 @@ export default defineConfig({
           tag: "meta",
           attrs: {
             name: "google-site-verification",
-            content: "nbEJx_q_IapSxU6HfSjJ4oMPvE5JMhSWRVueXRYFHUc",
+            content: "pz-_NhedmmAqWQ3AAia5X0iKopKJzwzunbrUbxrVMrU",
           },
         },
       ],
