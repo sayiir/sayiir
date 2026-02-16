@@ -13,7 +13,7 @@ resolver = "2"
 exclude = ["examples/hello-world-rs", "examples/background-jobs-rs"]
 
 [workspace.package]
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
