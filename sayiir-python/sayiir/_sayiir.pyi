@@ -140,6 +140,48 @@ class PyDurableEngine:
     def unpause(self, instance_id: str) -> None: ...
     def __repr__(self) -> str: ...
 
+class PyWorker:
+    """Distributed workflow worker."""
+
+    def __init__(
+        self,
+        worker_id: str,
+        backend: PyInMemoryBackend | PyPostgresBackend,
+        poll_interval_secs: float = 5.0,
+        claim_ttl_secs: float = 300.0,
+    ) -> None: ...
+    def start(
+        self,
+        workflows: list[tuple[PyWorkflow, dict[str, Any]]],
+    ) -> PyWorkerHandle: ...
+    def __repr__(self) -> str: ...
+
+class PyWorkerHandle:
+    """Handle for controlling a running worker."""
+
+    def shutdown(self) -> None: ...
+    def join(self) -> None: ...
+    def cancel_workflow(
+        self,
+        instance_id: str,
+        reason: str | None = None,
+        cancelled_by: str | None = None,
+    ) -> None: ...
+    def pause_workflow(
+        self,
+        instance_id: str,
+        reason: str | None = None,
+        paused_by: str | None = None,
+    ) -> None: ...
+    def unpause_workflow(self, instance_id: str) -> None: ...
+    def send_signal(
+        self,
+        instance_id: str,
+        signal_name: str,
+        payload: Any,
+    ) -> None: ...
+    def __repr__(self) -> str: ...
+
 # Exception hierarchy
 class WorkflowError(RuntimeError):
     """Base exception for Sayiir workflow errors."""
