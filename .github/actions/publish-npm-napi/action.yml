@@ -70,5 +70,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.package-dir }}
       run: |
-        tarball=$(pnpm pack --no-git-checks 2>/dev/null | tail -1)
+        pnpm pack --no-git-checks
+        tarball=$(ls -1 *.tgz | head -1)
+        echo "Publishing tarball: $tarball"
         npm publish "$tarball" --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
