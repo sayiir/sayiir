@@ -226,6 +226,118 @@ def submit_with_escalation(expense: dict) -> str:
     return status.output()
 ```
 
+## Node.js Implementation
+
+### Basic Approval Flow
+
+```typescript
+import {
+    task, flow, runDurableWorkflow, sendSignal,
+    resumeWorkflow, InMemoryBackend
+} from "sayiir";
+
+const submitExpense = task("submit_expense", (expense: Record<string, unknown>) => {
+    return {
+        ...expense,
+        status: "pending_approval",
+        submitted_at: "2026-02-15T10:00:00Z",
+    };
+});
+
+const processApproved = task("process_approved", (approval: Record<string, unknown>) => {
+    const approver = (approval.approver as string) ?? "unknown";
+    const notes = (approval.notes as string) ?? "";
+    return `Expense approved by ${approver} — processing reimbursement. Notes: ${notes}`;
+});
+
+// Build workflow with signal wait
+const workflow = flow<Record<string, unknown>>("expense-approval")
+    .then(submitExpense)
+    .waitForSignal<Record<string, unknown>>("approval_wait", "manager_approval", {
+        timeout: "48h",
+    })
+    .then(processApproved)
+    .build();
+
+const backend = new InMemoryBackend();
+
+// Step 1: Submit expense
+const expenseData = {
+    employee: "Alice Smith",
+    amount: 250.0,
+    category: "travel",
+    description: "Client meeting transportation",
+};
+
+const status1 = runDurableWorkflow(workflow, "exp-001", expenseData, backend);
+console.log(`Workflow status: ${status1.status}`); // "awaiting_signal"
+console.log("Expense submitted — awaiting manager approval...");
+
+// Step 2: Manager approves (could happen minutes or days later)
+sendSignal(
+    "exp-001",
+    "manager_approval",
+    {
+        approver: "Bob Johnson",
+        decision: "approved",
+        notes: "Valid expense, approved",
+    },
+    backend
+);
+
+console.log("Signal sent — resuming workflow...");
+
+// Step 3: Resume workflow to process approval
+const status2 = resumeWorkflow(workflow, "exp-001", backend);
+console.log(`Final status: ${status2.status}`); // "completed"
+if (status2.status === "completed") {
+    console.log(`Result: ${status2.output}`);
+}
+```
+
+### Handling Rejections
+
+Add a routing step to handle rejected expenses:
+
+```typescript
+const routeDecision = task("route_decision", (approval: Record<string, unknown>) => {
+    if (approval.decision === "approved") {
+        return approval;
+    }
+    throw new Error(`Rejected: ${approval.reason}`);
+});
+
+// Workflow with rejection handling
+const workflowV2 = flow<Record<string, unknown>>("expense-approval-v2")
+    .then(submitExpense)
+    .waitForSignal<Record<string, unknown>>("approval_wait", "manager_approval", {
+        timeout: "48h",
+    })
+    .then(routeDecision)
+    .then(processApproved)
+    .build();
+```
+
+### Timeout Handling
+
+What happens when the 48-hour timeout expires?
+
+```typescript
+// Submit expense
+const status = runDurableWorkflow(workflow, "exp-002", expenseData, backend);
+
+// Simulate 48 hours passing with no approval...
+// (In production, a background job would check timeouts)
+
+// After timeout, resume returns failed status
+const resumed = resumeWorkflow(workflow, "exp-002", backend);
+
+if (resumed.status === "failed" && resumed.error.toLowerCase().includes("timeout")) {
+    console.log("Approval timeout — escalating to director");
+    // Trigger escalation workflow
+}
+```
+
 ## Rust Implementation
 
 <Tabs>
@@ -591,6 +703,81 @@ if __name__ == "__main__":
 
     result = process_expense(expense, backend)
     print(result)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import {
+    task, flow, runDurableWorkflow, sendSignal,
+    resumeWorkflow, InMemoryBackend
+} from "sayiir";
+
+const submitExpense = task("submit_expense", (expense: Record<string, unknown>) => {
+    return { ...expense, status: "pending_approval" };
+});
+
+const processApproved = task("process_approved", (approval: Record<string, unknown>) => {
+    return `Expense approved by ${approval.approver} — processing reimbursement`;
+});
+
+const escalateToDirector = task("escalate_to_director", (expense: Record<string, unknown>) => {
+    return { ...expense, escalated: true };
+});
+
+// Manager approval workflow
+const managerWorkflow = flow<Record<string, unknown>>("expense-approval")
+    .then(submitExpense)
+    .waitForSignal<Record<string, unknown>>("approval_wait", "manager_approval", {
+        timeout: "48h",
+    })
+    .then(processApproved)
+    .build();
+
+// Director escalation workflow
+const directorWorkflow = flow<Record<string, unknown>>("expense-escalation")
+    .then(escalateToDirector)
+    .waitForSignal<Record<string, unknown>>("approval_wait", "director_approval", {
+        timeout: "72h",
+    })
+    .then(processApproved)
+    .build();
+
+function processExpense(expense: Record<string, unknown>, backend: InMemoryBackend): string {
+    const workflowId = `exp-${expense.id}`;
+
+    // Try manager approval
+    const status1 = runDurableWorkflow(managerWorkflow, workflowId, expense, backend);
+
+    // In production: API endpoint would send signal
+    // For demo, send signal immediately
+    sendSignal(workflowId, "manager_approval",
+        { approver: "Bob", decision: "approved" }, backend);
+
+    const status2 = resumeWorkflow(managerWorkflow, workflowId, backend);
+
+    // Handle timeout
+    if (status2.status === "failed" && status2.error.includes("timeout")) {
+        console.log("Escalating to director...");
+        const escalationId = `${workflowId}-escalated`;
+        runDurableWorkflow(directorWorkflow, escalationId, expense, backend);
+    }
+
+    return status2.status === "completed" ? status2.output : "Processing...";
+}
+
+const backend = new InMemoryBackend();
+
+const expense = {
+    id: 1001,
+    employee: "Alice Smith",
+    amount: 250.0,
+    category: "travel",
+};
+
+const result = processExpense(expense, backend);
+console.log(result);
 ```
 
 </TabItem>

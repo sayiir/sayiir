@@ -45,6 +45,34 @@ The workflow will:
 3. Once received, execute `fulfill` with the signal payload
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow } from "sayiir";
+
+const createOrder = task("create_order", (orderId: number) => {
+    return { order_id: orderId, status: "pending" };
+});
+
+const fulfill = task("fulfill", (approval: { by?: string }) => {
+    return `Fulfilled order (approved by ${approval.by ?? "unknown"})`;
+});
+
+const workflow = flow<number>("approval")
+    .then(createOrder)
+    .waitForSignal<{ by: string }>("approval_wait", "manager_approval", {
+        timeout: "24h",
+    })
+    .then(fulfill)
+    .build();
+```
+
+The workflow will:
+1. Execute `createOrder`
+2. Checkpoint and wait for the "manager_approval" signal
+3. Once received, execute `fulfill` with the signal payload
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -94,6 +122,23 @@ send_signal(
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { sendSignal, InMemoryBackend } from "sayiir";
+
+const backend = new InMemoryBackend();
+
+// External system sends the signal
+sendSignal(
+    "order-42",
+    "manager_approval",
+    { by: "alice", approved_at: "2026-02-15T10:30:00Z" },
+    backend
+);
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -136,6 +181,24 @@ send_signal("order-42", "manager_approval", {"by": "alice"}, backend=backend)
 # Resume to continue execution
 status = resume_workflow(workflow, "order-42", backend=backend)
 print(status)  # Completed
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { runDurableWorkflow, sendSignal, resumeWorkflow } from "sayiir";
+
+// Start the workflow
+const status1 = runDurableWorkflow(workflow, "order-42", 42, backend);
+console.log(status1.status); // "awaiting_signal"
+
+// Signal can be sent immediately or hours later
+sendSignal("order-42", "manager_approval", { by: "alice" }, backend);
+
+// Resume to continue execution
+const status2 = resumeWorkflow(workflow, "order-42", backend);
+console.log(status2.status); // "completed"
 ```
 
 </TabItem>
@@ -182,6 +245,20 @@ workflow = (
 )
 
 # If no signal arrives within 24 hours, the workflow fails
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+// Wait up to 24 hours for approval
+const workflow = flow<number>("approval")
+    .then(createOrder)
+    .waitForSignal("approval_wait", "manager_approval", { timeout: "24h" })
+    .then(fulfill)
+    .build();
+
+// If no signal arrives within 24 hours, the workflow fails
 ```
 
 </TabItem>
@@ -258,6 +335,48 @@ send_signal("order-42", "manager_approval", {"by": "alice"}, backend=backend)
 # Resume workflow
 status = resume_workflow(workflow, "order-42", backend=backend)
 print(f"Final status: {status}")  # Completed
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import {
+    task, flow, runDurableWorkflow, sendSignal,
+    resumeWorkflow, InMemoryBackend
+} from "sayiir";
+
+const createOrder = task("create_order", (orderId: number) => {
+    console.log(`Creating order ${orderId}`);
+    return { order_id: orderId, status: "pending" };
+});
+
+const fulfill = task("fulfill", (approval: { by?: string }) => {
+    const approver = approval.by ?? "unknown";
+    console.log(`Fulfilling order (approved by ${approver})`);
+    return `Fulfilled order (approved by ${approver})`;
+});
+
+const workflow = flow<number>("approval")
+    .then(createOrder)
+    .waitForSignal<{ by: string }>("approval_wait", "manager_approval", {
+        timeout: "24h",
+    })
+    .then(fulfill)
+    .build();
+
+const backend = new InMemoryBackend();
+
+// Start workflow
+const status1 = runDurableWorkflow(workflow, "order-42", 42, backend);
+console.log(`Status: ${status1.status}`); // "awaiting_signal"
+
+// External system sends approval
+sendSignal("order-42", "manager_approval", { by: "alice" }, backend);
+
+// Resume workflow
+const status2 = resumeWorkflow(workflow, "order-42", backend);
+console.log(`Final status: ${status2.status}`); // "completed"
 ```
 
 </TabItem>

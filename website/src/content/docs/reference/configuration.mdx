@@ -28,6 +28,24 @@ def flaky_task(data: dict) -> dict:
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task } from "sayiir";
+
+const flakyTask = task("flaky_task", (data: Record<string, unknown>) => {
+    // May fail and retry with exponential backoff
+    return process(data);
+}, {
+    retry: {
+        maxAttempts: 3,
+        initialDelay: "1s",
+        backoffMultiplier: 2.0,
+    },
+});
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -123,6 +141,26 @@ def charge_card(order: dict) -> dict:
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task } from "sayiir";
+
+const chargeCard = task("process_payment", (order: Record<string, unknown>) => {
+    return { receipt_id: "R123", status: "paid" };
+}, {
+    timeout: "30s",
+    retry: {
+        maxAttempts: 3,
+        initialDelay: "2s",
+        backoffMultiplier: 2.0,
+    },
+    tags: ["payment", "external", "critical"],
+    description: "Processes customer payment via Stripe API",
+});
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -215,6 +253,22 @@ backend = PostgresBackend(
 # Example URLs
 backend = PostgresBackend("postgresql://postgres:password@localhost:5432/sayiir")
 backend = PostgresBackend("postgresql://user:pass@db.example.com/workflows")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { PostgresBackend } from "sayiir";
+
+// Connection URL format
+const backend = PostgresBackend.connect(
+    "postgresql://username:password@host:port/database"
+);
+
+// Example URLs
+const backend1 = PostgresBackend.connect("postgresql://postgres:password@localhost:5432/sayiir");
+const backend2 = PostgresBackend.connect("postgresql://user:pass@db.example.com/workflows");
 ```
 
 </TabItem>
@@ -524,6 +578,15 @@ Fast, ephemeral storage for development and testing.
 from sayiir import InMemoryBackend
 
 backend = InMemoryBackend()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { InMemoryBackend } from "sayiir";
+
+const backend = new InMemoryBackend();
 ```
 
 </TabItem>

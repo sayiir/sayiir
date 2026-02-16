@@ -53,6 +53,41 @@ With this configuration:
 - Third failure: workflow fails (max_retries=2)
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, runDurableWorkflow } from "sayiir";
+
+const callApi = task("call_api", async (url: string) => {
+    const res = await fetch(url);
+    return await res.json();
+}, {
+    timeout: "10s",
+    retry: {
+        maxAttempts: 2,
+        initialDelay: "1s",
+        backoffMultiplier: 2.0,
+    },
+});
+
+const process = task("process", (data: Record<string, unknown>) => {
+    return `processed ${Object.keys(data).length} items`;
+});
+
+const workflow = flow<string>("resilient")
+    .then(callApi)
+    .then(process)
+    .build();
+
+const status = runDurableWorkflow(workflow, "job-1", "https://api.example.com/data", backend);
+```
+
+With this configuration:
+- First failure: retry after 1 second
+- Second failure: retry after 2 seconds (1.0 × 2.0)
+- Third failure: workflow fails (maxAttempts=2)
+
+</TabItem>
 <TabItem label="Rust">
 
 ### Using TaskMetadata
@@ -123,6 +158,20 @@ def slow_operation(data: str) -> str:
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const slowOperation = task("slow_operation", async (data: string) => {
+    // If this takes >5 seconds, it will be retried
+    await new Promise((r) => setTimeout(r, 10_000));
+    return data;
+}, {
+    timeout: "5s",
+    retry: { maxAttempts: 3, initialDelay: "2s" },
+});
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -160,6 +209,21 @@ status = run_durable_workflow(workflow, "job-1", "https://flaky-api.com", backen
 
 # Resume later - retry state is preserved
 status = resume_workflow(workflow, "job-1", backend=backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { runDurableWorkflow, resumeWorkflow } from "sayiir";
+
+// Start workflow with retries
+const status = runDurableWorkflow(workflow, "job-1", "https://flaky-api.com", backend);
+
+// Process crashes during backoff...
+
+// Resume later - retry state is preserved
+const status2 = resumeWorkflow(workflow, "job-1", backend);
 ```
 
 </TabItem>

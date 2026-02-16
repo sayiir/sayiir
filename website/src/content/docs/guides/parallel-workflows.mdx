@@ -44,6 +44,33 @@ result = run_workflow(workflow, {"order_id": 1})
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, branch, runWorkflow } from "sayiir";
+
+const validatePayment = task("validate_payment", (order: Record<string, unknown>) => {
+    return { payment: "valid" };
+});
+
+const checkInventory = task("check_inventory", (order: Record<string, unknown>) => {
+    return { stock: "available" };
+});
+
+const workflow = flow<Record<string, unknown>>("checkout")
+    .fork([
+        branch("validate_payment", validatePayment),
+        branch("check_inventory", checkInventory),
+    ])
+    .join("finalize", ([payment, inventory]) => {
+        return `Order complete: payment=${JSON.stringify(payment)}, stock=${JSON.stringify(inventory)}`;
+    })
+    .build();
+
+const result = await runWorkflow(workflow, { order_id: 1 });
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -98,7 +125,7 @@ Each branch executes its steps sequentially, but branches run in parallel with e
 
 ## Join Handler
 
-The join task receives a dictionary (Python) or map (Rust) containing the results from all branches. Each entry is keyed by the branch's task name:
+The join task receives a dictionary (Python), tuple of branch results (Node.js), or map (Rust) containing the results from all branches:
 
 <Tabs>
 <TabItem label="Python">
@@ -111,6 +138,16 @@ def finalize(results: dict) -> str:
     shipping = results["calculate_shipping"]
 
     return f"Order processed: payment={payment}, stock={inventory}, shipping={shipping}"
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+// Join receives a tuple of branch results in declaration order
+.join("finalize", ([payment, inventory, shipping]) => {
+    return `Order processed: payment=${JSON.stringify(payment)}, stock=${JSON.stringify(inventory)}, shipping=${JSON.stringify(shipping)}`;
+})
 ```
 
 </TabItem>

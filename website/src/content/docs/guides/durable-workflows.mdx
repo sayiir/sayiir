@@ -38,6 +38,21 @@ backend = PostgresBackend(
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { InMemoryBackend, PostgresBackend } from "sayiir";
+
+// Development/testing
+const backend = new InMemoryBackend();
+
+// Production
+const backend = PostgresBackend.connect(
+    "postgresql://postgres:password@localhost:5432/sayiir"
+);
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -72,6 +87,19 @@ cancel_workflow("job-123", backend=backend)
 ```
 
 </TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { cancelWorkflow } from "sayiir";
+
+// Cancel a running or paused workflow
+cancelWorkflow("job-123", backend, {
+    reason: "No longer needed",
+    cancelledBy: "admin"
+});
+```
+
+</TabItem>
 <TabItem label="Rust">
 
 ```rust
@@ -95,6 +123,22 @@ pause_workflow("job-123", backend=backend)
 
 # Unpause to allow resumption
 unpause_workflow("job-123", backend=backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { pauseWorkflow, unpauseWorkflow } from "sayiir";
+
+// Pause a running workflow
+pauseWorkflow("job-123", backend, {
+    reason: "Maintenance window",
+    pausedBy: "ops-team"
+});
+
+// Unpause to allow resumption
+unpauseWorkflow("job-123", backend);
 ```
 
 </TabItem>
@@ -122,6 +166,17 @@ from sayiir import resume_workflow
 # Resume from last checkpoint
 status = resume_workflow(workflow, "job-123", backend=backend)
 print(f"Workflow status: {status}")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { resumeWorkflow } from "sayiir";
+
+// Resume from last checkpoint
+const status = resumeWorkflow(workflow, "job-123", backend);
+console.log(`Workflow status: ${status.status}`);
 ```
 
 </TabItem>
@@ -165,6 +220,30 @@ workflow = (
 )
 
 status = run_durable_workflow(workflow, "campaign-1", 42, backend=backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, runDurableWorkflow } from "sayiir";
+
+const sendEmail = task("send_email", (userId: number) => {
+    return `Email sent to user ${userId}`;
+});
+
+const sendReminder = task("send_reminder", (userId: number) => {
+    return `Reminder sent to user ${userId}`;
+});
+
+// Wait 24 hours between email and reminder
+const workflow = flow<number>("email_campaign")
+    .then(sendEmail)
+    .delay("wait_24h", "24h")
+    .then(sendReminder)
+    .build();
+
+const status = runDurableWorkflow(workflow, "campaign-1", 42, backend);
 ```
 
 </TabItem>
