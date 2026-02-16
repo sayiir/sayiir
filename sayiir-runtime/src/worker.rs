@@ -555,18 +555,18 @@ where
         let already_completed = Self::validate_task_preconditions(
             definition_hash,
             continuation,
-            &available_task,
+            available_task,
             &snapshot,
         )?;
         if already_completed {
             return Ok(WorkflowStatus::InProgress);
         }
 
-        let Some(claim) = self.claim_task(&available_task).await? else {
+        let Some(claim) = self.claim_task(available_task).await? else {
             return Ok(WorkflowStatus::InProgress);
         };
 
-        if let Some(status) = self.check_post_claim_guards(&available_task).await? {
+        if let Some(status) = self.check_post_claim_guards(available_task).await? {
             claim.release_quietly().await;
             return Ok(status);
         }
@@ -581,7 +581,7 @@ where
             .execute_with_deadline_ext(
                 continuation,
                 executor,
-                &available_task,
+                available_task,
                 &mut snapshot,
                 &claim,
             )
@@ -590,7 +590,7 @@ where
         self.settle_execution_result_ext(
             execution_result,
             continuation,
-            &available_task,
+            available_task,
             &mut snapshot,
             claim,
         )
