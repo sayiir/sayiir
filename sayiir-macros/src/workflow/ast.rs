@@ -21,12 +21,7 @@ pub struct WorkflowDef {
 pub enum WorkflowStep {
     /// Reference to a `#[task]`-generated struct by function name.
     /// e.g. `charge` → resolves to `Charge`
-    TaskRef {
-        #[allow(dead_code)]
-        ident: Ident,
-        struct_name: Ident,
-        span: Span,
-    },
+    TaskRef { struct_name: Ident, span: Span },
 
     /// Inline task with a closure body.
     /// e.g. `validate(order: Order) { validate(order) }`

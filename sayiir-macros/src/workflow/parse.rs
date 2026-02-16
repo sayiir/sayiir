@@ -119,30 +119,16 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         if ident == "signal" {
             let first_lit: LitStr = input.parse()?;
 
-            // Check if there's a second string literal (custom ID + signal name)
-            if input.peek(LitStr) {
+            // Two forms: `signal "custom_id" "name"` or `signal "name"`
+            let (id, signal_name) = if input.peek(LitStr) {
                 let second_lit: LitStr = input.parse()?;
-                let id = first_lit.value();
-                let signal_name = second_lit.value();
+                (first_lit.value(), second_lit.value())
+            } else {
+                let name = first_lit.value();
+                (format!("signal_{name}"), name)
+            };
 
-                // Optional timeout: `timeout "30s"`
-                let timeout = parse_optional_timeout(input)?;
-
-                return Ok(WorkflowStep::AwaitSignal {
-                    id,
-                    signal_name,
-                    timeout,
-                    span: ident.span(),
-                });
-            }
-
-            // Single string literal — signal name only, auto-generate ID
-            let signal_name = first_lit.value();
-            let id = format!("signal_{signal_name}");
-
-            // Optional timeout: `timeout "30s"`
             let timeout = parse_optional_timeout(input)?;
-
             return Ok(WorkflowStep::AwaitSignal {
                 id,
                 signal_name,
@@ -188,7 +174,6 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         let struct_name = Ident::new(&pascal, ident.span());
         return Ok(WorkflowStep::TaskRef {
             span: ident.span(),
-            ident,
             struct_name,
         });
     }

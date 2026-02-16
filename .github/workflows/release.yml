@@ -197,6 +197,9 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     needs: node-build
+    environment:
+      name: npm
+      url: https://www.npmjs.com/org/sayiir
     permissions:
       id-token: write
     steps:

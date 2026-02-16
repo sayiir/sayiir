@@ -18,11 +18,11 @@ rkyv = ["dep:rkyv", "dep:bytecheck"]
 macros = ["dep:sayiir-macros"]
 
 [dependencies]
-sayiir-core = { version = "0.1.0-alpha.6", path = "../sayiir-core", features = [
+sayiir-core = { version = "0.1.0-alpha.7", path = "../sayiir-core", features = [
     "tokio",
 ] }
-sayiir-persistence = { version = "0.1.0-alpha.6", path = "../sayiir-persistence" }
-sayiir-macros = { version = "0.1.0-alpha.6", path = "../sayiir-macros", optional = true }
+sayiir-persistence = { version = "0.1.0-alpha.7", path = "../sayiir-persistence" }
+sayiir-macros = { version = "0.1.0-alpha.7", path = "../sayiir-macros", optional = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
