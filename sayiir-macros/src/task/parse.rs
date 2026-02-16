@@ -47,8 +47,6 @@ pub struct TaskAttrs {
 pub struct Param {
     pub ident: syn::Ident,
     pub ty: Box<Type>,
-    #[allow(dead_code)]
-    pub is_inject: bool,
 }
 
 /// How the task function returns its output.
@@ -107,11 +105,9 @@ impl ParsedTask {
             strip_inject_attr(pat_type);
 
             let ident = extract_ident(&pat_type.pat)?;
-
             let param = Param {
                 ident,
                 ty: pat_type.ty.clone(),
-                is_inject,
             };
 
             if is_inject {
