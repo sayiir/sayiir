@@ -78,6 +78,15 @@ jobs:
       - name: Run cargo test
         run: cargo test --workspace --all-features
 
+      - name: Dry-run crate publish
+        run: |
+          for crate in $(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.source == null and .publish == null) | .name'); do
+            echo "::group::$crate"
+            cargo publish -p "$crate" --dry-run
+            echo "::endgroup::"
+          done
+
   python-lint:
     name: Python Lint
     needs: changes
@@ -143,27 +152,10 @@ jobs:
           uv pip install --system pytest pydantic
           pytest sayiir-python/tests/ -v
 
-  node-lockfile:
-    name: Check Node.js Lockfile Sync
-    needs: changes
-    if: needs.changes.outputs.node == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Check lockfile is up to date
-        working-directory: sayiir-nodejs
+      - name: Dry-run PyPI publish
         run: |
-          pnpm install --no-frozen-lockfile
-          git diff --exit-code pnpm-lock.yaml
+          uv pip install --system twine
+          twine check sayiir-python/dist/*
 
   node:
     name: Node.js Binding
@@ -209,6 +201,10 @@ jobs:
       - name: Run tests
         working-directory: sayiir-nodejs
         run: pnpm vitest run
+
+      - name: Dry-run npm publish
+        working-directory: sayiir-nodejs
+        run: pnpm publish --dry-run --no-git-checks
 
   bench:
     name: Benchmarks

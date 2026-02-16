@@ -1,11 +1,22 @@
 {
   "name": "@sayiir/node-linux-arm64-gnu",
-  "version": "0.1.0-alpha.5",
-  "os": ["linux"],
-  "cpu": ["arm64"],
+  "version": "0.1.0-alpha.8",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "main": "sayiir-node.node",
-  "files": ["sayiir-node.node"],
+  "files": [
+    "sayiir-node.node"
+  ],
   "license": "MIT",
-  "engines": { "node": ">=18" },
-  "repository": { "type": "git", "url": "https://github.com/sayiir/sayiir" }
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sayiir/sayiir"
+  }
 }

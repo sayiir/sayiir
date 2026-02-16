@@ -29,6 +29,11 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
+sayiir-core = { version = "0.1.0-alpha.8", path = "sayiir-core" }
+sayiir-persistence = { version = "0.1.0-alpha.8", path = "sayiir-persistence" }
+sayiir-runtime = { version = "0.1.0-alpha.8", path = "sayiir-runtime", default-features = false }
+sayiir-postgres = { version = "0.1.0-alpha.8", path = "sayiir-postgres" }
+sayiir-macros = { version = "0.1.0-alpha.8", path = "sayiir-macros" }
 tracing = "0.1"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }

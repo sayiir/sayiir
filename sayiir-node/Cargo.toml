@@ -17,12 +17,10 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 serde_json = { workspace = true }
-sayiir-core = { path = "../sayiir-core" }
-sayiir-persistence = { path = "../sayiir-persistence" }
-sayiir-postgres = { path = "../sayiir-postgres" }
-sayiir-runtime = { path = "../sayiir-runtime", default-features = false, features = [
-    "json",
-] }
+sayiir-core = { workspace = true }
+sayiir-persistence = { workspace = true }
+sayiir-postgres = { workspace = true }
+sayiir-runtime = { workspace = true, features = ["json"] }
 tracing = { workspace = true }
 
 [build-dependencies]

@@ -6,15 +6,15 @@ license.workspace = true
 publish = false
 
 [dev-dependencies]
-sayiir-core = { path = "../../sayiir-core" }
-sayiir-persistence = { path = "../../sayiir-persistence" }
-sayiir-postgres = { path = "../../sayiir-postgres" }
-sayiir-runtime = { path = "../../sayiir-runtime", features = ["json"] }
+sayiir-core = { workspace = true }
+sayiir-persistence = { workspace = true }
+sayiir-postgres = { workspace = true }
+sayiir-runtime = { workspace = true, features = ["rkyv", "json", "macros"] }
 bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 testcontainers = "0.26"
 testcontainers-modules = { version = "0.14", features = ["postgres"] }
-sayiir-macros = { path = "../../sayiir-macros" }
+sayiir-macros = { workspace = true }
 serde = { workspace = true }
