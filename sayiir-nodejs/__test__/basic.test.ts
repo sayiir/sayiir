@@ -82,6 +82,29 @@ describe("task()", () => {
   });
 });
 
+describe("task() validation preserved with id override", () => {
+  it("preserves input validation when passed to .then(id, taskFn)", () => {
+    const schema = {
+      parse: (data: unknown) => {
+        if (typeof data !== "number" || data < 0) throw new Error("must be non-negative number");
+        return data;
+      },
+      _output: 0 as number,
+    };
+    const validated = task("original-id", (x: number) => x * 2, { input: schema });
+
+    const wf = flow<number>("validation-test")
+      .then("override-id", validated)
+      .build();
+
+    // The registered function should be the wrapped TaskFn, not _rawFn
+    const registeredFn = wf._taskRegistry["override-id"];
+    expect(registeredFn).toBe(validated); // same reference, not _rawFn
+    expect(() => registeredFn(-1)).toThrow("must be non-negative number");
+    expect(registeredFn(5)).toBe(10);
+  });
+});
+
 describe("duration parsing", () => {
   it("parses millisecond strings", async () => {
     const { parseDuration } = await import("../src/duration.js");

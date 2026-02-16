@@ -68,11 +68,11 @@ describe("signals", () => {
     // Send the signal
     sendSignal("sig-1", "user_approval", "go", backend);
 
-    // Resume — should complete. The previous step's output (6) flows through.
+    // Resume — the signal payload ("go") becomes the next input.
     const status2 = resumeWorkflow(wf, "sig-1", backend);
     expect(status2.status).toBe("completed");
     if (status2.status === "completed") {
-      expect(status2.output).toBe("result: 6");
+      expect(status2.output).toBe("result: go");
     }
   });
 

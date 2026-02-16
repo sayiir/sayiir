@@ -137,7 +137,7 @@ export class Flow<TInput, TLast = TInput> {
       const opts = maybeOpts;
       if (isTaskFn(taskFn)) {
         metadata = (taskFn as TaskFn<any, any>)._metadata;
-        taskFn = (taskFn as TaskFn<any, any>)._rawFn ?? taskFn;
+        // Keep the wrapped TaskFn (preserves Zod validation); only override the id.
       }
       if (opts) {
         metadata = { ...metadata, ...buildStepMetadata(taskId, opts) };
