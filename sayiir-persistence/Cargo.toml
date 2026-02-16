@@ -20,4 +20,6 @@ sayiir-core = { workspace = true }
 thiserror = "2"
 bytes = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

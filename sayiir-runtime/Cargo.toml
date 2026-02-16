@@ -24,9 +24,9 @@ sayiir-macros = { workspace = true, optional = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
-tokio = { workspace = true, features = ["time", "sync"] }
+tokio = { workspace = true, features = ["time", "sync", "macros"] }
 thiserror = { workspace = true }
-backon = "1"
+backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 futures = "0.3"
 chrono = { workspace = true }
 serde_json = { workspace = true }
