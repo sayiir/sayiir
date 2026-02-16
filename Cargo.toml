@@ -13,7 +13,7 @@ resolver = "2"
 exclude = ["examples/hello-world-rs", "examples/background-jobs-rs"]
 
 [workspace.package]
-version = "0.1.0-alpha.12"
+version = "0.1.0-alpha.13"
 authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
@@ -29,11 +29,11 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
-sayiir-core = { version = "0.1.0-alpha.12", path = "sayiir-core", default-features = false }
-sayiir-persistence = { version = "0.1.0-alpha.12", path = "sayiir-persistence" }
-sayiir-runtime = { version = "0.1.0-alpha.12", path = "sayiir-runtime", default-features = false }
-sayiir-postgres = { version = "0.1.0-alpha.12", path = "sayiir-postgres" }
-sayiir-macros = { version = "0.1.0-alpha.12", path = "sayiir-macros" }
+sayiir-core = { version = "0.1.0-alpha.13", path = "sayiir-core", default-features = false }
+sayiir-persistence = { version = "0.1.0-alpha.13", path = "sayiir-persistence" }
+sayiir-runtime = { version = "0.1.0-alpha.13", path = "sayiir-runtime", default-features = false }
+sayiir-postgres = { version = "0.1.0-alpha.13", path = "sayiir-postgres" }
+sayiir-macros = { version = "0.1.0-alpha.13", path = "sayiir-macros" }
 tracing = "0.1"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = [

@@ -1,6 +1,6 @@
 {
   "name": "sayiir",
-  "version": "0.1.0-alpha.12",
+  "version": "0.1.0-alpha.13",
   "description": "Durable workflow engine for Node.js — type-safe, fault-tolerant task orchestration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

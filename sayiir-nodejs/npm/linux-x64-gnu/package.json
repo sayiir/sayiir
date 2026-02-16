@@ -1,6 +1,6 @@
 {
   "name": "@sayiir/node-linux-x64-gnu",
-  "version": "0.1.0-alpha.12",
+  "version": "0.1.0-alpha.13",
   "os": [
     "linux"
   ],
