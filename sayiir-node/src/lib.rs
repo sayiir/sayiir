@@ -13,7 +13,7 @@
     // napi-derive generates these
     clippy::module_name_repetitions,
     clippy::cast_possible_truncation,
-    // &Env is idiomatic in napi-rs even though Env is Copy
+    // napi-rs generated code may trigger this
     clippy::trivially_copy_pass_by_ref,
 )]
 

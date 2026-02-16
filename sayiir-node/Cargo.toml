@@ -11,8 +11,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "2", features = ["napi9", "async", "tokio_rt", "serde-json"] }
-napi-derive = "2"
+napi = { version = "3", features = ["napi9", "async", "tokio_rt", "serde-json"] }
+napi-derive = "3"
 bytes = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }

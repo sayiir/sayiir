@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sayiir"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 description = "Durable workflow engine with Rust core and Python bindings — checkpointing, fork/join, distributed workers"
 readme = "README.md"
 requires-python = ">=3.10"

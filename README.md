@@ -54,12 +54,8 @@ async fn send_email(user: User) -> Result<(), BoxError> {
     email_service.send_welcome(&user).await
 }
 
-// Register and compose
-let mut registry = TaskRegistry::new();
-FetchUser::register(&mut registry, codec.clone(), FetchUser::new());
-SendEmail::register(&mut registry, codec.clone(), SendEmail::new());
-
-let workflow = workflow!("welcome", JsonCodec, registry,
+// Compose — workflow! auto-registers all tasks
+let workflow = workflow!("welcome", JsonCodec, TaskRegistry::new(),
     fetch_user => send_email
 ).unwrap();
 

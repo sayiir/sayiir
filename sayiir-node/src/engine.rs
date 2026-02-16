@@ -15,8 +15,8 @@
 //! naturally between steps.
 
 use bytes::Bytes;
+use napi::Env;
 use napi::bindgen_prelude::*;
-use napi::{Env, JsFunction, JsObject, JsUnknown};
 use napi_derive::napi;
 use std::sync::Arc;
 
@@ -44,20 +44,20 @@ impl NapiWorkflowEngine {
     /// All tasks must return plain values (not Promises). For async tasks,
     /// use the stepper-based `runWorkflow()` from TypeScript instead.
     #[napi]
-    pub fn run(
+    pub fn run<'env>(
         &self,
-        env: Env,
+        env: &'env Env,
         workflow: &NapiWorkflow,
-        input: JsUnknown,
-        task_registry: JsObject,
-    ) -> Result<JsUnknown> {
-        let input_bytes = encode_js_value(&env, &input)?;
+        input: Unknown,
+        task_registry: Object,
+    ) -> Result<Unknown<'env>> {
+        let input_bytes = encode_js_value(env, input)?;
         let continuation = Arc::clone(&workflow.continuation);
 
         tracing::info!(workflow_id = %workflow.workflow_id, "starting workflow execution");
 
         let result = execute_continuation_sync(&continuation, input_bytes, &|task_id, input| {
-            execute_js_task(&env, task_id, &input, &task_registry).map_err(|e| {
+            execute_js_task(env, task_id, &input, &task_registry).map_err(|e| {
                 let msg: sayiir_core::error::BoxError = e.to_string().into();
                 msg
             })
@@ -66,7 +66,7 @@ impl NapiWorkflowEngine {
 
         tracing::info!(workflow_id = %workflow.workflow_id, "workflow execution completed");
 
-        decode_to_js_value(&env, &result)
+        decode_to_js_value(env, &result)
     }
 }
 
@@ -78,21 +78,22 @@ pub(crate) fn execute_js_task(
     env: &Env,
     task_id: &str,
     input: &Bytes,
-    registry: &JsObject,
+    registry: &Object,
 ) -> Result<Bytes> {
-    let callable: JsFunction = registry.get_named_property(task_id).map_err(|_| {
-        Error::new(
-            Status::GenericFailure,
-            format!("Task '{task_id}' not found in registry"),
-        )
-    })?;
+    let callable: Function<Unknown, Unknown> =
+        registry.get_named_property(task_id).map_err(|_| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Task '{task_id}' not found in registry"),
+            )
+        })?;
 
     tracing::debug!(task_id, input_bytes = input.len(), "executing js task");
 
     let input_obj = decode_to_js_value(env, input)?;
-    let result: JsUnknown = callable.call(None, &[input_obj])?;
+    let result: Unknown = callable.call(input_obj)?;
 
-    if is_promise(&result)? {
+    if is_promise(env, &result)? {
         return Err(Error::new(
             Status::GenericFailure,
             format!(
@@ -104,19 +105,20 @@ pub(crate) fn execute_js_task(
     }
 
     tracing::debug!(task_id, "js task completed");
-    encode_js_value(env, &result)
+    encode_js_value(env, result)
 }
 
 /// Check if a JS value is a Promise (has a `.then` property that is a function).
-fn is_promise(value: &JsUnknown) -> Result<bool> {
+fn is_promise(_env: &Env, value: &Unknown) -> Result<bool> {
     let value_type = value.get_type()?;
     if value_type != ValueType::Object {
         return Ok(false);
     }
-    let obj = unsafe { value.cast::<JsObject>() };
-    match obj.get_named_property::<JsUnknown>("then") {
-        Ok(then_val) => Ok(then_val.get_type()? == ValueType::Function),
-        Err(_) => Ok(false),
+    // SAFETY: We just checked the value type is Object.
+    let obj: Object = unsafe { value.cast() }?;
+    match obj.get::<Unknown>("then") {
+        Ok(Some(then_val)) => Ok(then_val.get_type()? == ValueType::Function),
+        _ => Ok(false),
     }
 }
 
@@ -194,8 +196,8 @@ pub struct NapiContinuationStepper {
 impl NapiContinuationStepper {
     /// Create a new stepper from a workflow and input.
     #[napi(constructor)]
-    pub fn new(env: Env, workflow: &NapiWorkflow, input: JsUnknown) -> Result<Self> {
-        let input_bytes = encode_js_value(&env, &input)?;
+    pub fn new(env: Env, workflow: &NapiWorkflow, input: Unknown) -> Result<Self> {
+        let input_bytes = encode_js_value(&env, input)?;
 
         let mut steps = Vec::new();
         Self::flatten(&workflow.continuation, &mut steps)?;
@@ -229,8 +231,8 @@ impl NapiContinuationStepper {
 
     /// Submit a task result and advance to the next step.
     #[napi]
-    pub fn submit_result(&mut self, env: Env, output: JsUnknown) -> Result<NapiStepResult> {
-        let output_bytes = encode_js_value(&env, &output)?;
+    pub fn submit_result(&mut self, env: Env, output: Unknown) -> Result<NapiStepResult> {
+        let output_bytes = encode_js_value(&env, output)?;
         self.current_input = output_bytes;
 
         // Move past the just-completed task.
