@@ -51,4 +51,4 @@ __all__ = [
     "WorkerHandle",
 ]
 
-__version__ = "0.1.0-alpha.6"
+__version__ = "0.1.0-alpha.7"
