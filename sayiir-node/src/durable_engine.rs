@@ -4,8 +4,8 @@
 //! to the Rust checkpointing runtime. Supports run, resume, cancel, pause, and signals.
 
 use bytes::Bytes;
+use napi::Env;
 use napi::bindgen_prelude::*;
-use napi::{Env, JsObject, JsUnknown};
 use napi_derive::napi;
 use std::sync::Arc;
 
@@ -161,10 +161,10 @@ impl NapiDurableEngine {
         env: Env,
         workflow: &NapiWorkflow,
         instance_id: String,
-        input: JsUnknown,
-        task_registry: JsObject,
+        input: Unknown,
+        task_registry: Object,
     ) -> Result<NapiWorkflowStatus> {
-        let input_bytes = encode_js_value(&env, &input)?;
+        let input_bytes = encode_js_value(&env, input)?;
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
         let first_task_id = continuation.first_task_id().to_string();
@@ -218,7 +218,7 @@ impl NapiDurableEngine {
         env: Env,
         workflow: &NapiWorkflow,
         instance_id: String,
-        task_registry: JsObject,
+        task_registry: Object,
     ) -> Result<NapiWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
@@ -325,9 +325,9 @@ impl NapiDurableEngine {
         env: Env,
         instance_id: String,
         signal_name: String,
-        payload: JsUnknown,
+        payload: Unknown,
     ) -> Result<()> {
-        let payload_bytes = encode_js_value(&env, &payload)?;
+        let payload_bytes = encode_js_value(&env, payload)?;
         tracing::info!(%instance_id, %signal_name, "sending external signal");
         with_backend!(self, |backend| {
             self.runtime
@@ -370,15 +370,28 @@ struct SendEnv(napi::sys::napi_env);
 unsafe impl Send for SendEnv {}
 unsafe impl Sync for SendEnv {}
 
+/// Wrapper around `ObjectRef` that we assert is `Send`+`Sync`.
+///
+/// SAFETY: Same invariant as `SendEnv` — only safe when execution stays on the
+/// main JS thread via `current_thread` tokio runtime with `block_on`.
+///
+/// `LEAK_CHECK = false` because this ref is intentionally held for the duration
+/// of the engine call and cleaned up by the GC when the closure is dropped.
+struct SendObjectRef(ObjectRef<false>);
+unsafe impl Send for SendObjectRef {}
+unsafe impl Sync for SendObjectRef {}
+
 /// Build the task executor callback for `execute_continuation_with_checkpointing`.
 ///
 /// Since we use `current_thread` runtime with `block_on`, the executor never
 /// crosses threads. We wrap the raw env pointer in a `SendEnv` to satisfy
 /// the Send+Sync bounds.
+///
+/// We use `ObjectRef` to hold the task registry across async boundaries.
 #[allow(clippy::type_complexity)]
 fn make_task_executor(
     env: &Env,
-    task_registry: &JsObject,
+    task_registry: &Object,
 ) -> impl Fn(
     &str,
     Bytes,
@@ -390,10 +403,10 @@ fn make_task_executor(
 > + Send
 + Sync {
     let send_env = Arc::new(SendEnv(env.raw()));
-    let registry_ref = env
-        .create_reference(task_registry)
+    let registry_ref = task_registry
+        .create_ref()
         .unwrap_or_else(|_| panic!("Failed to create reference to task registry"));
-    let registry_ref = Arc::new(registry_ref);
+    let registry_ref = Arc::new(SendObjectRef(registry_ref));
 
     move |task_id: &str,
           task_input: Bytes|
@@ -411,12 +424,14 @@ fn make_task_executor(
         Box::pin(async move {
             // SAFETY: We know we're on the main JS thread because we use
             // current_thread runtime with block_on.
-            let env = unsafe { Env::from_raw(send_env.0) };
-            let registry: JsObject = env.get_reference_value(&registry_ref).map_err(
-                |e| -> sayiir_core::error::BoxError {
-                    format!("Failed to get registry reference: {e}").into()
-                },
-            )?;
+            let env = Env::from_raw(send_env.0);
+            let registry: Object =
+                registry_ref
+                    .0
+                    .get_value(&env)
+                    .map_err(|e| -> sayiir_core::error::BoxError {
+                        format!("Failed to get registry reference: {e}").into()
+                    })?;
 
             crate::engine::execute_js_task(&env, &task_id, &task_input, &registry)
                 .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })

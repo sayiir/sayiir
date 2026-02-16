@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,7 +101,10 @@ impl NapiWorker {
     pub fn start(
         &self,
         workflows: Vec<&NapiWorkflow>,
-        #[napi(ts_arg_type = "(payload: string) => Promise<string>")] task_executor: JsFunction,
+        #[napi(ts_arg_type = "(payload: string) => Promise<string>")] task_executor: Function<
+            String,
+            Promise<String>,
+        >,
     ) -> Result<NapiWorkerHandle> {
         let external_workflows: WorkflowIndex = workflows
             .iter()
@@ -115,21 +118,16 @@ impl NapiWorker {
             })
             .collect();
 
-        // Create a ThreadsafeFunction from the JS executor.
-        // We pass a single JSON string containing both task_id and input.
-        // The JS function signature: (payload: string) => Promise<string>
-        let tsfn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled> = task_executor
-            .create_threadsafe_function(
-                0,
-                |ctx: napi::threadsafe_function::ThreadSafeCallContext<String>| {
-                    Ok(vec![ctx.env.create_string(&ctx.value)?.into_unknown()])
-                },
-            )?;
+        // Build a ThreadsafeFunction from the JS executor.
+        let tsfn: ThreadsafeFunction<String, Promise<String>, _, _, true> = task_executor
+            .build_threadsafe_function()
+            .callee_handled::<true>()
+            .build()?;
 
         let tsfn = Arc::new(tsfn);
 
         let executor: ExternalTaskExecutor = Arc::new(move |task_id: &str, input: Bytes| {
-            let tsfn: Arc<ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>> =
+            let tsfn: Arc<ThreadsafeFunction<String, Promise<String>, _, _, true>> =
                 Arc::clone(&tsfn);
             let task_id = task_id.to_string();
             let input_json = String::from_utf8_lossy(&input).into_owned();
@@ -141,13 +139,12 @@ impl NapiWorker {
                         .unwrap_or(serde_json::Value::Null),
                 })
                 .to_string();
-                let promise: Promise<String> = tsfn
+                let output_json: String = tsfn
                     .call_async(Ok(payload))
                     .await
-                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })?;
-                let output_json: String = promise
+                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })?
                     .await
-                    .map_err(|e: Error| -> sayiir_core::error::BoxError { e.to_string().into() })?;
+                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })?;
                 Ok(Bytes::from(output_json.into_bytes()))
             })
         });

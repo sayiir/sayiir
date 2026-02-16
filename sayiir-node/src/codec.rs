@@ -16,20 +16,16 @@
 //! object where each value is individually JSON-decoded.
 
 use bytes::Bytes;
+use napi::Env;
 use napi::bindgen_prelude::*;
-use napi::{Env, JsFunction, JsObject, JsUnknown};
 use sayiir_core::branch_results::NamedBranchResults;
 
-/// Encodes a JavaScript value to JSON bytes via `JSON.stringify`.
-pub fn encode_js_value(env: &Env, value: &JsUnknown) -> Result<Bytes> {
-    let global = env.get_global()?;
-    let json: JsObject = global.get_named_property("JSON")?;
-    let stringify_fn: JsFunction = json.get_named_property("stringify")?;
-    let stringify_result = stringify_fn
-        .call(Some(&json), &[value])?
-        .coerce_to_string()?;
-    let json_str = stringify_result.into_utf8()?.into_owned()?;
-    Ok(Bytes::from(json_str))
+/// Encodes a JavaScript value to JSON bytes via N-API serde bridge.
+pub fn encode_js_value(env: &Env, value: Unknown) -> Result<Bytes> {
+    let serde_val: serde_json::Value = env.from_js_value(value)?;
+    let json_bytes = serde_json::to_vec(&serde_val)
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+    Ok(Bytes::from(json_bytes))
 }
 
 /// Decodes JSON bytes to a JavaScript value.
@@ -37,41 +33,35 @@ pub fn encode_js_value(env: &Env, value: &JsUnknown) -> Result<Bytes> {
 /// Branch results (fork/join) are checked first because `serialize_branch_results`
 /// produces serde-JSON that `JSON.parse` would parse as an array-of-arrays
 /// instead of the object that JS join tasks expect.
-pub fn decode_to_js_value(env: &Env, bytes: &Bytes) -> Result<JsUnknown> {
+pub fn decode_to_js_value<'env>(env: &'env Env, bytes: &Bytes) -> Result<Unknown<'env>> {
     // Try branch results first
     if let Ok(named) = serde_json::from_slice::<NamedBranchResults>(bytes)
         && !named.is_empty()
     {
-        return decode_branch_results_to_js_object(env, &named);
+        return decode_branch_results(env, &named);
     }
 
     // Regular JSON path for normal task inputs
-    let json_str =
-        std::str::from_utf8(bytes).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-    json_parse(env, json_str)
-}
-
-/// Call `JSON.parse(str)` and return the result.
-fn json_parse(env: &Env, s: &str) -> Result<JsUnknown> {
-    let global = env.get_global()?;
-    let json: JsObject = global.get_named_property("JSON")?;
-    let parse_fn: JsFunction = json.get_named_property("parse")?;
-    let js_str = env.create_string(s)?;
-    parse_fn.call(Some(&json), &[js_str])
+    let serde_val: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
+    env.to_js_value(&serde_val)
 }
 
 /// Converts deserialized `NamedBranchResults` into a JS object.
 ///
 /// Each branch value is individually JSON-decoded.
-fn decode_branch_results_to_js_object(env: &Env, named: &NamedBranchResults) -> Result<JsUnknown> {
-    let mut obj = env.create_object()?;
+fn decode_branch_results<'env>(
+    env: &'env Env,
+    named: &NamedBranchResults,
+) -> Result<Unknown<'env>> {
+    let mut obj = Object::new(env)?;
 
     for (name, data) in named.as_slice() {
-        let json_str =
-            std::str::from_utf8(data).map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        let val = json_parse(env, json_str)?;
-        obj.set_named_property(name, val)?;
+        let serde_val: serde_json::Value = serde_json::from_slice(data)
+            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
+        let js_val: Unknown = env.to_js_value(&serde_val)?;
+        obj.set(name.as_str(), js_val)?;
     }
 
-    Ok(obj.into_unknown())
+    obj.into_unknown(env)
 }
