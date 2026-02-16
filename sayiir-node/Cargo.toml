@@ -1,0 +1,29 @@
+[package]
+name = "sayiir-node"
+description = "NAPI-RS bridge between Node.js and the Sayiir workflow runtime"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["napi9", "async", "tokio_rt", "serde-json"] }
+napi-derive = "2"
+bytes = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+serde_json = { workspace = true }
+sayiir-core = { path = "../sayiir-core" }
+sayiir-persistence = { path = "../sayiir-persistence" }
+sayiir-postgres = { path = "../sayiir-postgres" }
+sayiir-runtime = { path = "../sayiir-runtime", default-features = false, features = [
+    "json",
+] }
+tracing = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

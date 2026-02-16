@@ -4,8 +4,9 @@ use bytes::Bytes;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
 use sayiir_core::workflow::WorkflowStatus;
-use sayiir_persistence::SnapshotStore;
+use sayiir_persistence::{SignalStore, SnapshotStore};
 
+use super::helpers::ResumeParkedPosition;
 use crate::error::RuntimeError;
 
 /// Prepare a fresh workflow run: create initial snapshot and save it.
@@ -49,9 +50,9 @@ pub async fn prepare_resume<B>(
     backend: &B,
 ) -> Result<ResumeOutcome, RuntimeError>
 where
-    B: SnapshotStore,
+    B: SignalStore,
 {
-    let snapshot = backend.load_snapshot(instance_id).await?;
+    let mut snapshot = backend.load_snapshot(instance_id).await?;
 
     // Validate definition hash
     if snapshot.definition_hash != definition_hash {
@@ -70,7 +71,15 @@ where
         return Ok(ResumeOutcome::AlreadyTerminal(status));
     }
 
-    // Determine resume input
+    // Resolve any parked position (delay / signal / fork) before resuming.
+    // This consumes buffered signals, checks delay expiry, etc. and updates
+    // the snapshot so get_resume_input picks up the correct value.
+    let parked = ResumeParkedPosition::extract(&snapshot);
+    if let Some(status) = parked.resolve(&mut snapshot, instance_id, backend).await? {
+        return Ok(ResumeOutcome::NotReady(status));
+    }
+
+    // Determine resume input (after resolve, so signal payloads are reflected)
     let input_bytes = get_resume_input(&snapshot)?;
     Ok(ResumeOutcome::Ready {
         snapshot: Box::new(snapshot),
@@ -92,6 +101,8 @@ pub enum ResumeOutcome {
     AlreadyTerminal(WorkflowStatus),
     /// Workflow is paused (not terminal, but cannot execute until unpaused).
     Paused(WorkflowStatus),
+    /// Parked position not yet ready (delay not expired, signal not arrived, etc.).
+    NotReady(WorkflowStatus),
 }
 
 /// Get the input for resuming execution from a snapshot.

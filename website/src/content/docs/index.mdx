@@ -1,14 +1,18 @@
 ---
 title: Sayiir — Fast, Simple Durable Workflow Engine
-description: Fast, lightweight durable workflow engine for Python and Rust. Zero learning curve — write normal async code with automatic checkpointing, retries, and crash recovery. No DSL, no infrastructure, native performance.
+description: Fast, lightweight durable workflow engine for Python, Node.js, and Rust. Zero learning curve — write normal async code with automatic checkpointing, retries, and crash recovery. No DSL, no infrastructure, native performance.
 template: splash
 hero:
-  tagline: The fast, simple durable workflow engine. Zero learning curve — just write normal Python or Rust. Native performance, automatic checkpointing, no infrastructure to deploy.
+  tagline: The fast, simple durable workflow engine. Zero learning curve — just write normal Python, TypeScript, or Rust. Native performance, automatic checkpointing, no infrastructure to deploy.
   actions:
     - text: Get Started (Python)
       link: /getting-started/python/
       icon: right-arrow
       variant: primary
+    - text: Get Started (Node.js)
+      link: /getting-started/nodejs/
+      icon: right-arrow
+      variant: minimal
     - text: Get Started (Rust)
       link: /getting-started/rust/
       icon: right-arrow
@@ -22,7 +26,7 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
     No new DSL. No replay constraints. Write normal async code — Sayiir makes it durable automatically.
   </Card>
   <Card title="Simple — Library Not Platform" icon="puzzle">
-    `pip install sayiir` or add a Cargo dependency. No orchestrator to deploy, no infrastructure to manage.
+    `pip install sayiir`, `pnpm add sayiir`, or add a Cargo dependency. No orchestrator to deploy, no infrastructure to manage.
   </Card>
   <Card title="Fast — Native Rust Performance" icon="star">
     Rust core with zero-copy serialization (rkyv). Sub-millisecond checkpointing, hundreds of thousands of concurrent activities.
@@ -47,6 +51,27 @@ def send_email(user: dict) -> str:
 
 workflow = Flow("welcome").then(fetch_user).then(send_email).build()
 result = run_workflow(workflow, 42)
+```
+
+## Node.js / TypeScript
+
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+const fetchUser = task("fetch-user", (userId: number) => {
+  return { id: userId, name: "Alice" };
+});
+
+const sendEmail = task("send-email", (user: { id: number; name: string }) => {
+  return `Sent welcome to ${user.name}`;
+});
+
+const workflow = flow<number>("welcome")
+  .then(fetchUser)
+  .then(sendEmail)
+  .build();
+
+const result = await runWorkflow(workflow, 42);
 ```
 
 ## Rust

@@ -37,6 +37,7 @@ impl From<PyRetryPolicy> for RetryPolicy {
             max_retries: py.max_retries,
             initial_delay: Duration::from_secs_f64(py.initial_delay_secs),
             backoff_multiplier: py.backoff_multiplier as f32,
+            max_delay: None,
         }
     }
 }

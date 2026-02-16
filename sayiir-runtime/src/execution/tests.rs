@@ -136,6 +136,7 @@ fn fast_retry(max_retries: u32) -> RetryPolicy {
         max_retries,
         initial_delay: std::time::Duration::from_millis(1),
         backoff_multiplier: 1.0,
+        max_delay: None,
     }
 }
 

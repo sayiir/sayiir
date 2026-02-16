@@ -129,6 +129,7 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
                 max_retries: #max,
                 initial_delay: #backoff,
                 backoff_multiplier: #multiplier,
+                max_delay: None,
             }),
         })
     } else {

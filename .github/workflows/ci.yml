@@ -12,6 +12,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
       deny: ${{ steps.filter.outputs.deny }}
     steps:
       - uses: actions/checkout@v6
@@ -26,6 +27,7 @@ jobs:
               - 'sayiir-runtime/**'
               - 'sayiir-macros/**'
               - 'sayiir-py/**'
+              - 'sayiir-node/**'
               - 'tests/**'
               - 'benches/**'
               - 'Cargo.toml'
@@ -33,6 +35,9 @@ jobs:
             python:
               - 'sayiir-python/**'
               - 'sayiir-py/**'
+            node:
+              - 'sayiir-node/**'
+              - 'sayiir-nodejs/**'
             deny:
               - '**/Cargo.toml'
               - 'Cargo.lock'
@@ -137,6 +142,51 @@ jobs:
         run: |
           uv pip install --system pytest pydantic
           pytest sayiir-python/tests/ -v
+
+  node:
+    name: Node.js Binding
+    needs: changes
+    if: needs.changes.outputs.node == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18", "20", "22"]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Build native addon
+        run: cargo build -p sayiir-node --release
+
+      - name: Copy native addon
+        run: |
+          mkdir -p sayiir-nodejs/native
+          cp target/release/libsayiir_node.so sayiir-nodejs/native/sayiir-node.node
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        working-directory: sayiir-nodejs
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Type check
+        working-directory: sayiir-nodejs
+        run: pnpm tsc --noEmit
+
+      - name: Run tests
+        working-directory: sayiir-nodejs
+        run: pnpm vitest run
 
   bench:
     name: Benchmarks

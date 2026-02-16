@@ -1,6 +1,6 @@
 # Sayiir
 
-**Durable, fast workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
+**Durable, fast workflow engine that feels like writing normal code.** Rust core with Python and Node.js bindings — no DSL, workflows from your plain code.
 
 [![crates.io](https://img.shields.io/crates/v/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
 [![docs.rs](https://docs.rs/sayiir-core/badge.svg)](https://docs.rs/sayiir-core)
@@ -10,6 +10,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-93450a.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
+[![npm](https://img.shields.io/npm/v/sayiir.svg)](https://www.npmjs.com/package/sayiir)
+[![Node.js](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-339933.svg)](https://nodejs.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
 
 > Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
@@ -64,6 +66,25 @@ let workflow = workflow!("welcome", JsonCodec, registry,
 runner.run(workflow.workflow(), "welcome-user-123", user_id).await?;
 ```
 
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+const fetchUser = task("fetch-user", (id: number) => {
+  return { id, name: "Alice" };
+});
+
+const sendEmail = task("send-email", (user: { id: number; name: string }) => {
+  return `Sent welcome to ${user.name}`;
+});
+
+const workflow = flow<number>("welcome")
+  .then(fetchUser)
+  .then(sendEmail)
+  .build();
+
+const result = await runWorkflow(workflow, 42);
+```
+
 No annotations. No YAML. No separate worker processes. Just code.
 
 ---
@@ -75,12 +96,13 @@ No annotations. No YAML. No separate worker processes. Just code.
 | Topic | Description |
 |---|---|
 | [Python Quick Start](https://docs.sayiir.dev/getting-started/python/) | Install, define tasks, build durable workflows |
+| [Node.js Quick Start](https://docs.sayiir.dev/getting-started/nodejs/) | `task()`, type-safe `flow()` builder, Zod validation |
 | [Rust Quick Start](https://docs.sayiir.dev/getting-started/rust/) | `#[task]` macro, `workflow!` DSL, CheckpointingRunner |
 | [How Sayiir Works](https://docs.sayiir.dev/concepts/how-it-works/) | The 3 design decisions that make Sayiir different |
 | [Architecture](https://docs.sayiir.dev/concepts/architecture/) | Hexagonal design, pluggable backends/codecs |
 | [Guides](https://docs.sayiir.dev/guides/durable-workflows/) | Retries, signals, fork/join, distributed workers, Postgres |
 | [Tutorials](https://docs.sayiir.dev/tutorials/order-processing-python/) | End-to-end walkthroughs with runnable examples |
-| [API Reference](https://docs.sayiir.dev/reference/python-api/) | Python and Rust API docs |
+| [API Reference](https://docs.sayiir.dev/reference/python-api/) | Python, Node.js, and Rust API docs |
 | [Roadmap](ROADMAP.md) | What's planned next |
 | [Contributing](CONTRIBUTING.md) | How to set up, build, test, and submit PRs |
 
@@ -97,7 +119,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 | Python bindings      | ✅      |
 | PostgreSQL backend   | ✅ (requires PostgreSQL 13+) |
 | Cloudflare Workers   | In Progress |
-| Node.js bindings     | Planned     |
+| Node.js bindings     | ✅      |
 | Enterprise server    | Planned     |
 
 ---

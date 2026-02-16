@@ -1,0 +1,346 @@
+---
+title: Sayiir vs AWS Step Functions
+description: Sayiir vs AWS Step Functions — comparing an open-source embeddable durable workflow library with AWS's managed serverless state machine service
+---
+
+AWS Step Functions is a managed serverless workflow service tightly integrated with the AWS ecosystem. It's proven, scalable, and requires no infrastructure management. Sayiir is an open-source library you embed in your application. It runs anywhere, requires no AWS account, and gives you full control over your workflow runtime.
+
+This page explains when to use each, the key design differences, and how Sayiir's library model compares to Step Functions' managed service approach.
+
+## Design Philosophy: Managed Service vs Embedded Library
+
+**AWS Step Functions is a managed AWS service.** You define state machines using Amazon States Language (JSON), deploy them to AWS, and Step Functions orchestrates execution across AWS services. The runtime, scaling, and monitoring are handled by AWS. You pay per state transition.
+
+**Sayiir is a library you import.** Add it as a dependency (`pip install sayiir` or Cargo), configure storage, and run. Your application *is* the workflow engine. No AWS account required, no separate service, no infrastructure.
+
+### What This Means in Practice
+
+In Step Functions, you define a state machine as JSON:
+
+```json
+{
+  "Comment": "Process order workflow",
+  "StartAt": "ValidateOrder",
+  "States": {
+    "ValidateOrder": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:ValidateOrder",
+      "Next": "ChargePayment",
+      "Catch": [{
+        "ErrorEquals": ["ValidationError"],
+        "Next": "OrderFailed"
+      }]
+    },
+    "ChargePayment": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:ChargePayment",
+      "Retry": [{
+        "ErrorEquals": ["States.TaskFailed"],
+        "IntervalSeconds": 2,
+        "MaxAttempts": 3,
+        "BackoffRate": 2.0
+      }],
+      "Next": "FulfillOrder"
+    },
+    "FulfillOrder": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:FulfillOrder",
+      "End": true
+    },
+    "OrderFailed": {
+      "Type": "Fail",
+      "Cause": "Order validation failed"
+    }
+  }
+}
+```
+
+In Sayiir, you write code:
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+async def validate_order(order: dict) -> dict:
+    if not order.get("items"):
+        raise ValueError("Order has no items")
+    return order
+
+@task(retries=3, retry_delay=2.0)
+async def charge_payment(order: dict) -> dict:
+    # Charge payment
+    return {**order, "payment_status": "charged"}
+
+@task
+async def fulfill_order(order: dict) -> dict:
+    # Fulfill order
+    return {**order, "status": "fulfilled"}
+
+workflow = (
+    Flow("process_order")
+    .then(validate_order)
+    .then(charge_payment)
+    .then(fulfill_order)
+    .build()
+)
+
+# Run the workflow
+result = await run_workflow(workflow, order_data)
+```
+
+Step Functions uses a declarative JSON DSL. Sayiir uses imperative code in your language of choice.
+
+## Workflow Definition: JSON DSL vs Code-First
+
+**Step Functions uses Amazon States Language (ASL)**, a JSON-based DSL for defining state machines. You specify states (Task, Choice, Parallel, Wait, Map, etc.), transitions, and error handlers in JSON. This is declarative and portable across AWS regions, but verbose and not type-safe.
+
+**Sayiir is code-first.** Workflows are defined programmatically in Python or Rust. You get:
+
+- **Type safety** — your IDE and type checker catch errors before deployment
+- **Reusability** — workflows are functions you can compose and test
+- **Familiarity** — no new DSL to learn, just async code
+- **Dynamic construction** — build workflows at runtime based on application logic
+
+In Step Functions, dynamic workflow construction requires complex conditionals (Choice states, dynamic parallelism with Map states). In Sayiir, it's normal control flow:
+
+```python
+# Sayiir: Dynamic workflow construction
+workflow = Flow("process_order").then(validate_order)
+
+if order["type"] == "express":
+    workflow = workflow.then(express_shipping)
+else:
+    workflow = workflow.then(standard_shipping)
+
+workflow = workflow.then(send_confirmation).build()
+```
+
+The equivalent in Step Functions requires a Choice state with JSON configuration.
+
+## Vendor Lock-In: AWS-Only vs Run Anywhere
+
+**Step Functions runs only on AWS.** You cannot:
+
+- Run it locally for development (AWS provides a local simulator, but it's limited)
+- Deploy to other cloud providers (GCP, Azure, DigitalOcean)
+- Run on-premises or in air-gapped environments
+- Migrate to another workflow engine without rewriting your JSON state machines
+
+**Sayiir runs anywhere:**
+
+- **Local development** — in-memory backend, zero setup
+- **Any cloud** — AWS, GCP, Azure, Fly.io, Render, Railway
+- **Serverless platforms** — Lambda, Cloud Run, Cloud Functions, Vercel
+- **On-premises** — any server with Python or Rust
+- **Hybrid** — mix local and cloud workers in the same workflow
+
+Sayiir is portable. Step Functions is AWS-specific.
+
+## Infrastructure: Fully Managed vs Self-Hosted
+
+**Step Functions is fully managed.** You don't deploy, scale, or monitor infrastructure. AWS handles availability, scaling, and durability. This is a major operational advantage: no servers, no upgrades, no capacity planning.
+
+The tradeoff:
+
+- **No self-hosting** — you must use AWS's infrastructure
+- **AWS region constraints** — latency and compliance depend on AWS region availability
+- **Billing tied to usage** — pay-per-transition pricing (see Pricing section below)
+
+**Sayiir is a library you embed.** You manage infrastructure:
+
+- **PostgreSQL for persistence** — you choose the database provider
+- **Application servers** — you deploy and scale your application
+- **Workers** — you run worker processes for distributed execution
+
+This means:
+
+- **Full control** — choose your infrastructure provider, region, and architecture
+- **No AWS dependency** — works without an AWS account
+- **Your existing infrastructure** — use your database, servers, and monitoring
+
+If you value zero-ops, Step Functions wins. If you value control and portability, Sayiir wins.
+
+## Pricing: Pay-Per-Transition vs Self-Hosted
+
+**Step Functions pricing is per state transition:**
+
+- **Standard workflows** — $0.025 per 1,000 state transitions (first 4,000 free per month)
+- **Express workflows** — $1.00 per 1M requests + duration charges ($0.00001667 per GB-second)
+
+For high-volume workflows, this adds up. A workflow with 10 states executed 1M times per month costs:
+
+- Standard: 10 states × 1M executions = 10M transitions = **$250/month**
+- Express: Lower per-request cost but higher for long-running workflows
+
+**Sayiir is free, open-source software.** You pay only for your infrastructure:
+
+- **Database** — PostgreSQL hosting (Supabase, AWS RDS, self-hosted)
+- **Compute** — application servers or serverless function invocations
+- **No per-workflow charges** — run 1M workflows or 1B workflows, same cost
+
+For high-volume use cases, Sayiir can be significantly cheaper. For low-volume use cases, Step Functions' free tier may be sufficient.
+
+## Payload Limits and Execution Constraints
+
+**Step Functions has strict limits:**
+
+- **256 KB payload per state transition** — inputs/outputs exceeding this require workarounds (store in S3, pass reference)
+- **25,000 events per execution history** (Standard workflows) — long-running workflows with many states can hit this limit
+- **1 year maximum execution time** (Standard workflows)
+- **5 minutes maximum execution time** (Express workflows)
+
+**Sayiir has no payload limits** beyond your storage backend. Checkpoint data is serialized and stored in your database. If PostgreSQL can store it, Sayiir can handle it.
+
+This matters for workflows that pass large datasets between tasks (e.g., processing batches of records, ML model outputs, API responses with large payloads).
+
+## Integration Ecosystem: AWS Services vs Any Code
+
+**Step Functions has native integrations with 200+ AWS services:**
+
+- **Lambda** — invoke functions directly (most common)
+- **DynamoDB** — read/write items without Lambda
+- **SQS/SNS** — send messages directly
+- **ECS/Fargate** — run containers as tasks
+- **Glue, Athena, Batch, SageMaker** — data and ML workflows
+
+These integrations are powerful if you're already in the AWS ecosystem. Outside AWS, you're limited to HTTP endpoints (via API Gateway) or custom Lambda code.
+
+**Sayiir tasks are just async functions.** Call any library, any API, any service:
+
+```python
+@task
+async def query_database():
+    return await postgres_pool.fetch("SELECT * FROM orders")
+
+@task
+async def call_stripe_api():
+    return await stripe.Charge.create(amount=1000, currency="usd")
+
+@task
+async def run_ml_model():
+    return await ml_service.predict(data)
+```
+
+No AWS-specific integrations, no Lambda wrappers. If you can call it from Python or Rust, you can use it in a Sayiir task.
+
+## Testing: Local Development Experience
+
+**Step Functions is hard to test locally:**
+
+- **AWS Step Functions Local** — limited Docker-based simulator, doesn't support all features
+- **Mocking required** — testing often involves mocking AWS SDK calls
+- **Deployment required** — full integration tests require deploying to AWS
+
+**Sayiir is trivial to test:**
+
+```python
+# Test with in-memory backend (no database, no setup)
+from sayiir import InMemoryBackend, run_workflow
+
+backend = InMemoryBackend()
+result = await run_workflow(workflow, test_input, backend=backend)
+assert result == expected_output
+```
+
+No Docker, no AWS account, no mocks. Just import, run, and assert.
+
+For CI/CD, Sayiir tests run in seconds. Step Functions tests require AWS credentials and deployment time.
+
+## State Machines vs Task Chains
+
+**Step Functions is built on the state machine model.** You define states and transitions. This is powerful for complex branching, parallel execution, and error handling, but requires thinking in terms of states, not tasks.
+
+**Sayiir uses task chains** (directed acyclic graphs). You define tasks and dependencies:
+
+```python
+# Sayiir: Fork/join parallelism
+workflow = (
+    Flow("process_data")
+    .then(fetch_data)
+    .fork([process_a, process_b, process_c])  # Run in parallel
+    .then(aggregate_results)  # Wait for all to complete
+    .build()
+)
+```
+
+Both models are Turing-complete. The difference is mental model: state machines vs task graphs.
+
+## Standard vs Express Workflows
+
+**Step Functions has two workflow types:**
+
+1. **Standard workflows** — exactly-once execution, durable, max 1 year runtime, higher cost per transition
+2. **Express workflows** — at-most-once execution, up to 5 minutes, optimized for high-volume event processing, lower cost
+
+**Sayiir has one model** — checkpoint-based durable execution. All workflows are durable and exactly-once (within your database's transaction guarantees). No need to choose between standard and express.
+
+## Visual Workflow Editor
+
+**Step Functions includes a visual workflow editor in the AWS Console.** You can:
+
+- Design workflows graphically
+- See execution history and state transitions
+- Debug failed executions
+- View CloudWatch logs per state
+
+This is a major UX advantage for teams that need operational visibility without custom tooling.
+
+**Sayiir's open-source core has no built-in UI.** You can use your existing observability stack (structured logging, Prometheus, OpenTelemetry, Datadog). [Sayiir Server](/server/) (coming soon) adds a web dashboard with real-time workflow monitoring, execution history, and observability — closing this gap for teams that need visibility without custom tooling.
+
+## Language Support
+
+**Step Functions is language-agnostic at the workflow level** (JSON state machines), but task execution depends on:
+
+- **Lambda** — supports most languages (Python, Node.js, Java, Go, Ruby, .NET, custom runtimes)
+- **ECS/Fargate** — any containerized language
+- **API Gateway** — any HTTP endpoint
+
+**Sayiir currently supports:**
+
+- **Python** — `pip install sayiir`, PyO3 bindings to Rust core
+- **Rust** — Cargo dependency, native Rust API
+- **More SDKs planned** — same Rust core, new language bindings
+
+If you need Java, .NET, or TypeScript workers, Step Functions via Lambda is currently the only option. If Python or Rust fits your stack, Sayiir is a strong choice.
+
+## When to Choose AWS Step Functions
+
+Choose Step Functions if you need:
+
+- **Fully managed, zero-ops service** — no infrastructure to deploy or scale
+- **Deep AWS integration** — orchestrate Lambda, DynamoDB, SQS, ECS, and 200+ AWS services
+- **Visual workflow editor** — design, monitor, and debug workflows in the AWS Console
+- **AWS ecosystem lock-in is acceptable** — you're committed to AWS long-term
+- **Low-volume workflows** — free tier covers most use cases (4,000 transitions/month)
+- **Proven, battle-tested platform** — Step Functions runs millions of workflows daily at AWS scale
+
+Step Functions is a safe choice for AWS-native teams with low to moderate workflow volumes.
+
+## When to Choose Sayiir
+
+Choose Sayiir if you need:
+
+- **Portability** — run locally, on any cloud, on-premises, in serverless environments
+- **No vendor lock-in** — migrate infrastructure providers without rewriting workflows
+- **Code-first workflows** — define workflows in Python or Rust, not JSON
+- **No infrastructure** — embed workflows in your application, no separate service
+- **Zero setup for testing** — in-memory backend, no Docker, no AWS credentials
+- **High-volume workflows** — no per-transition charges, scale with your infrastructure
+- **Full control** — choose your database, your servers, your architecture
+- **MIT licensed** — open source, modify and distribute freely
+
+Sayiir is the best choice for teams that value portability, simplicity, and control.
+
+## Summary
+
+AWS Step Functions is a mature, fully managed workflow service with deep AWS integration and a rich visual editor. It's the right choice for teams already invested in the AWS ecosystem who want zero-ops orchestration.
+
+Sayiir is an embeddable library for durable workflows that runs anywhere. It's the right choice for teams that want portability, code-first workflows, and freedom from vendor lock-in.
+
+Both solve durable workflow execution. The difference is philosophy: managed AWS service vs portable open-source library, JSON DSL vs code-first, AWS-only vs run anywhere.
+
+If you're an AWS-native team with low to moderate workflow volumes, Step Functions is a great fit. If you value portability, control, and open source, Sayiir is a strong alternative.
+
+---
+
+See also: [Sayiir vs Temporal](/comparisons/vs-temporal/) and [Comparison Overview](/comparisons/overview/)

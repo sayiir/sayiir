@@ -51,7 +51,6 @@ pub(crate) async fn park_at_signal<B: SignalStore>(
     signal_name: &str,
     timeout: Option<&std::time::Duration>,
     next: Option<&WorkflowContinuation>,
-    current_input: Bytes,
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
 ) -> RuntimeError {
@@ -90,7 +89,9 @@ pub(crate) async fn park_at_signal<B: SignalStore>(
         wake_at,
         next_task_id,
     });
-    snapshot.mark_task_completed(id.to_string(), current_input);
+    // Do NOT mark the signal node as completed here — the signal hasn't
+    // arrived yet.  The actual payload will be stored by resolve() or by
+    // the executor when the signal is consumed on resume.
     if let Err(e) = backend.save_snapshot(snapshot).await {
         return RuntimeError::from(e);
     }
@@ -386,11 +387,16 @@ pub(super) fn policy_to_backoff(
     policy: Option<&sayiir_core::task::RetryPolicy>,
 ) -> backon::ExponentialBuilder {
     match policy {
-        Some(rp) => backon::ExponentialBuilder::default()
-            .with_min_delay(rp.initial_delay)
-            .with_factor(rp.backoff_multiplier)
-            .with_max_times(rp.max_retries as usize)
-            .without_max_delay(),
+        Some(rp) => {
+            let builder = backon::ExponentialBuilder::default()
+                .with_min_delay(rp.initial_delay)
+                .with_factor(rp.backoff_multiplier)
+                .with_max_times(rp.max_retries as usize);
+            match rp.max_delay {
+                Some(max) => builder.with_max_delay(max),
+                None => builder.without_max_delay(),
+            }
+        }
         None => backon::ExponentialBuilder::default().with_max_times(0),
     }
 }

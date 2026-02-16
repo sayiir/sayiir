@@ -173,6 +173,10 @@ impl PyDurableEngine {
                             tracing::debug!(%instance_id, "workflow is paused, cannot resume");
                             Ok((status, None))
                         }
+                        ResumeOutcome::NotReady(status) => {
+                            tracing::debug!(%instance_id, status = ?status, "workflow not ready to resume");
+                            Ok((status, None))
+                        }
                         ResumeOutcome::Ready {
                             mut snapshot,
                             input_bytes,

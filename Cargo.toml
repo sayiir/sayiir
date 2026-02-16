@@ -6,13 +6,14 @@ members = [
     "sayiir-runtime",
     "sayiir-macros",
     "sayiir-py",
+    "sayiir-node",
     "tests/integration",
 ]
 resolver = "2"
 exclude = ["examples/hello-world-rs", "examples/background-jobs-rs"]
 
 [workspace.package]
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
