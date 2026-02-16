@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  linux:
+  pypi-linux:
     name: Linux (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
@@ -33,7 +33,7 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: sayiir-python/dist
 
-  macos:
+  pypi-macos:
     name: macOS (${{ matrix.target }})
     runs-on: macos-latest
     strategy:
@@ -57,7 +57,7 @@ jobs:
           name: wheels-macos-${{ matrix.target }}
           path: sayiir-python/dist
 
-  windows:
+  pypi-windows:
     name: Windows (x86_64)
     runs-on: windows-latest
     steps:
@@ -78,7 +78,7 @@ jobs:
           name: wheels-windows-x86_64
           path: sayiir-python/dist
 
-  sdist:
+  pypi-sdist:
     name: Source distribution
     runs-on: ubuntu-latest
     steps:
@@ -95,10 +95,10 @@ jobs:
           name: wheels-sdist
           path: sayiir-python/dist
 
-  publish:
+  pypi-publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [linux, macos, windows, sdist]
+    needs: [pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
     environment:
       name: pypi
       url: https://pypi.org/p/sayiir
@@ -113,7 +113,7 @@ jobs:
 
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  crates:
+  crates-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     steps:
@@ -212,50 +212,13 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      # Download all platform binaries built by node-build.
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: node-*
           path: artifacts/
 
-      # Place each binary into its platform package directory.
-      # After this step, each npm/<platform>/ has a sayiir-node.node file.
-      - name: Stage platform binaries
-        run: |
-          for dir in artifacts/node-*; do
-            platform=$(basename "$dir" | sed 's/^node-//')
-            cp "$dir/sayiir-node.node" "sayiir-nodejs/npm/$platform/sayiir-node.node"
-            echo "Staged $platform"
-          done
-          ls -lhR sayiir-nodejs/npm/
-
-      # Publish each platform-specific package first.
-      # These are the @sayiir/node-<platform> packages that contain
-      # only the native binary for one OS/arch combination (~5 MB each).
-      # --provenance attaches build attestation via OIDC (no token needed).
-      - name: Publish platform packages
-        run: |
-          for dir in sayiir-nodejs/npm/*/; do
-            name=$(node -p "require('./${dir}package.json').name")
-            echo "Publishing $name ..."
-            cd "$dir"
-            npm publish --provenance --access public
-            cd -
-          done
-
-      # Build the TypeScript source to dist/.
-      - name: Build TypeScript
-        working-directory: sayiir-nodejs
-        run: |
-          pnpm install
-          pnpm tsc
-
-      # Publish the main `sayiir` package.
-      # This package contains only the TypeScript wrapper code.
-      # The native binary is pulled in via optionalDependencies
-      # on @sayiir/node-<platform> — pnpm/npm resolves only the
-      # package matching the user's platform.
-      - name: Publish sayiir
-        working-directory: sayiir-nodejs
-        run: npm publish --provenance --access public
+      - name: Publish npm packages
+        uses: ./.github/actions/publish-npm-napi
+        with:
+          package-dir: sayiir-nodejs

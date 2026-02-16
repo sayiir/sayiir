@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { Worker, WorkerHandle, flow, task, InMemoryBackend } from "../src/index.js";
+import {
+  Worker,
+  flow,
+  task,
+  InMemoryBackend,
+  runDurableWorkflow,
+} from "../src/index.js";
 
-describe("worker (placeholder)", () => {
+describe("worker", () => {
   it("constructs a Worker instance", () => {
     const double = task("double", (x: number) => x * 2);
     const wf = flow<number>("worker-test").then(double).build();
@@ -9,31 +15,29 @@ describe("worker (placeholder)", () => {
 
     const worker = new Worker("w-1", backend, [wf], {
       pollInterval: "5s",
-      maxConcurrency: 4,
     });
 
     expect(worker.workerId).toBe("w-1");
     expect(worker.workflows).toHaveLength(1);
-    expect(worker.options.maxConcurrency).toBe(4);
   });
 
-  it("start() throws not-yet-implemented", async () => {
-    const wf = flow<number>("worker-test2")
-      .then("inc", (x: number) => x + 1)
-      .build();
+  it("starts, executes a task, and shuts down", async () => {
+    const double = task("double", (x: number) => x * 2);
+    const wf = flow<number>("worker-e2e").then(double).build();
     const backend = new InMemoryBackend();
-    const worker = new Worker("w-2", backend, [wf]);
 
-    await expect(worker.start()).rejects.toThrow("not yet implemented");
-  });
+    // Submit a workflow first so there's work for the worker
+    const status = runDurableWorkflow(wf, "inst-1", 21, backend);
+    // With InMemoryBackend the durable engine runs synchronously,
+    // so the workflow should complete immediately
+    expect(status.status).toBe("completed");
+    expect(status.output).toBe(42);
 
-  it("WorkerHandle methods throw not-yet-implemented", async () => {
-    const handle = new WorkerHandle();
-
-    await expect(handle.shutdown()).rejects.toThrow("not yet implemented");
-    await expect(handle.cancelWorkflow("id")).rejects.toThrow("not yet implemented");
-    await expect(handle.pauseWorkflow("id")).rejects.toThrow("not yet implemented");
-    await expect(handle.unpauseWorkflow("id")).rejects.toThrow("not yet implemented");
-    await expect(handle.sendSignal("id", "sig", {})).rejects.toThrow("not yet implemented");
+    // Now test that the worker can start and shut down cleanly
+    const worker = new Worker("w-e2e", backend, [wf], {
+      pollInterval: 50, // 50ms for fast test
+    });
+    const handle = worker.start();
+    handle.shutdown();
   });
 });

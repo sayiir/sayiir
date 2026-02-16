@@ -211,7 +211,7 @@ function parseWorkflowStatus<TOut>(
       return {
         status: "paused",
         reason: raw.reason,
-        pausedBy: raw.cancelledBy,
+        pausedBy: raw.pausedBy,
       };
     case "waiting":
       return {

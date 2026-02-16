@@ -19,6 +19,15 @@ export default defineConfig({
       editLink: {
         baseUrl: "https://github.com/sayiir/sayiir/edit/main/website/",
       },
+      head: [
+        {
+          tag: "meta",
+          attrs: {
+            name: "google-site-verification",
+            content: "pz-_NhedmmAqWQ3AAia5X0iKopKJzwzunbrUbxrVMrU",
+          },
+        },
+      ],
       customCss: ["./src/styles/custom.css"],
       sidebar: [
         {

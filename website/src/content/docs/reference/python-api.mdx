@@ -478,6 +478,98 @@ Examples:
 - Attempt 2: 2.0s
 - Attempt 3: 4.0s
 
+## Distributed Worker
+
+### Worker(worker_id, backend, *, poll_interval=5.0, claim_ttl=300.0)
+
+Create a distributed workflow worker that polls the backend for available tasks.
+
+```python
+from sayiir import PostgresBackend
+from sayiir.worker import Worker
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+worker = Worker("worker-1", backend, poll_interval=2.0, claim_ttl=600.0)
+```
+
+**Parameters:**
+
+- `worker_id` (str) — Unique identifier for this worker instance
+- `backend` (InMemoryBackend | PostgresBackend) — Shared persistence backend
+- `poll_interval` (float, optional) — Seconds between polls for available tasks (default: 5.0)
+- `claim_ttl` (float, optional) — Task claim time-to-live in seconds (default: 300.0)
+
+#### .start(workflows)
+
+Start the worker and return a handle for lifecycle control. Spawns a background thread that polls for tasks.
+
+```python
+workflow = Flow("pipeline").then(my_task).build()
+handle = worker.start([workflow])
+```
+
+**Parameters:**
+- `workflows` (list[Workflow]) — List of compiled workflows whose tasks this worker can execute
+
+**Returns:** WorkerHandle
+
+### WorkerHandle
+
+Handle for controlling a running worker. Obtained from `Worker.start()`.
+
+#### .shutdown()
+
+Request a graceful shutdown. Non-blocking — the worker finishes in-flight tasks before stopping.
+
+```python
+handle.shutdown()
+```
+
+#### .join()
+
+Block until the worker has fully stopped. Releases the GIL while waiting.
+
+```python
+handle.shutdown()
+handle.join()  # blocks until shutdown completes
+```
+
+#### .cancel_workflow(instance_id, *, reason=None, cancelled_by=None)
+
+Request cancellation of a workflow instance via the worker's backend.
+
+```python
+handle.cancel_workflow(
+    "order-42",
+    reason="Out of stock",
+    cancelled_by="admin@example.com",
+)
+```
+
+#### .pause_workflow(instance_id, *, reason=None, paused_by=None)
+
+Pause a workflow instance at the next checkpoint.
+
+```python
+handle.pause_workflow("order-42", reason="Maintenance window")
+```
+
+#### .unpause_workflow(instance_id)
+
+Unpause a paused workflow instance.
+
+```python
+handle.unpause_workflow("order-42")
+```
+
+#### .send_signal(instance_id, signal_name, payload)
+
+Send an external signal to a workflow instance.
+
+```python
+handle.send_signal("order-42", "manager_approval", {"approved": True})
+```
+
 ## Exceptions
 
 ### WorkflowError

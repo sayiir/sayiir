@@ -9,3 +9,77 @@
   --sl-color-accent: #4f46e5;
   --sl-color-accent-high: #1e1b4b;
 }
+
+/* ── Mermaid diagram contrast fixes ── */
+
+/* Dark mode: boost text and edge contrast */
+:root:not([data-theme="light"]) pre.mermaid .nodeLabel,
+:root:not([data-theme="light"]) pre.mermaid .edgeLabel,
+:root:not([data-theme="light"]) pre.mermaid .label {
+  color: #f1f5f9 !important;
+  fill: #f1f5f9 !important;
+}
+
+:root:not([data-theme="light"]) pre.mermaid .node rect,
+:root:not([data-theme="light"]) pre.mermaid .node circle,
+:root:not([data-theme="light"]) pre.mermaid .node polygon {
+  fill: #312e81 !important;
+  stroke: #818cf8 !important;
+  stroke-width: 2px !important;
+}
+
+:root:not([data-theme="light"]) pre.mermaid .edgePath .path,
+:root:not([data-theme="light"]) pre.mermaid .flowchart-link {
+  stroke: #a5b4fc !important;
+  stroke-width: 2px !important;
+}
+
+:root:not([data-theme="light"]) pre.mermaid marker path {
+  fill: #a5b4fc !important;
+  stroke: #a5b4fc !important;
+}
+
+:root:not([data-theme="light"]) pre.mermaid .edgeLabel rect,
+:root:not([data-theme="light"]) pre.mermaid .labelBkg {
+  fill: #1e1b4b !important;
+  opacity: 0.9 !important;
+}
+
+:root:not([data-theme="light"]) pre.mermaid .cluster rect {
+  fill: #1e1b4b !important;
+  stroke: #6366f1 !important;
+  stroke-width: 1.5px !important;
+}
+
+:root:not([data-theme="light"]) pre.mermaid .cluster span,
+:root:not([data-theme="light"]) pre.mermaid .cluster .nodeLabel {
+  color: #c7d2fe !important;
+  fill: #c7d2fe !important;
+}
+
+/* Light mode: deepen node fills for better text contrast */
+:root[data-theme="light"] pre.mermaid .node rect,
+:root[data-theme="light"] pre.mermaid .node circle,
+:root[data-theme="light"] pre.mermaid .node polygon {
+  fill: #e0e7ff !important;
+  stroke: #4f46e5 !important;
+  stroke-width: 2px !important;
+}
+
+:root[data-theme="light"] pre.mermaid .nodeLabel,
+:root[data-theme="light"] pre.mermaid .edgeLabel,
+:root[data-theme="light"] pre.mermaid .label {
+  color: #1e1b4b !important;
+  fill: #1e1b4b !important;
+}
+
+:root[data-theme="light"] pre.mermaid .edgePath .path,
+:root[data-theme="light"] pre.mermaid .flowchart-link {
+  stroke: #4f46e5 !important;
+  stroke-width: 2px !important;
+}
+
+:root[data-theme="light"] pre.mermaid marker path {
+  fill: #4f46e5 !important;
+  stroke: #4f46e5 !important;
+}

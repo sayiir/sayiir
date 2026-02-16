@@ -81,3 +81,140 @@ macro_rules! with_backend {
     };
 }
 pub(crate) use with_backend;
+
+// ---------------------------------------------------------------------------
+// Trait implementations for BackendKind — needed for PooledWorker
+// ---------------------------------------------------------------------------
+
+// Trait implementations use `std::result::Result` explicitly because napi's
+// prelude shadows `Result` with `napi::Result`.
+use sayiir_core::snapshot::{SignalKind, SignalRequest, WorkflowSnapshot};
+use sayiir_core::task_claim::{AvailableTask, TaskClaim};
+use sayiir_persistence::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
+
+macro_rules! dispatch {
+    ($self:expr, |$inner:ident| $body:expr) => {
+        match $self {
+            BackendKind::InMemory($inner) => $body,
+            BackendKind::Postgres($inner) => $body,
+        }
+    };
+}
+
+type BResult<T> = std::result::Result<T, BackendError>;
+
+impl SnapshotStore for BackendKind {
+    async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> BResult<()> {
+        dispatch!(self, |b| b.save_snapshot(snapshot).await)
+    }
+
+    async fn save_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+        output: bytes::Bytes,
+    ) -> BResult<()> {
+        dispatch!(self, |b| b
+            .save_task_result(instance_id, task_id, output)
+            .await)
+    }
+
+    async fn load_snapshot(&self, instance_id: &str) -> BResult<WorkflowSnapshot> {
+        dispatch!(self, |b| b.load_snapshot(instance_id).await)
+    }
+
+    async fn delete_snapshot(&self, instance_id: &str) -> BResult<()> {
+        dispatch!(self, |b| b.delete_snapshot(instance_id).await)
+    }
+
+    async fn list_snapshots(&self) -> BResult<Vec<String>> {
+        dispatch!(self, |b| b.list_snapshots().await)
+    }
+}
+
+impl SignalStore for BackendKind {
+    async fn store_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+        request: SignalRequest,
+    ) -> BResult<()> {
+        dispatch!(self, |b| b.store_signal(instance_id, kind, request).await)
+    }
+
+    async fn get_signal(
+        &self,
+        instance_id: &str,
+        kind: SignalKind,
+    ) -> BResult<Option<SignalRequest>> {
+        dispatch!(self, |b| b.get_signal(instance_id, kind).await)
+    }
+
+    async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> BResult<()> {
+        dispatch!(self, |b| b.clear_signal(instance_id, kind).await)
+    }
+
+    async fn send_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+        payload: bytes::Bytes,
+    ) -> BResult<()> {
+        dispatch!(self, |b| b
+            .send_event(instance_id, signal_name, payload)
+            .await)
+    }
+
+    async fn consume_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+    ) -> BResult<Option<bytes::Bytes>> {
+        dispatch!(self, |b| b.consume_event(instance_id, signal_name).await)
+    }
+}
+
+impl TaskClaimStore for BackendKind {
+    async fn claim_task(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+        worker_id: &str,
+        ttl: Option<chrono::Duration>,
+    ) -> BResult<Option<TaskClaim>> {
+        dispatch!(self, |b| b
+            .claim_task(instance_id, task_id, worker_id, ttl)
+            .await)
+    }
+
+    async fn release_task_claim(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+        worker_id: &str,
+    ) -> BResult<()> {
+        dispatch!(self, |b| b
+            .release_task_claim(instance_id, task_id, worker_id)
+            .await)
+    }
+
+    async fn extend_task_claim(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+        worker_id: &str,
+        additional_duration: chrono::Duration,
+    ) -> BResult<()> {
+        dispatch!(self, |b| b
+            .extend_task_claim(instance_id, task_id, worker_id, additional_duration)
+            .await)
+    }
+
+    async fn find_available_tasks(
+        &self,
+        worker_id: &str,
+        limit: usize,
+    ) -> BResult<Vec<AvailableTask>> {
+        dispatch!(self, |b| b.find_available_tasks(worker_id, limit).await)
+    }
+}

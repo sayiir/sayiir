@@ -12,7 +12,7 @@
  * ```
  */
 
-import type { Duration, StepOptions } from "./types.js";
+import type { Duration, StepOptions, TaskCallback } from "./types.js";
 import type { TaskFn } from "./task.js";
 import { parseDuration } from "./duration.js";
 import type {
@@ -28,9 +28,9 @@ export class Workflow<TIn, TOut> {
   /** @internal */
   readonly _inner: NapiWorkflow;
   /** @internal */
-  readonly _taskRegistry: Record<string, Function>;
+  readonly _taskRegistry: Record<string, TaskCallback>;
 
-  constructor(inner: NapiWorkflow, taskRegistry: Record<string, Function>) {
+  constructor(inner: NapiWorkflow, taskRegistry: Record<string, TaskCallback>) {
     this._inner = inner;
     this._taskRegistry = taskRegistry;
   }
@@ -55,7 +55,7 @@ export interface BranchDef<TIn, TOut> {
 
 interface BranchStep {
   taskId: string;
-  fn: Function;
+  fn: TaskCallback;
   metadata?: NapiTaskMetadata;
 }
 
@@ -87,7 +87,7 @@ export function branch<TIn, TOut>(
 
   return {
     name,
-    steps: [{ taskId, fn: isTaskFn(fn) ? fn : fn, metadata }],
+    steps: [{ taskId, fn: fn as TaskCallback, metadata }],
   } as BranchDef<TIn, Awaited<TOut>>;
 }
 
@@ -96,9 +96,9 @@ export class Flow<TInput, TLast = TInput> {
   /** @internal */
   readonly _builder: NapiFlowBuilder;
   /** @internal */
-  readonly _taskRegistry: Record<string, Function> = {};
+  readonly _taskRegistry: Record<string, TaskCallback> = {};
   /** @internal */
-  _lambdaCounter = 0;
+  private _lambdaCounter = 0;
 
   constructor(name: string) {
     this._builder = new (getNative().NapiFlowBuilder)(name);
@@ -127,16 +127,16 @@ export class Flow<TInput, TLast = TInput> {
     maybeOpts?: StepOptions,
   ): Flow<TInput, Awaited<TOut>> {
     let taskId: string;
-    let taskFn: Function;
+    let taskFn: TaskCallback;
     let metadata: NapiTaskMetadata | undefined;
 
     if (typeof idOrFn === "string") {
       // .then("id", fn, opts?)
       taskId = idOrFn;
-      taskFn = fnOrOpts as Function;
+      taskFn = fnOrOpts as TaskCallback;
       const opts = maybeOpts;
       if (isTaskFn(taskFn)) {
-        metadata = (taskFn as TaskFn<any, any>)._metadata;
+        metadata = (taskFn as TaskFn<TLast, TOut>)._metadata;
         // Keep the wrapped TaskFn (preserves Zod validation); only override the id.
       }
       if (opts) {
