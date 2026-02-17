@@ -1,0 +1,6 @@
+sayiir
+ollama
+ddgs
+arxiv
+httpx
+pydantic

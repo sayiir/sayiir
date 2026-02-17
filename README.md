@@ -120,7 +120,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 [Python API](https://docs.sayiir.dev/reference/python-api/) &#183;
 [Node.js API](https://docs.sayiir.dev/reference/nodejs-api/) &#183;
 [Rust API](https://docs.sayiir.dev/reference/rust-api/) &#183;
-[Roadmap](ROADMAP.md) &#183;
+[Roadmap](https://docs.sayiir.dev/roadmap/) &#183;
 [Contributing](CONTRIBUTING.md)
 
 ---

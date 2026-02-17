@@ -1,0 +1,38 @@
+---
+title: "Tutorial: AI Research Agent (Python)"
+description: Build a durable AI research agent with parallel search, LLM synthesis, and human-in-the-loop approval
+---
+
+import { LinkCard } from '@astrojs/starlight/components';
+
+Build a real-world AI agent that searches multiple sources in parallel, synthesizes findings with a local LLM, and waits for human approval before saving the final report. **Zero API keys required** — everything runs locally with Ollama.
+
+Sayiir is not an AI agent framework — it's a **durable workflow engine**. But many AI "agents" are really pipelines: fetch data, process it, call an LLM, wait for a human, save the result. For these, Sayiir is simpler than agent-specific frameworks — the entire research agent graph is **12 lines**:
+
+```python
+workflow = (
+    Flow("ai-research-agent")
+    .then(parse_query)
+    .fork()
+    .branch(search_web)
+    .branch(search_wikipedia)
+    .branch(search_arxiv)
+    .join(merge_sources)
+    .then(synthesize)
+    .wait_for_signal("human_approval", timeout=timedelta(hours=48))
+    .then(save_report)
+    .build()
+)
+```
+
+Retries with backoff for flaky LLM APIs, parallel search across three sources, human-in-the-loop approval via signals, and crash recovery — all with no infrastructure and no determinism constraints.
+
+:::note[Honest about gaps]
+If your agent needs **dynamic branching**, **loops**, or **token streaming**, Sayiir isn't the right fit today. See the [roadmap](/roadmap/) for what's coming.
+:::
+
+<LinkCard
+  title="Full example: AI Research Agent"
+  description="Setup instructions, production mode walkthrough, and source code."
+  href="https://github.com/sayiir/sayiir/tree/main/examples/ai-research-agent-py"
+/>
