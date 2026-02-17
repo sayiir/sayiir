@@ -11,7 +11,7 @@ Most workflow engines force you to learn their mental model, their DSL, their wa
 
 Workflows in Sayiir are defined as a **task graph** — a directed acyclic graph (DAG) of tasks, forks, delays, and signals connected by dependency edges. You build the graph using the `Flow` builder (Python/Node.js) or `workflow!` macro (Rust), and Sayiir traverses it at runtime.
 
-Internally, the graph is represented as a **continuation tree**: each node in the workflow knows what comes next. Sequential tasks chain via `next` pointers, parallel branches fan out from `Fork` nodes and reconverge at `Join` nodes. This structure is serializable — the entire remaining execution plan can be checkpointed and resumed on any machine.
+Internally, the graph is represented as a **continuation tree**: each node in the workflow knows what comes next. Sequential tasks chain via `next` pointers, parallel branches fan out from `Fork` nodes and converge back at `Join` nodes. This structure is serializable — the entire remaining execution plan can be checkpointed and resumed on any machine.
 
 ## Continuation-Based Execution (No Deterministic Replay)
 
