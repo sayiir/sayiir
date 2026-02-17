@@ -1,0 +1,439 @@
+---
+title: Signals & Events
+description: Wait for external events, send signals, buffering semantics, and timeout patterns
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## What are signals
+
+Signals let workflows pause and wait for external events—like user approvals, webhook callbacks, or manual triggers—before continuing execution. When a workflow waits for a signal, it releases the worker thread, making it available for other work.
+
+Signals are durable: they are persisted to the backend and survive process restarts. Once a signal is received, the workflow can be resumed from where it left off.
+
+## Waiting for signals
+
+Use `wait_for_signal` to pause a workflow until an external event arrives. The workflow will checkpoint its state and stop execution at that point.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from datetime import timedelta
+from sayiir import task, Flow
+
+@task
+def create_order(order_id: int) -> dict:
+    return {"order_id": order_id, "status": "pending"}
+
+@task
+def fulfill(approval: dict) -> str:
+    return f"Fulfilled order (approved by {approval.get('by', 'unknown')})"
+
+workflow = (
+    Flow("approval")
+    .then(create_order)
+    .wait_for_signal("manager_approval", timeout=timedelta(hours=24))
+    .then(fulfill)
+    .build()
+)
+```
+
+The workflow will:
+1. Execute `create_order`
+2. Checkpoint and wait for the "manager_approval" signal
+3. Once received, execute `fulfill` with the signal payload
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow } from "sayiir";
+
+const createOrder = task("create_order", (orderId: number) => {
+    return { order_id: orderId, status: "pending" };
+});
+
+const fulfill = task("fulfill", (approval: { by?: string }) => {
+    return `Fulfilled order (approved by ${approval.by ?? "unknown"})`;
+});
+
+const workflow = flow<number>("approval")
+    .then(createOrder)
+    .waitForSignal<{ by: string }>("approval_wait", "manager_approval", {
+        timeout: "24h",
+    })
+    .then(fulfill)
+    .build();
+```
+
+The workflow will:
+1. Execute `createOrder`
+2. Checkpoint and wait for the "manager_approval" signal
+3. Once received, execute `fulfill` with the signal payload
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use std::time::Duration;
+use sayiir_core::prelude::*;
+use serde_json::json;
+
+let workflow = WorkflowBuilder::new(ctx)
+    .then("create_order", |id: u64| async move {
+        Ok(json!({ "order_id": id, "status": "pending" }))
+    })
+    .wait_for_signal("approval_wait", "manager_approval", Some(Duration::from_secs(86400)))
+    .then("fulfill", |approval: serde_json::Value| async move {
+        Ok(format!("Fulfilled (approved by {})", approval["by"]))
+    })
+    .build()?;
+```
+
+The first string argument to `wait_for_signal` is the node name, the second is the signal name.
+
+</TabItem>
+</Tabs>
+
+## Sending signals
+
+External systems send signals using `send_signal` (Python) or `backend.send_event` (Rust). You must provide:
+
+- The workflow instance ID
+- The signal name (must match the name in `wait_for_signal`)
+- A payload (any JSON-serializable data)
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import send_signal, InMemoryBackend
+
+backend = InMemoryBackend()
+
+# External system sends the signal
+send_signal(
+    "order-42",
+    "manager_approval",
+    {"by": "alice", "approved_at": "2026-02-15T10:30:00Z"},
+    backend=backend
+)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { sendSignal, InMemoryBackend } from "sayiir";
+
+const backend = new InMemoryBackend();
+
+// External system sends the signal
+sendSignal(
+    "order-42",
+    "manager_approval",
+    { by: "alice", approved_at: "2026-02-15T10:30:00Z" },
+    backend
+);
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use serde_json::json;
+
+let payload = json!({
+    "by": "alice",
+    "approved_at": "2026-02-15T10:30:00Z"
+});
+
+backend.send_event("order-42", "manager_approval", payload).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Buffering semantics
+
+Signals are durably buffered in the backend. This means:
+
+- If a signal is sent **before** the workflow reaches `wait_for_signal`, it will be consumed immediately when the workflow gets there.
+- If a signal is sent **after** the workflow reaches `wait_for_signal`, the workflow will resume as soon as `resume` is called.
+- There are no race conditions—signals are never lost.
+
+This buffering ensures that external systems can send signals at any time without worrying about timing.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import run_durable_workflow, send_signal, resume_workflow
+
+# Start the workflow
+status = run_durable_workflow(workflow, "order-42", 42, backend=backend)
+print(status)  # WaitingForSignal
+
+# Signal can be sent immediately or hours later
+send_signal("order-42", "manager_approval", {"by": "alice"}, backend=backend)
+
+# Resume to continue execution
+status = resume_workflow(workflow, "order-42", backend=backend)
+print(status)  # Completed
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { runDurableWorkflow, sendSignal, resumeWorkflow } from "sayiir";
+
+// Start the workflow
+const status1 = runDurableWorkflow(workflow, "order-42", 42, backend);
+console.log(status1.status); // "awaiting_signal"
+
+// Signal can be sent immediately or hours later
+sendSignal("order-42", "manager_approval", { by: "alice" }, backend);
+
+// Resume to continue execution
+const status2 = resumeWorkflow(workflow, "order-42", backend);
+console.log(status2.status); // "completed"
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_runtime::CheckpointingRunner;
+
+let runner = CheckpointingRunner::new(backend.clone());
+
+// Start the workflow
+let status = runner.run(&workflow, "order-42", 42u64).await?;
+println!("{:?}", status);  // WaitingForSignal
+
+// Signal can be sent immediately or hours later
+let payload = json!({"by": "alice"});
+backend.send_event("order-42", "manager_approval", payload).await?;
+
+// Resume to continue execution
+let status = runner.resume(&workflow, "order-42").await?;
+println!("{:?}", status);  // Completed
+```
+
+</TabItem>
+</Tabs>
+
+## Timeout patterns
+
+You can specify an optional timeout when waiting for a signal. If the timeout expires before the signal is received, the workflow will fail with a timeout error.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from datetime import timedelta
+
+# Wait up to 24 hours for approval
+workflow = (
+    Flow("approval")
+    .then(create_order)
+    .wait_for_signal("manager_approval", timeout=timedelta(hours=24))
+    .then(fulfill)
+    .build()
+)
+
+# If no signal arrives within 24 hours, the workflow fails
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+// Wait up to 24 hours for approval
+const workflow = flow<number>("approval")
+    .then(createOrder)
+    .waitForSignal("approval_wait", "manager_approval", { timeout: "24h" })
+    .then(fulfill)
+    .build();
+
+// If no signal arrives within 24 hours, the workflow fails
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use std::time::Duration;
+
+// Wait up to 24 hours for approval
+let workflow = WorkflowBuilder::new(ctx)
+    .then("create_order", |id: u64| async move {
+        Ok(json!({ "order_id": id, "status": "pending" }))
+    })
+    .wait_for_signal(
+        "approval_wait",
+        "manager_approval",
+        Some(Duration::from_secs(86400))  // 24 hours
+    )
+    .then("fulfill", |approval: serde_json::Value| async move {
+        Ok(format!("Fulfilled (approved by {})", approval["by"]))
+    })
+    .build()?;
+
+// If no signal arrives within 24 hours, the workflow fails
+```
+
+</TabItem>
+</Tabs>
+
+Timeouts are also durable. If the process crashes during a timeout period, the remaining time will be calculated correctly when the workflow is resumed.
+
+## Complete example
+
+Here's a full example showing the lifecycle of a workflow with signals:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from datetime import timedelta
+from sayiir import (
+    task, Flow, run_durable_workflow, send_signal,
+    resume_workflow, InMemoryBackend
+)
+
+@task
+def create_order(order_id: int) -> dict:
+    print(f"Creating order {order_id}")
+    return {"order_id": order_id, "status": "pending"}
+
+@task
+def fulfill(approval: dict) -> str:
+    approver = approval.get("by", "unknown")
+    print(f"Fulfilling order (approved by {approver})")
+    return f"Fulfilled order (approved by {approver})"
+
+workflow = (
+    Flow("approval")
+    .then(create_order)
+    .wait_for_signal("manager_approval", timeout=timedelta(hours=24))
+    .then(fulfill)
+    .build()
+)
+
+backend = InMemoryBackend()
+
+# Start workflow
+status = run_durable_workflow(workflow, "order-42", 42, backend=backend)
+print(f"Status: {status}")  # WaitingForSignal
+
+# External system sends approval
+send_signal("order-42", "manager_approval", {"by": "alice"}, backend=backend)
+
+# Resume workflow
+status = resume_workflow(workflow, "order-42", backend=backend)
+print(f"Final status: {status}")  # Completed
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import {
+    task, flow, runDurableWorkflow, sendSignal,
+    resumeWorkflow, InMemoryBackend
+} from "sayiir";
+
+const createOrder = task("create_order", (orderId: number) => {
+    console.log(`Creating order ${orderId}`);
+    return { order_id: orderId, status: "pending" };
+});
+
+const fulfill = task("fulfill", (approval: { by?: string }) => {
+    const approver = approval.by ?? "unknown";
+    console.log(`Fulfilling order (approved by ${approver})`);
+    return `Fulfilled order (approved by ${approver})`;
+});
+
+const workflow = flow<number>("approval")
+    .then(createOrder)
+    .waitForSignal<{ by: string }>("approval_wait", "manager_approval", {
+        timeout: "24h",
+    })
+    .then(fulfill)
+    .build();
+
+const backend = new InMemoryBackend();
+
+// Start workflow
+const status1 = runDurableWorkflow(workflow, "order-42", 42, backend);
+console.log(`Status: ${status1.status}`); // "awaiting_signal"
+
+// External system sends approval
+sendSignal("order-42", "manager_approval", { by: "alice" }, backend);
+
+// Resume workflow
+const status2 = resumeWorkflow(workflow, "order-42", backend);
+console.log(`Final status: ${status2.status}`); // "completed"
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_core::prelude::*;
+use sayiir_persistence::InMemoryBackend;
+use sayiir_runtime::CheckpointingRunner;
+use serde_json::json;
+use std::time::Duration;
+
+#[task]
+async fn create_order(id: u64) -> Result<serde_json::Value, BoxError> {
+    println!("Creating order {}", id);
+    Ok(json!({ "order_id": id, "status": "pending" }))
+}
+
+#[task]
+async fn fulfill(approval: serde_json::Value) -> Result<String, BoxError> {
+    let approver = approval["by"].as_str().unwrap_or("unknown");
+    println!("Fulfilling order (approved by {})", approver);
+    Ok(format!("Fulfilled order (approved by {})", approver))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), BoxError> {
+    let ctx = WorkflowContext::default();
+    let backend = InMemoryBackend::new();
+    let runner = CheckpointingRunner::new(backend.clone());
+
+    let workflow = WorkflowBuilder::new(ctx)
+        .with_registry()
+        .then_fn(create_order)
+        .wait_for_signal(
+            "approval_wait",
+            "manager_approval",
+            Some(Duration::from_secs(86400))
+        )
+        .then_fn(fulfill)
+        .build()?;
+
+    // Start workflow
+    let status = runner.run(&workflow, "order-42", 42u64).await?;
+    println!("Status: {:?}", status);  // WaitingForSignal
+
+    // External system sends approval
+    let payload = json!({"by": "alice"});
+    backend.send_event("order-42", "manager_approval", payload).await?;
+
+    // Resume workflow
+    let status = runner.resume(&workflow, "order-42").await?;
+    println!("Final status: {:?}", status);  // Completed
+
+    Ok(())
+}
+```
+
+</TabItem>
+</Tabs>

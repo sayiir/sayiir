@@ -1,18 +1,26 @@
 # Sayiir
 
-**Durable workflow engine that feel like writing normal code.** written in Rust, Python bindings — no DSL, worflows from your plain code.
+**Durable, fast workflow engine that feels like writing normal code.** Rust core with Python and Node.js bindings — no DSL, workflows from your plain code.
 
-[![CI](https://github.com/sayiir/sayiir/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sayiir/sayiir/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
+[![docs.rs](https://docs.rs/sayiir-core/badge.svg)](https://docs.rs/sayiir-core)
+[![crates.io downloads](https://img.shields.io/crates/d/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
+[![PyPI](https://img.shields.io/pypi/v/sayiir.svg)](https://pypi.org/project/sayiir/)
+[![PyPI downloads](https://static.pepy.tech/badge/sayiir/month)](https://pepy.tech/project/sayiir)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-edition_2024-93450a.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-93450a.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
 [![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
+[![npm](https://img.shields.io/npm/v/sayiir.svg)](https://www.npmjs.com/package/sayiir)
+[![Node.js](https://img.shields.io/badge/node-18%20%7C%2020%20%7C%2022-339933.svg)](https://nodejs.org)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
 
-> **Early Stage Project** — Sayiir is under active development. Core functionality works but APIs may change. We welcome contributors, maintainers, and sponsors.
+> Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
 
 ---
 
 ## Why Sayiir?
+
+**Fast by design.** Rust-native orchestration with zero-copy serialization (rkyv) and no replay overhead — resume from the last checkpoint, not from the beginning of your workflow history.
 
 **No deterministic replay.** Sayiir checkpoints after each task and resumes from the last checkpoint — your code can call any API, use any library, with zero determinism constraints.
 
@@ -34,66 +42,63 @@ result = run_workflow(workflow, 42)
 ```
 
 ```rust
-let workflow = WorkflowBuilder::new(ctx)
-    .then("fetch_user", |id: UserId| async move {
-        db.get_user(id).await
-    })
-    .then("send_email", |user: User| async move {
-        email_service.send_welcome(&user).await
-    })
-    .build();
+use sayiir_runtime::prelude::*;
 
-runner.run(&workflow, "welcome-user-123", user_id).await?;
+#[task(timeout = "30s", retries = 3)]
+async fn fetch_user(id: UserId) -> Result<User, BoxError> {
+    db.get_user(id).await
+}
+
+#[task]
+async fn send_email(user: User) -> Result<(), BoxError> {
+    email_service.send_welcome(&user).await
+}
+
+// Compose — workflow! auto-registers all tasks
+let workflow = workflow!("welcome", JsonCodec, TaskRegistry::new(),
+    fetch_user => send_email
+).unwrap();
+
+runner.run(workflow.workflow(), "welcome-user-123", user_id).await?;
+```
+
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+const fetchUser = task("fetch-user", (id: number) => {
+  return { id, name: "Alice" };
+});
+
+const sendEmail = task("send-email", (user: { id: number; name: string }) => {
+  return `Sent welcome to ${user.name}`;
+});
+
+const workflow = flow<number>("welcome")
+  .then(fetchUser)
+  .then(sendEmail)
+  .build();
+
+const result = await runWorkflow(workflow, 42);
 ```
 
 No annotations. No YAML. No separate worker processes. Just code.
 
 ---
 
-## Features
-
-### Core (Open Source)
-
-| Feature                        | Status |
-| ------------------------------ | ------ |
-| Durable task execution         | Stable |
-| Automatic checkpointing        | Stable |
-| Fork/join parallelism          | Stable |
-| Crash recovery and resume      | Stable |
-| Pause and resume workflows     | Stable |
-| Panic-safe execution           | Stable |
-| Pluggable storage backends     | Stable |
-| Durable timers/delays          | Stable |
-| Automatic retries with backoff | Stable |
-| Distributed worker pools       | Stable |
-| Claim-based task distribution  | Stable |
-| Zero-copy serialization (rkyv) | Stable |
-
-### Python Bindings
-
-| Feature | Status |
-|---|---|
-| `@task` decorator with metadata | Done |
-| Fluent `Flow` builder API | Done |
-| Durable execution with checkpointing | Done |
-| Resume, cancel, pause and unpause | Done |
-| Fork/join with multi-step branches | Done |
-| Durable delays (`.delay()`) | Done |
-| Pydantic integration (automatic validation) | Done |
-| Type stubs and PEP 561 compliance | Done |
-| Async task support | Done |
-
----
-
 ## Documentation
+
+**[docs.sayiir.dev](https://docs.sayiir.dev)** — Full documentation with guides, tutorials, and API reference.
 
 | Topic | Description |
 |---|---|
-| [Why Sayiir](docs/why-sayiir.md) | How Sayiir is different, competitor comparison |
-| [Quick Start: Python](docs/quick-start-python.md) | Installation, examples (durable, delays, retries, fork/join, pydantic) |
-| [Quick Start: Rust](docs/quick-start-rust.md) | Examples (checkpointing, distributed, delays, retries, fork/join, registry) |
-| [Architecture](docs/architecture.md) | Hexagonal design, pluggable backends/codecs, performance |
-| [Use Cases](docs/use-cases.md) | Fintech, e-commerce, SaaS, healthcare, data/ML, AI agents, devops |
+| [Python Quick Start](https://docs.sayiir.dev/getting-started/python/) | Install, define tasks, build durable workflows |
+| [Node.js Quick Start](https://docs.sayiir.dev/getting-started/nodejs/) | `task()`, type-safe `flow()` builder, Zod validation |
+| [Rust Quick Start](https://docs.sayiir.dev/getting-started/rust/) | `#[task]` macro, `workflow!` DSL, CheckpointingRunner |
+| [How Sayiir Works](https://docs.sayiir.dev/concepts/how-it-works/) | The 3 design decisions that make Sayiir different |
+| [Architecture](https://docs.sayiir.dev/concepts/architecture/) | Hexagonal design, pluggable backends/codecs |
+| [Guides](https://docs.sayiir.dev/guides/durable-workflows/) | Retries, signals, fork/join, distributed workers, Postgres |
+| [Tutorials](https://docs.sayiir.dev/tutorials/order-processing-python/) | End-to-end walkthroughs with runnable examples |
+| [API Reference](https://docs.sayiir.dev/reference/python-api/) | Python, Node.js, and Rust API docs |
 | [Roadmap](ROADMAP.md) | What's planned next |
 | [Contributing](CONTRIBUTING.md) | How to set up, build, test, and submit PRs |
 
@@ -103,13 +108,14 @@ No annotations. No YAML. No separate worker processes. Just code.
 
 | Component            | Status      |
 | -------------------- | ----------- |
-| sayiir-core          | Stable      |
-| sayiir-runtime       | Stable      |
-| sayiir-persistence   | Stable      |
-| Python bindings      | Stable      |
-| PostgreSQL backend   | In Progress |
+| sayiir-core          | ✅      |
+| sayiir-macros        | ✅      |
+| sayiir-runtime       | ✅      |
+| sayiir-persistence   | ✅      |
+| Python bindings      | ✅      |
+| PostgreSQL backend   | ✅ (requires PostgreSQL 13+) |
 | Cloudflare Workers   | In Progress |
-| Node.js bindings     | Planned     |
+| Node.js bindings     | ✅      |
 | Enterprise server    | Planned     |
 
 ---

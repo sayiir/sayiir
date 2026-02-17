@@ -56,6 +56,11 @@ enum BuilderTask {
         delay_id: String,
         duration_secs: f64,
     },
+    AwaitSignal {
+        signal_id: String,
+        signal_name: String,
+        timeout_secs: Option<f64>,
+    },
 }
 
 #[pymethods]
@@ -71,10 +76,34 @@ impl PyFlowBuilder {
     /// Add a sequential task.
     #[pyo3(signature = (task_id, metadata=None))]
     fn then(&mut self, task_id: String, metadata: Option<PyTaskMetadata>) {
+        tracing::trace!(workflow_id = %self.workflow_id, %task_id, "adding sequential task");
         self.tasks.push(BuilderTask::Sequential {
             task_id,
             metadata: metadata.map(Into::into).unwrap_or_default(),
         });
+    }
+
+    /// Wait for an external signal before continuing.
+    #[pyo3(signature = (signal_id, signal_name, timeout_secs=None))]
+    fn wait_for_signal(
+        &mut self,
+        signal_id: String,
+        signal_name: String,
+        timeout_secs: Option<f64>,
+    ) -> PyResult<()> {
+        if let Some(t) = timeout_secs
+            && (!t.is_finite() || t < 0.0)
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "timeout must be a finite non-negative number",
+            ));
+        }
+        self.tasks.push(BuilderTask::AwaitSignal {
+            signal_id,
+            signal_name,
+            timeout_secs,
+        });
+        Ok(())
     }
 
     /// Add a durable delay.
@@ -104,6 +133,12 @@ impl PyFlowBuilder {
                 "Fork must have at least one branch",
             ));
         }
+        tracing::trace!(
+            workflow_id = %self.workflow_id,
+            branch_count = branches.len(),
+            %join_id,
+            "adding fork"
+        );
         for (i, branch) in branches.iter().enumerate() {
             if branch.is_empty() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -130,9 +165,20 @@ impl PyFlowBuilder {
 
     /// Build the workflow.
     fn build(&self) -> PyResult<PyWorkflow> {
+        tracing::debug!(
+            workflow_id = %self.workflow_id,
+            task_count = self.tasks.len(),
+            "building workflow"
+        );
         let continuation = self.build_continuation()?;
         let serializable = continuation.to_serializable();
         let definition_hash = serializable.compute_definition_hash();
+
+        tracing::info!(
+            workflow_id = %self.workflow_id,
+            %definition_hash,
+            "workflow built"
+        );
 
         Ok(PyWorkflow {
             workflow_id: self.workflow_id.clone(),
@@ -168,6 +214,16 @@ impl PyFlowBuilder {
                 } => WorkflowContinuation::Delay {
                     id: delay_id.clone(),
                     duration: std::time::Duration::from_secs_f64(*duration_secs),
+                    next: current.map(Box::new),
+                },
+                BuilderTask::AwaitSignal {
+                    signal_id,
+                    signal_name,
+                    timeout_secs,
+                } => WorkflowContinuation::AwaitSignal {
+                    id: signal_id.clone(),
+                    signal_name: signal_name.clone(),
+                    timeout: timeout_secs.map(std::time::Duration::from_secs_f64),
                     next: current.map(Box::new),
                 },
                 BuilderTask::Fork {

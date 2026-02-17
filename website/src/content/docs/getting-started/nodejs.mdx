@@ -1,0 +1,153 @@
+---
+title: Node.js Quick Start
+description: Get started with Sayiir in Node.js and TypeScript in 5 minutes — type-safe durable workflows with zero learning curve. pnpm add, define tasks, run.
+---
+
+## Installation
+
+```bash
+pnpm add sayiir
+```
+
+## Simple workflow
+
+Define tasks with `task()` and chain them with `flow()`:
+
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+const fetchUser = task("fetch-user", (userId: number) => {
+  return { id: userId, name: "Alice" };
+});
+
+const sendEmail = task("send-email", (user: { id: number; name: string }) => {
+  return `Sent welcome to ${user.name}`;
+});
+
+const workflow = flow<number>("welcome")
+  .then(fetchUser)
+  .then(sendEmail)
+  .build();
+
+const result = await runWorkflow(workflow, 42);
+console.log(result); // "Sent welcome to Alice"
+```
+
+The generic `flow<number>` tells TypeScript the workflow input type. Each `.then()` infers the output type and passes it to the next step — full type safety with zero annotations.
+
+## Make it durable
+
+Use `runDurableWorkflow` to checkpoint after each task. If the process crashes, call `resumeWorkflow` to continue from the last checkpoint.
+
+```typescript
+import { task, flow, runDurableWorkflow, InMemoryBackend } from "sayiir";
+
+const processOrder = task("process-order", (orderId: number) => {
+  return { orderId, status: "processed" };
+}, { timeout: "30s" });
+
+const sendConfirmation = task("send-confirmation", (order: { orderId: number }) => {
+  return `Confirmed order ${order.orderId}`;
+});
+
+const workflow = flow<number>("order")
+  .then(processOrder)
+  .then(sendConfirmation)
+  .build();
+
+const backend = new InMemoryBackend();
+
+// Checkpoints after each task — resume from last checkpoint on crash
+const status = runDurableWorkflow(workflow, "order-123", 42, backend);
+
+if (status.status === "completed") {
+  console.log(status.output); // "Confirmed order 42"
+}
+```
+
+## With PostgreSQL
+
+Swap to `PostgresBackend` for production — everything else stays the same:
+
+```typescript
+import { PostgresBackend } from "sayiir";
+
+// Connects and runs migrations automatically
+const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
+const status = runDurableWorkflow(workflow, "order-123", 42, backend);
+```
+
+## Zod validation
+
+Sayiir integrates with Zod as an optional peer dependency for input and output validation:
+
+```typescript
+import { z } from "zod";
+import { task, flow, runWorkflow } from "sayiir";
+
+const OrderSchema = z.object({
+  orderId: z.string(),
+  amount: z.number().positive(),
+});
+
+const processOrder = task("process-order", (order) => {
+  // order is validated and typed as { orderId: string; amount: number }
+  return { status: "ok", message: `Processed $${order.amount}` };
+}, {
+  input: OrderSchema,
+});
+
+const workflow = flow("typed").then(processOrder).build();
+const result = await runWorkflow(workflow, { orderId: "1", amount: 99.99 });
+```
+
+Install Zod separately: `pnpm add zod`.
+
+## Inline lambdas
+
+You don't need `task()` for every step — pass inline functions directly:
+
+```typescript
+const workflow = flow<number>("quick")
+  .then("double", (x) => x * 2)
+  .then("format", (x) => `Result: ${x}`)
+  .build();
+
+const result = await runWorkflow(workflow, 21);
+// "Result: 42"
+```
+
+Use `task()` when you need metadata (retries, timeouts, tags) or want to reuse a task across workflows.
+
+## Parallel execution
+
+Use `.fork()` and `.join()` to run branches in parallel:
+
+```typescript
+import { task, flow, branch, runWorkflow } from "sayiir";
+
+const validatePayment = task("validate-payment", (order) => ({ payment: "valid" }));
+const checkInventory = task("check-inventory", (order) => ({ stock: "available" }));
+
+const workflow = flow<{ id: number }>("checkout")
+  .fork([
+    branch("payment", validatePayment),
+    branch("inventory", checkInventory),
+  ])
+  .join("finalize", ([payment, inventory]) => {
+    return { ...payment, ...inventory };
+  })
+  .build();
+
+const result = await runWorkflow(workflow, { id: 1 });
+```
+
+## Next steps
+
+- [Node.js API Reference](/reference/nodejs-api/) — Complete function and type reference
+- [Durable Workflows](/guides/durable-workflows/) — Lifecycle operations, delays
+- [Retries & Timeouts](/guides/retries-and-timeouts/) — Exponential backoff, timeout behavior
+- [Signals & Events](/guides/signals-and-events/) — Wait for external events
+- [Parallel Workflows](/guides/parallel-workflows/) — Fork/join parallelism
+- [Distributed Workers](/guides/distributed-workers/) — Scale out with multiple worker processes
+- [PostgreSQL in Production](/guides/postgres-production/) — Connection pooling, operational tips

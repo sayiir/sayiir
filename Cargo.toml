@@ -1,16 +1,27 @@
 [workspace]
-members = ["sayiir-core", "sayiir-persistence", "sayiir-runtime", "sayiir-macros", "sayiir-py"]
+members = [
+    "sayiir-core",
+    "sayiir-persistence",
+    "sayiir-postgres",
+    "sayiir-runtime",
+    "sayiir-macros",
+    "sayiir-py",
+    "sayiir-node",
+    "tests/integration",
+]
 resolver = "2"
+exclude = ["examples/hello-world-rs", "examples/background-jobs-rs"]
 
 [workspace.package]
-version = "0.1.0"
-authors = ["Sayiir Contributors"]
+version = "0.1.0-alpha.13"
+authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/sayiir/sayiir"
 homepage = "https://github.com/sayiir/sayiir"
 categories = ["asynchronous", "concurrency"]
 keywords = ["workflow", "orchestration", "durable", "async", "distributed"]
+documentation = "https://docs.rs/sayiir-core"
 
 [profile.release]
 opt-level = 3
@@ -18,14 +29,25 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
+sayiir-core = { version = "0.1.0-alpha.13", path = "sayiir-core", default-features = false }
+sayiir-persistence = { version = "0.1.0-alpha.13", path = "sayiir-persistence" }
+sayiir-runtime = { version = "0.1.0-alpha.13", path = "sayiir-runtime", default-features = false }
+sayiir-postgres = { version = "0.1.0-alpha.13", path = "sayiir-postgres" }
+sayiir-macros = { version = "0.1.0-alpha.13", path = "sayiir-macros" }
 tracing = "0.1"
 bytes = { version = "1", features = ["serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = [
+    "std",
+    "serde",
+    "clock",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rkyv = { version = "0.8", features = ["std", "bytecheck"] }
 bytecheck = "0.8"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt"] }
 sha2 = "0.10"
+strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 proptest = "1"

@@ -1,0 +1,109 @@
+---
+title: Comparison Overview
+description: Sayiir vs Temporal vs Airflow vs Prefect vs AWS Step Functions vs Elsa — comparison of durable workflow engines by performance, simplicity, infrastructure overhead, and learning curve
+---
+
+Sayiir takes a fundamentally different approach to durable workflows. This page compares the key architectural and operational differences between Sayiir and other popular workflow engines.
+
+## Quick Comparison
+
+| Feature | Sayiir | Temporal | Airflow | Prefect | Step Functions | Elsa |
+|---|---|---|---|---|---|---|
+| Architecture | Library (embedded) | Server cluster | Platform (server + workers) | Server + workers | Managed service (AWS) | Library + optional designer |
+| Recovery model | Checkpoint & resume | Deterministic replay | Step retry | Task retry | State machine transitions | Event-driven persistence |
+| Determinism required | No | Yes | No | No | No (JSON DSL) | No |
+| Infrastructure | None (library) | Multi-service + DB | Scheduler + webserver + workers + DB | Server + DB (or Cloud) | Fully managed (AWS) | ASP.NET Core + EF Core |
+| Rust core | Native | Migrating to | No | No | No | No |
+| Language SDKs | Rust, Python | Go, Java, TS, Python, .NET | Python | Python | Any (via Lambda) | C# (.NET) |
+| License | MIT | MIT | Apache 2.0 | Apache 2.0 | Proprietary | MIT |
+| Self-host complexity | Zero | High | Medium | Medium | N/A (managed only) | Low |
+| Visual designer | [Sayiir Server](/server/) (coming soon) | No | Web UI (monitoring) | Web UI (monitoring) | Console editor | Yes (drag & drop) |
+| Vendor lock-in | None | None | None | Optional (Cloud) | AWS | None |
+
+## Architecture
+
+**Sayiir** is a library you import as a dependency. Your application becomes the workflow engine. No separate services to deploy, no infrastructure to manage. Works in a single process, across a cluster, or on serverless.
+
+**Temporal** is a distributed system requiring multiple services: frontend (API gateway), history (workflow state), matching (task queue dispatch), and workers (execution). Add a database (PostgreSQL or Cassandra) and optionally Elasticsearch for visibility. This provides a mature, battle-tested platform but requires substantial operational overhead.
+
+**Airflow** is a platform with distinct components: scheduler (triggers DAGs), webserver (UI), workers (execute tasks), and a metadata database. Originally designed for batch data pipelines, it ships as a complete orchestration system with a rich UI and plugin ecosystem.
+
+## Recovery Model
+
+**Sayiir** checkpoints after each task and resumes from the last checkpoint. Your code runs once per execution. No replay, no determinism constraints. When a process crashes, Sayiir loads the last snapshot and continues from where it left off.
+
+**Temporal** uses deterministic replay: when a workflow resumes, it re-executes your code from the beginning and skips completed steps. This requires strict determinism — no system time, no random values, no direct I/O, no side effects outside SDK-approved APIs. Powerful but comes with significant learning curve and operational gotchas.
+
+**Airflow** retries individual task steps on failure. It doesn't replay entire workflows but can retry tasks according to configured retry policies. State is tracked in the metadata database, and the scheduler manages task lifecycle.
+
+## Determinism Requirements
+
+**Sayiir** has no determinism constraints. Your tasks can call any API, use any library, read the clock, generate random values. Write normal async code, add `@task` or `#[task]`, and you're done.
+
+**Temporal** requires deterministic workflow code. You must split logic into workflow code (deterministic, pure orchestration) and activities (side effects, I/O). This split is Temporal's most commonly cited friction point, especially for teams new to the paradigm.
+
+**Airflow** doesn't require determinism. Tasks are Python functions that can do anything. However, the DAG definition itself must be parseable by the scheduler, which introduces its own constraints (dynamic DAGs require workarounds).
+
+## Infrastructure Overhead
+
+**Sayiir** infrastructure: zero. Import the library, write your workflow, run it. Test with in-memory storage, deploy with PostgreSQL. No separate services, no orchestrator, no control plane.
+
+**Temporal** infrastructure: frontend service, history service, matching service, worker hosts, PostgreSQL/Cassandra, optionally Elasticsearch. Managed cloud offering (Temporal Cloud) removes this burden but adds cost and latency.
+
+**Airflow** infrastructure: scheduler, webserver, workers (can be distributed via Celery/Kubernetes), metadata database. Managed offerings (Cloud Composer, MWAA) available but environment spin-up times and costs can be high.
+
+## Rust Core
+
+**Sayiir** is built on Rust from day one. The runtime handles orchestration, checkpointing, serialization, and execution. Language bindings (Python, Rust) are thin wrappers around this shared core. Every language gets the same performance, correctness, and safety guarantees.
+
+**Temporal** is migrating to this model. Their newer Python, TypeScript, and .NET SDKs wrap a shared Rust core (`sdk-core`). Go and Java SDKs remain native implementations.
+
+**Airflow** is Python-based with no Rust components. Performance-sensitive paths rely on the underlying executor (Celery, Kubernetes, etc.).
+
+## Language Support
+
+**Sayiir** currently supports Rust and Python. More SDKs planned, all sharing the same Rust runtime.
+
+**Temporal** supports Go, Java, TypeScript, Python, and .NET. Mature SDKs with large communities.
+
+**Airflow** is Python-only. You can call external binaries or services from tasks, but DAG definition and orchestration are Python.
+
+## License
+
+**Sayiir** is MIT licensed. Fully open source, permissive, no restrictions.
+
+**Temporal** is MIT licensed for the server and SDK-core. Fully open source.
+
+**Airflow** is Apache 2.0. Fully open source.
+
+## Self-Host Complexity
+
+**Sayiir** has zero self-hosting complexity. It's a library. Import it, configure storage (even in-memory for dev), and run.
+
+**Temporal** requires running a multi-service cluster, managing a database, configuring networking, monitoring, and scaling each component. The Temporal team provides Helm charts and extensive documentation, but operational complexity is high.
+
+**Airflow** requires running the scheduler, webserver, and workers, plus a metadata database and optional message broker (Redis/RabbitMQ for Celery). Medium complexity, with managed offerings available.
+
+## When to Choose What
+
+**Choose Sayiir** if you want the simplest path to durable workflows. No infrastructure, no determinism constraints, no learning curve. Write async code, add `@task`, done. Code-first by design — [Sayiir Server](/server/) (coming soon) adds monitoring, scheduling, and observability when you need it. Best for teams that want durability without operational overhead.
+
+**Choose Temporal** if you need a mature, battle-tested platform with a large community, extensive documentation, and managed cloud offering. Best for teams with dedicated infrastructure resources and workflows that benefit from Temporal's strong consistency model.
+
+**Choose Airflow** if you're building batch-oriented data pipelines, need a rich UI for monitoring and manual interventions, or want to leverage the extensive plugin ecosystem. Best for data engineering teams with scheduled ETL workloads.
+
+**Choose Prefect** if you want a Python-native orchestration platform with a polished UI, managed cloud option, and decorator-based API. Best for data/ML teams who want more modern DX than Airflow but still need a platform with scheduling and observability built in.
+
+**Choose AWS Step Functions** if you're already on AWS and want a fully managed, zero-ops workflow service tightly integrated with Lambda, SQS, and other AWS services. Best for AWS-native teams who prioritize operational simplicity over portability.
+
+**Choose Elsa** if you're in the .NET ecosystem and need a visual workflow designer for business process automation. Best for teams building configurable business workflows where non-developers need to design or modify workflow logic.
+
+---
+
+### Detailed Comparisons
+
+- [Sayiir vs Temporal](/comparisons/vs-temporal/)
+- [Sayiir vs Airflow](/comparisons/vs-airflow/)
+- [Sayiir vs Prefect](/comparisons/vs-prefect/)
+- [Sayiir vs AWS Step Functions](/comparisons/vs-step-functions/)
+- [Sayiir vs Elsa](/comparisons/vs-elsa/)

@@ -1,0 +1,217 @@
+---
+title: Sayiir vs Airflow
+description: Sayiir vs Airflow — lightweight, fast alternative for durable workflows without the infrastructure overhead of schedulers, webservers, and DAG files
+---
+
+Apache Airflow is the most widely adopted workflow orchestration platform, especially in data engineering. It's mature, feature-rich, and has a massive ecosystem of integrations. Sayiir approaches the same problem from a different angle: embedded workflows in your application code, not a separate orchestration platform.
+
+This page explains when to use each, the key design differences, and how Sayiir's model fits event-driven workflows where Airflow was designed for batch schedules.
+
+## Design Philosophy: Batch-First vs Event-Driven
+
+**Airflow was designed for batch data pipelines.** The core mental model is: "Run this DAG every day at 3 AM, process yesterday's data, write results." DAGs are defined as Python files that Airflow parses on a schedule. The scheduler decides when to run tasks based on cron expressions, time intervals, and dependencies.
+
+**Sayiir is event-driven and code-first.** Workflows are defined programmatically at runtime, triggered by application events (user signups, API requests, messages from a queue). The workflow definition is normal async code that executes in response to events, not parsed files evaluated on a schedule.
+
+### What This Means in Practice
+
+In Airflow, you define a DAG in a Python file that the scheduler evaluates:
+
+```python
+# Airflow DAG file (parsed by scheduler)
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from datetime import datetime, timedelta
+
+def process_data():
+    # Process yesterday's data
+    pass
+
+def send_report():
+    # Email results
+    pass
+
+with DAG(
+    "daily_report",
+    schedule_interval="0 3 * * *",  # Every day at 3 AM
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+) as dag:
+    task1 = PythonOperator(task_id="process", python_callable=process_data)
+    task2 = PythonOperator(task_id="report", python_callable=send_report)
+    task1 >> task2
+```
+
+In Sayiir, you define a workflow as a function and call it when an event happens:
+
+```python
+# Sayiir workflow (triggered by application code)
+from sayiir import task, Flow, run_workflow
+
+@task
+async def process_data(user_id: int):
+    # Process this user's data
+    pass
+
+@task
+async def send_report(user_id: int):
+    # Email this user's results
+    pass
+
+workflow = Flow("user_report").then(process_data).then(send_report).build()
+
+# Trigger on user request
+@app.post("/generate-report")
+async def generate_report(user_id: int):
+    result = await run_workflow(workflow, user_id)
+    return {"status": "complete"}
+```
+
+Airflow schedules DAGs. Sayiir embeds workflows in your application.
+
+## Infrastructure: Platform vs Library
+
+**Airflow is a platform with four core components:**
+
+1. **Scheduler** — evaluates DAGs, schedules tasks, monitors execution
+2. **Webserver** — UI for monitoring, logs, manual triggers
+3. **Workers** — execute tasks (can be distributed via Celery or Kubernetes)
+4. **Metadata database** — stores DAG state, task history, configuration
+
+This is a complete orchestration system with a rich UI, extensive plugin ecosystem, and powerful scheduling capabilities. It's also substantial infrastructure to deploy and operate.
+
+**Sayiir is a library.** Import it, configure storage, run. No scheduler, no webserver, no separate workers. Your application *is* the workflow engine.
+
+This means:
+
+- **Zero infrastructure** — no services to deploy or manage
+- **Embedded in your app** — workflows run in the same process as your application
+- **Serverless-friendly** — works on Lambda, Cloud Run, anywhere
+- **Test with zero setup** — in-memory backend, no Docker needed
+
+Airflow's platform provides a mature UI, scheduling engine, and plugin ecosystem. Sayiir's library model provides simplicity and portability.
+
+## DAG Definition: Static Files vs Runtime Construction
+
+**Airflow parses DAG files on a schedule** (default: every 30 seconds). Your DAG definition must be importable and evaluable by the scheduler, which introduces constraints:
+
+- DAG files must be valid Python that the scheduler can import
+- Dynamic DAGs (generated at runtime) require workarounds (DAG serialization, DAG factories)
+- Changing a DAG requires deploying new files to the scheduler
+- DAG structure is evaluated at parse time, not run time
+
+**Sayiir constructs workflows programmatically at runtime.** Your workflow definition is normal code that builds a graph:
+
+```python
+# Sayiir: Build workflow dynamically
+workflow = Flow("process_user")
+
+if user.is_premium:
+    workflow = workflow.then(fetch_premium_data)
+else:
+    workflow = workflow.then(fetch_basic_data)
+
+workflow = workflow.then(send_email).build()
+```
+
+In Airflow, dynamic branching uses specialized operators (`BranchPythonOperator`, `TaskFlow API`). In Sayiir, it's just normal code.
+
+## Data Passing: XCom vs Direct
+
+**Airflow uses XCom** (cross-communication) to pass data between tasks. XCom stores serialized values in the metadata database. This has limitations:
+
+- **Size limits** — XCom is backed by the database (typically Postgres). Passing large data requires workarounds (store in S3, pass reference).
+- **Serialization** — data must be JSON-serializable by default (or custom XCom backends).
+- **Boilerplate** — tasks must explicitly push/pull from XCom or use the TaskFlow API.
+
+**Sayiir passes data directly** between tasks via checkpoints. After a task completes, its output is serialized and stored. The next task receives it as input. No size limits (other than your storage backend), no boilerplate.
+
+```python
+# Sayiir: Direct data passing
+@task
+async def fetch_data() -> dict:
+    return {"large": "data"}
+
+@task
+async def process_data(data: dict) -> str:
+    return f"Processed {len(data)} keys"
+
+workflow = Flow("pipeline").then(fetch_data).then(process_data).build()
+```
+
+Airflow's XCom is designed for metadata, not large data. Sayiir's checkpoints handle any serializable data.
+
+## Real-Time vs Batch
+
+**Airflow was built for scheduled batch jobs.** The scheduler evaluates DAGs on intervals and triggers runs based on cron expressions. You can trigger DAGs via API, but the core model is time-based scheduling.
+
+**Sayiir is event-driven.** Workflows run in response to application events (HTTP requests, queue messages, database changes). There's no scheduler evaluating files. Your code calls `run_workflow()` when something happens.
+
+If your workloads are:
+
+- **Batch-oriented** — process all yesterday's transactions, generate daily reports, hourly ETL → Airflow
+- **Event-driven** — user signup flow, order processing, webhook handlers → Sayiir
+
+Both can do both, but the design center is different.
+
+## UI and Observability
+
+**Airflow ships with a comprehensive web UI:**
+
+- DAG visualization
+- Task logs
+- Historical run data
+- Manual triggers and retries
+- Gantt charts, calendar view, code editor
+
+This is a massive value-add for teams that need operational visibility without building custom tooling.
+
+**Sayiir's open-source core has no built-in UI.** You can use your existing APM tooling, structured logging, and metrics exporters. [Sayiir Server](/server/) (coming soon) adds a web dashboard with real-time workflow monitoring, execution history, and observability — closing this gap for teams that need operational visibility without building custom tooling.
+
+For teams that already have observability infrastructure, Sayiir integrates naturally. For teams starting fresh, Sayiir Server will provide a comparable experience.
+
+## Plugin Ecosystem
+
+**Airflow has hundreds of integrations** (operators, sensors, hooks) for AWS, GCP, Azure, databases, data warehouses, orchestration tools. If you're building data pipelines, the Airflow ecosystem likely has a pre-built operator for your use case.
+
+**Sayiir is a general-purpose workflow library.** No pre-built integrations. You write tasks using normal async Python or Rust. This means flexibility but requires more integration code.
+
+For data engineering teams, Airflow's ecosystem is a major advantage. For application developers, Sayiir's simplicity is a better fit.
+
+## When to Choose Airflow
+
+Choose Airflow if you need:
+
+- **Batch-oriented data pipelines** — scheduled ETL, daily reports, hourly aggregations
+- **Rich web UI** — monitoring, logs, manual interventions, operational visibility
+- **Mature ecosystem** — hundreds of pre-built integrations for data tools
+- **Proven scheduler** — cron expressions, intervals, complex dependencies
+- **Large community** — extensive documentation, active Slack, many examples
+
+Airflow is the de facto standard for data orchestration. If you're building data pipelines, it's a safe choice.
+
+## When to Choose Sayiir
+
+Choose Sayiir if you need:
+
+- **Event-driven workflows** — user signups, order processing, webhook handlers
+- **Embedded in your application** — workflows are part of your service, not a separate platform
+- **No infrastructure** — library, not platform. Import and run.
+- **Real-time responsiveness** — workflows triggered by application events, not a scheduler
+- **Code-first** — workflows defined programmatically at runtime, not static DAG files
+
+Sayiir is the simplest path to durable workflows in application code, especially for event-driven use cases.
+
+## Summary
+
+Airflow is a mature, feature-rich orchestration platform with a massive ecosystem and comprehensive UI. It's the right choice for batch-oriented data pipelines, especially for data engineering teams.
+
+Sayiir is a library for embedding durable workflows in your application. It's the right choice for event-driven use cases where you want durability without deploying a separate orchestration platform.
+
+Both are open source (Airflow: Apache 2.0, Sayiir: MIT). Both solve workflow orchestration. The difference is design center: batch-first platform vs event-driven library.
+
+If your workloads are scheduled batch jobs, choose Airflow. If your workloads are event-driven application logic, choose Sayiir.
+
+---
+
+See also: [Sayiir vs Temporal](/comparisons/vs-temporal/) and [Comparison Overview](/comparisons/overview/)

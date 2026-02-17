@@ -128,6 +128,30 @@ def pause_workflow(
     engine.pause(instance_id, reason, paused_by)
 
 
+def send_signal(
+    instance_id: str,
+    signal_name: str,
+    payload: Any,
+    backend: Any,
+) -> None:
+    """Send an external signal (event) to a workflow instance.
+
+    The payload is buffered per (instance_id, signal_name) in FIFO order.
+    The next time the workflow resumes and reaches the matching
+    ``wait_for_signal`` node, it will consume the oldest buffered event.
+
+    Args:
+        instance_id: The instance ID of the target workflow
+        signal_name: The signal name to send to
+        payload: The payload data (will be serialized)
+        backend: Persistence backend (must be the same one used for run)
+    """
+    from ._sayiir import PyDurableEngine
+
+    engine = PyDurableEngine(backend)
+    engine.send_signal(instance_id, signal_name, payload)
+
+
 def unpause_workflow(
     instance_id: str,
     backend: Any,

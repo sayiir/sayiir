@@ -1,0 +1,227 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi-linux:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sayiir-python
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13
+          manylinux: auto
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: sayiir-python/dist
+
+  pypi-macos:
+    name: macOS (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sayiir-python
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: sayiir-python/dist
+
+  pypi-windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sayiir-python
+          target: x64
+          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: sayiir-python/dist
+
+  pypi-sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sayiir-python
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: sayiir-python/dist
+
+  pypi-publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [pypi-linux, pypi-macos, pypi-windows, pypi-sdist]
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sayiir
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  crates-publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-workspaces
+        run: cargo install cargo-workspaces
+
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo ws publish --from-git --yes --token "$CARGO_REGISTRY_TOKEN"
+
+  node-build:
+    name: Node.js (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux ──
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            lib: libsayiir_node.so
+
+          - platform: linux-arm64-gnu
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            lib: libsayiir_node.so
+            cross: true
+
+          - platform: darwin-x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            lib: libsayiir_node.dylib
+
+          - platform: darwin-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            lib: libsayiir_node.dylib
+
+          - platform: win32-x64-msvc
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            lib: sayiir_node.dll
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      # Build the native addon. The cdylib output is a shared library
+      # (.so/.dylib/.dll) that Node.js loads via require().
+      - name: Build native addon
+        run: cargo build -p sayiir-node --release --target ${{ matrix.target }}
+
+      # Rename the platform-specific library to the universal name
+      # that the npm package expects.
+      - name: Rename to sayiir-node.node
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/${{ matrix.lib }} sayiir-node.node
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.platform }}
+          path: sayiir-node.node
+          if-no-files-found: error
+
+  node-publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: node-build
+    environment:
+      name: npm
+      url: https://www.npmjs.com/org/sayiir
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # Node 24+ ships npm >= 11.5.1 which supports OIDC trusted publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          path: artifacts/
+
+      - name: Publish npm packages
+        uses: ./.github/actions/publish-npm-napi
+        with:
+          package-dir: sayiir-nodejs

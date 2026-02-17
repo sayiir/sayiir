@@ -8,40 +8,62 @@ This document outlines where Sayiir is, where it's going, and why — informed b
 
 ### What Works Today
 
-**Rust Core (Stable)**
+**Rust Core**
 
 | Feature | Status |
 |---|---|
-| Durable task execution with automatic checkpointing | Stable |
-| Crash recovery and deterministic resume | Stable |
-| Fork/join parallelism with heterogeneous branch outputs | Stable |
-| Distributed worker pools with claim-based task distribution | Stable |
-| Pluggable storage backends (`PersistentBackend` trait) | Stable |
-| Pluggable codecs (rkyv zero-copy, JSON, custom) | Stable |
-| Task registry for serializable workflows | Stable |
-| Workflow serialization with definition hash validation | Stable |
-| Durable delay/timer primitives (`sleep` between steps) | Stable |
-| Workflow pause and resume | Stable |
-| Panic-safe execution | Stable |
-| `WorkflowContext` with task-local metadata access | Stable |
-| InMemory backend (development/testing) | Stable |
+| Durable task execution with automatic checkpointing | ✅ |
+| Crash recovery and deterministic resume | ✅ |
+| Fork/join parallelism with heterogeneous branch outputs | ✅ |
+| Distributed worker pools with claim-based task distribution | ✅ |
+| Pluggable storage backends (`PersistentBackend` trait) | ✅ |
+| Pluggable codecs (rkyv zero-copy, JSON, custom) | ✅ |
+| Task registry for serializable workflows | ✅ |
+| Workflow serialization with definition hash validation | ✅ |
+| Durable delay/timer primitives (`sleep` between steps) | ✅ |
+| Signals / external events (`wait_for_signal`, `send_event`) | ✅ |
+| Workflow pause and resume | ✅ |
+| Panic-safe execution | ✅ |
+| `WorkflowContext` with task-local metadata access | ✅ |
+| InMemory backend (development/testing) | ✅ |
 
-**Python Bindings (Stable)**
+**Python Bindings**
 
 | Feature | Status |
 |---|---|
-| `@task` decorator with metadata (timeout, tags, description) | Done |
-| Fluent `Flow` builder API (`.then()`, `.fork()`, `.branch()`, `.join()`) | Done |
-| Simple execution (`run_workflow`) | Done |
-| Durable execution with checkpointing (`run_durable_workflow`) | Done |
-| Resume, cancel, pause and unpause from Python | Done |
-| Fork/join with multi-step branches | Done |
-| Pydantic integration (automatic validation/serialization) | Done |
-| Type stubs (`.pyi`) and PEP 561 compliance | Done |
-| Async task support (via `asyncio.run()`) | Done |
-| Durable delays (`.delay()` with `timedelta` support) | Done |
-| `InMemoryBackend` exposed to Python | Done |
-| `WorkflowStatus` with error/cancellation/pause details | Done |
+| `@task` decorator with metadata (timeout, tags, description) | ✅ |
+| Fluent `Flow` builder API (`.then()`, `.fork()`, `.branch()`, `.join()`) | ✅ |
+| Simple execution (`run_workflow`) | ✅ |
+| Durable execution with checkpointing (`run_durable_workflow`) | ✅ |
+| Resume, cancel, pause and unpause from Python | ✅ |
+| Fork/join with multi-step branches | ✅ |
+| Pydantic integration (automatic validation/serialization) | ✅ |
+| Type stubs (`.pyi`) and PEP 561 compliance | ✅ |
+| Async task support (event-loop-safe threading bridge) | ✅ |
+| Durable delays (`.delay()` with `timedelta` support) | ✅ |
+| Signals / external events (`.wait_for_signal()`, `send_signal()`) | ✅ |
+| `InMemoryBackend` and `PostgresBackend` exposed to Python | ✅ |
+| `WorkflowStatus` with error/cancellation/pause details | ✅ |
+| Distributed worker (`Worker` / `WorkerHandle`) via PyO3 bridge | ✅ |
+
+**Node.js / TypeScript Bindings**
+
+| Feature | Status |
+|---|---|
+| `task()` wrapper with metadata (timeout, retries, tags, description) | ✅ |
+| Type-safe generic `Flow<TInput, TLast>` builder (`.then()`, `.fork()`, `.join()`) | ✅ |
+| Simple execution (`runWorkflow`) | ✅ |
+| Durable execution with checkpointing (`runDurableWorkflow`) | ✅ |
+| Resume, cancel, pause and unpause from Node.js | ✅ |
+| Fork/join with typed tuple branch outputs | ✅ |
+| Zod integration (optional peer dependency for validation) | ✅ |
+| Durable delays (`.delay()` with `ms`-style duration strings) | ✅ |
+| Signals / external events (`.waitForSignal()`, `sendSignal()`) | ✅ |
+| `InMemoryBackend` and `PostgresBackend` exposed to Node.js | ✅ |
+| `WorkflowStatus<TOut>` discriminated union with narrowing | ✅ |
+| `WorkflowError`, `TaskError`, `BackendError` error classes | ✅ |
+| Distributed worker (`Worker` / `WorkerHandle`) via NAPI-RS bridge | ✅ |
+| CI pipeline (Node 18/20/22) | ✅ |
 
 ---
 
@@ -61,23 +83,24 @@ The Python SDK is the first language binding and the template for all future bin
 **Documentation & Examples**
 
 - [ ] Python package README (PyPI landing page)
-- [ ] Quickstart guide with real-world examples
-- [ ] API reference with comprehensive docstrings
+- [x] Quickstart guide with real-world examples
+- [x] API reference with comprehensive docstrings
 - [ ] Error handling guide (what exceptions, when, why)
 - [ ] Fork/join patterns cookbook
 - [ ] Pydantic integration guide
 
 **API Refinements**
 
-- [ ] Native async/await execution path (no `asyncio.run()` workaround — works in Jupyter, existing event loops)
+- [x] Native async execution (event-loop-safe threading bridge — works in Jupyter, existing event loops)
+- [x] Distributed worker (`Worker` / `WorkerHandle`) via PyO3 bridge
 - [ ] Better error messages for common mistakes (missing `@task`, wrong input types)
 - [ ] Workflow composition (reuse sub-flows as steps in larger flows)
 
 **Testing & Quality**
 
 - [ ] Expand test coverage for edge cases (timeout enforcement, concurrent instances)
-- [ ] CI pipeline for Python bindings (maturin build + pytest across Python 3.10-3.13)
-- [ ] Publish to PyPI via GitHub Actions
+- [x] CI pipeline for Python bindings (maturin build + pytest across Python 3.10-3.13)
+- [x] Publish to PyPI via GitHub Actions
 
 ---
 
@@ -85,29 +108,36 @@ The Python SDK is the first language binding and the template for all future bin
 
 The features every team needs before they'll trust Sayiir with real workloads.
 
-### PostgreSQL Backend
+### PostgreSQL Backend ✅
 
-The #1 blocker for production adoption. Nobody ships with InMemory.
+Production-grade persistence backend. Requires PostgreSQL 13+.
 
-- [ ] Schema design (workflows, snapshots, claims, heartbeats)
-- [ ] Connection pooling (deadpool-postgres or sqlx)
-- [ ] Migration tooling (embedded migrations via refinery or sqlx)
-- [ ] Expose to Python bindings
+- [x] Schema design (workflows, snapshots, claims, signals, history)
+- [x] Connection pooling via sqlx
+- [x] Embedded migrations (sqlx::migrate)
+- [x] ACID transactions for composite signal operations (check_and_cancel, check_and_pause, unpause)
+- [x] Snapshot history (append-only audit log)
+- [x] Observability columns (status, position_kind, delay_wake_at — queryable without deserializing blobs)
+- [x] Distributed task claiming with TTL, expired-claim replacement, and soft worker bias
+- [x] Codec-generic (JsonCodec for debuggability, rkyv for performance)
+- [x] Minimum version enforcement (rejects PostgreSQL < 13 at init)
+- [x] Integration tests via testcontainers (Postgres 13 and 17)
+- [x] Expose to Python bindings
 
-### Retry Policies
+### Retry Policies ✅
 
 Every competitor has this. Table stakes.
 
-- [ ] Configurable per-task: max attempts, initial delay, backoff multiplier, max delay
-- [ ] Exponential backoff with jitter
-- [ ] Retry-aware checkpointing (don't lose retry count on crash)
-- [ ] `RetryPolicy` already defined in Python — wire it through Rust runtime
+- [x] Configurable per-task: max attempts, initial delay, backoff multiplier, max delay
+- [x] Exponential backoff with jitter
+- [x] Retry-aware checkpointing (don't lose retry count on crash)
+- [x] `RetryPolicy` wired through Rust runtime, exposed to Python and Node.js
 
-### Task Timeouts
+### Task Timeouts ✅
 
-- [ ] Per-task timeout enforcement in runtime
-- [ ] Timeout cancellation with clear error propagation
-- [ ] `timeout_secs` already in `@task` metadata — wire it through
+- [x] Per-task timeout enforcement in runtime
+- [x] Timeout cancellation with clear error propagation
+- [x] `timeout_secs` / `timeout` wired through in Python, Node.js, and Rust
 
 ---
 
@@ -119,7 +149,7 @@ The features that unlock the remaining 80% of use cases: anything that waits for
 
 Pause a workflow for minutes, hours, or days — surviving process restarts.
 
-- [x] `delay(duration)` as a first-class workflow primitive (Rust + Python)
+- [x] `delay(duration)` as a first-class workflow primitive (Rust + Python + Node.js)
 - [x] Timer persisted to backend, not held in memory
 - [x] Resume after timer expiry on any worker
 
@@ -131,15 +161,19 @@ Pause a running workflow at the next task boundary. Unpause and resume when read
 - [x] `unpause()` transitions back to in-progress for re-execution
 - [x] Paused state preserves execution position and completed tasks for exact resume
 - [x] Pause checks at all boundaries: before/after tasks, delays, and forks
-- [x] Available from Rust (`CheckpointingRunner`, `PooledWorker`) and Python (`pause_workflow`, `unpause_workflow`)
+- [x] Available from Rust (`CheckpointingRunner`, `PooledWorker`), Python (`pause_workflow`, `unpause_workflow`), and Node.js (`pauseWorkflow`, `unpauseWorkflow`)
 
-### Signals / External Events
+### Signals / External Events ✅
 
 Pause a workflow until an external event arrives (payment confirmed, human approved, webhook received).
 
-- [ ] `wait_for_signal(signal_name, timeout)` primitive
-- [ ] `send_signal(instance_id, signal_name, payload)` API
-- [ ] Enables: human-in-the-loop, payment callbacks, approval chains, webhook-driven flows
+- [x] `wait_for_signal(signal_name, timeout)` primitive (Rust + Python + Node.js)
+- [x] `send_signal(instance_id, signal_name, payload)` API (Rust + Python + Node.js)
+- [x] Durable buffered event queue (FIFO, per-instance, per-signal-name)
+- [x] Buffered signals consumed immediately if workflow hasn't parked yet
+- [x] Optional timeout with automatic wake-up
+- [x] PostgreSQL backend support (atomic consume with `FOR UPDATE SKIP LOCKED`)
+- [x] Enables: human-in-the-loop, payment callbacks, approval chains, webhook-driven flows
 
 ### Child Workflows
 
@@ -153,14 +187,33 @@ Compose workflows from other workflows.
 
 ## Phase 3 — Ecosystem
 
-### TypeScript / Node.js Bindings
+### TypeScript / Node.js Bindings ✅
 
 Python + TypeScript covers ~90% of the developer market for this space.
 
-- [ ] NAPI-RS bindings (same architecture as Python: thin layer, Rust orchestrates)
-- [ ] Promise-based API
-- [ ] TypeScript type definitions
-- [ ] npm package
+- [x] NAPI-RS bindings (same architecture as Python: thin layer, Rust orchestrates)
+- [x] Type-safe generic `Flow<TInput, TLast>` builder with full inference
+- [x] `task()` wrapper with optional Zod validation (input/output schemas)
+- [x] Simple execution (`runWorkflow`) and durable execution (`runDurableWorkflow`)
+- [x] Resume, cancel, pause, unpause, sendSignal
+- [x] Fork/join parallelism with typed tuple outputs
+- [x] Durable delays (`.delay()`) and signals (`.waitForSignal()`)
+- [x] `InMemoryBackend` and `PostgresBackend`
+- [x] `WorkflowStatus<TOut>` discriminated union with TypeScript narrowing
+- [x] Distributed worker (`Worker` / `WorkerHandle`) via NAPI-RS bridge
+- [x] CI pipeline (Node 18/20/22)
+
+### Distributed Workers (All Bindings) ✅
+
+Scale out with multiple worker processes polling a shared backend.
+
+- [x] `PooledWorker` with claim-based task distribution (Rust)
+- [x] `Worker` / `WorkerHandle` exposed to Python via PyO3
+- [x] `Worker` / `WorkerHandle` exposed to Node.js via NAPI-RS
+- [x] Lifecycle operations from worker handle (cancel, pause, unpause, send signal)
+- [x] Configurable poll interval and claim TTL
+- [x] Soft worker affinity (prefer different worker on retry)
+- [x] Graceful shutdown with in-flight task completion
 
 ### Observability
 
@@ -289,7 +342,7 @@ Want to help? Check out issues labeled `good first issue` or join our [Discord](
 
 Areas where contributions are especially welcome:
 
-- Storage backend implementations (PostgreSQL, SQLite, Redis)
-- Language binding prototypes (TypeScript, Go)
+- Storage backend implementations (SQLite, Redis)
+- Language binding prototypes (Go, Java)
 - Documentation, examples, and tutorials
 - Testing and benchmarking

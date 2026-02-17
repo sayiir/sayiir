@@ -1,0 +1,22 @@
+{
+  "name": "@sayiir/node-darwin-arm64",
+  "version": "0.1.0-alpha.13",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "sayiir-node.node",
+  "files": [
+    "sayiir-node.node"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sayiir/sayiir"
+  }
+}

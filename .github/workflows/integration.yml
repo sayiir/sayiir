@@ -1,0 +1,110 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-py/**'
+              - 'sayiir-python/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            node:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-node/**'
+              - 'sayiir-nodejs/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+
+  python-integration:
+    name: Python Integration
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Python wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: sayiir-python
+          args: --out dist
+
+      - name: Install wheel and test deps
+        run: uv pip install --system sayiir-python/dist/*.whl pytest "testcontainers[postgres]"
+
+      - name: Run integration tests
+        run: pytest sayiir-python/tests/test_worker_integration.py -v
+
+  node-integration:
+    name: Node.js Integration
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build native addon
+        run: cargo build -p sayiir-node --release
+
+      - name: Copy native addon
+        run: |
+          mkdir -p sayiir-nodejs/native
+          cp target/release/libsayiir_node.so sayiir-nodejs/native/sayiir-node.node
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        working-directory: sayiir-nodejs
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Run integration tests
+        working-directory: sayiir-nodejs
+        run: pnpm vitest run --config vitest.integration.config.mts

@@ -409,3 +409,291 @@ class TestValidation:
     def test_fork_with_no_branches_raises(self):
         with pytest.raises(ValueError, match="at least one branch"):
             Flow("bad").fork().join(join_branches).build()
+
+
+# ── Async task tests ────────────────────────────────────────────
+
+
+@task
+async def async_double(x):
+    return x * 2
+
+
+@task
+async def async_add_one(x):
+    return x + 1
+
+
+@task
+async def async_failing(_x):
+    raise ValueError("async failure")
+
+
+class TestAsyncSimpleEngine:
+    def test_single_async_task(self):
+        wf = Flow("async-single").then(async_double).build()
+        assert run_workflow(wf, 21) == 42
+
+    def test_chained_async_tasks(self):
+        wf = Flow("async-chain").then(async_double).then(async_add_one).build()
+        assert run_workflow(wf, 10) == 21
+
+    def test_mixed_sync_and_async(self):
+        wf = Flow("mixed").then(double).then(async_add_one).build()
+        assert run_workflow(wf, 10) == 21
+
+    def test_async_fork_join(self):
+        @task
+        async def async_branch_a(x):
+            return x + 10
+
+        @task
+        async def async_branch_b(x):
+            return x + 20
+
+        @task
+        async def async_sum_join(data):
+            return data["async_branch_a"] + data["async_branch_b"]
+
+        wf = (
+            Flow("async-fork")
+            .fork()
+            .branch(async_branch_a)
+            .branch(async_branch_b)
+            .join(async_sum_join)
+            .build()
+        )
+        assert run_workflow(wf, 5) == 40  # (5+10) + (5+20)
+
+    def test_async_task_error_propagates(self):
+        wf = Flow("async-fail").then(async_failing).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+
+
+class TestInlineTasks:
+    """Tests for inline (non-@task) callables in Flow."""
+
+    def test_single_lambda(self):
+        wf = Flow("lambda-single").then(lambda x: x * 2).build()
+        assert run_workflow(wf, 21) == 42
+
+    def test_chained_lambdas_no_collision(self):
+        wf = Flow("lambda-chain").then(lambda x: x * 2).then(lambda x: x + 1).build()
+        assert run_workflow(wf, 10) == 21  # (10 * 2) + 1
+
+    def test_mixed_task_and_lambda(self):
+        wf = (
+            Flow("mixed-lambda")
+            .then(double)
+            .then(lambda x: x + 1)
+            .then(to_string)
+            .build()
+        )
+        assert run_workflow(wf, 5) == "11"  # str((5 * 2) + 1)
+
+    def test_plain_undecorated_function(self):
+        def triple(x):
+            return x * 3
+
+        wf = Flow("plain-func").then(triple).build()
+        assert run_workflow(wf, 7) == 21
+
+    def test_explicit_name(self):
+        wf = Flow("named-lambda").then(lambda x: x * 2, name="my_double").build()
+        assert run_workflow(wf, 5) == 10
+        assert "my_double" in wf._task_registry
+
+    def test_lambda_in_fork_branches(self):
+        @task
+        def sum_join_inline(data):
+            return data["lambda_0"] + data["lambda_1"]
+
+        wf = (
+            Flow("lambda-fork")
+            .fork()
+            .branch(lambda x: x + 10)
+            .branch(lambda x: x + 20)
+            .join(sum_join_inline)
+            .build()
+        )
+        assert run_workflow(wf, 5) == 40  # (5+10) + (5+20)
+
+    def test_lambda_error_propagation(self):
+        wf = Flow("lambda-fail").then(lambda _: 1 / 0).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+
+
+class TestAsyncDurableEngine:
+    def test_async_single_task(self):
+        wf = Flow("async-durable").then(async_double).build()
+        status = run_durable_workflow(wf, "async-inst-1", 21)
+        assert status.is_completed()
+        assert status.output == 42
+
+    def test_async_chained_tasks(self):
+        wf = Flow("async-durable-chain").then(async_double).then(async_add_one).build()
+        status = run_durable_workflow(wf, "async-inst-2", 10)
+        assert status.is_completed()
+        assert status.output == 21
+
+    def test_async_failed_status(self):
+        wf = Flow("async-durable-fail").then(async_failing).build()
+        status = run_durable_workflow(wf, "async-inst-fail", 0)
+        assert status.is_failed()
+        assert "async failure" in status.error
+
+    def test_mixed_sync_async_durable(self):
+        wf = Flow("mixed-durable").then(async_double).then(add_one).build()
+        status = run_durable_workflow(wf, "mixed-inst", 10)
+        assert status.is_completed()
+        assert status.output == 21
+
+
+# ── Error propagation & stack trace tests ─────────────────────
+
+
+def _helper_that_raises():
+    """Helper with a distinct name so we can check it in the traceback."""
+    raise ValueError("deep error from helper")
+
+
+@task
+def task_calls_helper(_x):
+    _helper_that_raises()
+
+
+@task
+def task_raises_type_error(_x):
+    raise TypeError("wrong type provided")
+
+
+@task
+def task_raises_key_error(_x):
+    d = {}
+    return d["missing"]
+
+
+@task
+def task_raises_with_message(_x):
+    raise RuntimeError("custom runtime error with context: abc-123")
+
+
+class TestErrorPropagationSync:
+    """Error propagation through the sync (non-durable) engine."""
+
+    def test_traceback_preserved_in_sync_engine(self):
+        """Sync engine preserves Python traceback across Rust FFI."""
+        wf = Flow("tb-sync").then(task_calls_helper).build()
+        with pytest.raises(TaskError, match="deep error from helper") as exc_info:
+            run_workflow(wf, 0)
+        # The traceback text should be embedded in the error message
+        msg = str(exc_info.value)
+        assert "_helper_that_raises" in msg
+
+    def test_type_error_preserved(self):
+        wf = Flow("type-err").then(task_raises_type_error).build()
+        with pytest.raises(TaskError, match="wrong type provided"):
+            run_workflow(wf, 0)
+
+    def test_key_error_preserved(self):
+        wf = Flow("key-err").then(task_raises_key_error).build()
+        with pytest.raises(TaskError, match="missing"):
+            run_workflow(wf, 0)
+
+    def test_error_in_second_task(self):
+        """Error in the second task of a chain still propagates."""
+        wf = Flow("mid-fail").then(double).then(failing_task).build()
+        with pytest.raises(TaskError, match="intentional failure"):
+            run_workflow(wf, 5)
+
+    def test_error_in_last_task(self):
+        wf = Flow("last-fail").then(double).then(add_one).then(failing_task).build()
+        with pytest.raises(TaskError, match="intentional failure"):
+            run_workflow(wf, 1)
+
+    def test_error_message_content_preserved(self):
+        """Full error message with specific content survives FFI round-trip."""
+        wf = Flow("msg-content").then(task_raises_with_message).build()
+        with pytest.raises(TaskError, match="abc-123"):
+            run_workflow(wf, 0)
+
+
+class TestErrorPropagationDurable:
+    """Error propagation through the durable engine."""
+
+    def test_error_message_preserved_in_failed_status(self):
+        wf = Flow("dur-err").then(task_raises_with_message).build()
+        status = run_durable_workflow(wf, "dur-err-1", 0)
+        assert status.is_failed()
+        assert "custom runtime error with context: abc-123" in status.error
+
+    def test_type_error_in_durable(self):
+        wf = Flow("dur-type").then(task_raises_type_error).build()
+        status = run_durable_workflow(wf, "dur-type-1", 0)
+        assert status.is_failed()
+        assert "wrong type provided" in status.error
+
+    def test_key_error_in_durable(self):
+        wf = Flow("dur-key").then(task_raises_key_error).build()
+        status = run_durable_workflow(wf, "dur-key-1", 0)
+        assert status.is_failed()
+        assert "missing" in status.error
+
+    def test_error_in_middle_of_chain_durable(self):
+        wf = Flow("dur-mid").then(double).then(failing_task).then(add_one).build()
+        status = run_durable_workflow(wf, "dur-mid-1", 5)
+        assert status.is_failed()
+        assert "intentional failure" in status.error
+
+    def test_failed_status_has_no_output(self):
+        wf = Flow("dur-no-out").then(task_calls_helper).build()
+        status = run_durable_workflow(wf, "dur-no-out-1", 0)
+        assert status.is_failed()
+        assert status.output is None
+
+    def test_resume_preserves_failed_error(self):
+        """Resuming a failed workflow still shows the original error."""
+        backend = InMemoryBackend()
+        wf = Flow("dur-resume-err").then(failing_task).build()
+        status = run_durable_workflow(wf, "dur-resume-err-1", 0, backend=backend)
+        assert status.is_failed()
+        original_error = status.error
+
+        status2 = resume_workflow(wf, "dur-resume-err-1", backend)
+        assert status2.is_failed()
+        assert status2.error == original_error
+
+
+class TestErrorTypes:
+    """Verify the correct exception subclass is raised for each error source."""
+
+    def test_task_failure_raises_task_error_not_workflow_error_only(self):
+        """TaskError is specifically a TaskError, not just WorkflowError."""
+        wf = Flow("specific-type").then(failing_task).build()
+        with pytest.raises(TaskError):
+            run_workflow(wf, 0)
+        # Also verify it IS a WorkflowError (inheritance)
+        with pytest.raises(WorkflowError):
+            run_workflow(wf, 0)
+
+    def test_backend_not_found_raises_backend_error(self):
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        with pytest.raises(BackendError):
+            engine.cancel("does-not-exist")
+
+    def test_backend_error_not_task_error(self):
+        """BackendError is not a TaskError — they're siblings."""
+        backend = InMemoryBackend()
+        engine = DurableEngine(backend)
+        with pytest.raises(BackendError):
+            engine.cancel("does-not-exist")
+        # Should NOT match TaskError
+        try:
+            engine.cancel("does-not-exist-2")
+        except TaskError:
+            pytest.fail("BackendError was caught as TaskError — wrong hierarchy")
+        except Exception:
+            pass  # expected: BackendError, not TaskError

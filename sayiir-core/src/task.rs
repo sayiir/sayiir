@@ -38,6 +38,9 @@ pub struct RetryPolicy {
     pub initial_delay: Duration,
     /// Multiplier applied to delay after each retry (for exponential backoff).
     pub backoff_multiplier: f32,
+    /// Maximum delay between retries (caps exponential growth).
+    #[serde(default)]
+    pub max_delay: Option<Duration>,
 }
 
 pub use crate::branch_results::NamedBranchResults;

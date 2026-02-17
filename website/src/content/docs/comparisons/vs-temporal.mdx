@@ -1,0 +1,204 @@
+---
+title: Sayiir vs Temporal
+description: Sayiir vs Temporal — simpler, faster alternative with no deterministic replay, no infrastructure, and zero learning curve
+---
+
+Temporal is the most widely adopted durable workflow engine. It's battle-tested, well-documented, and backed by substantial funding and a large community. Sayiir takes a fundamentally different approach to the same problem: durable execution of long-running workflows.
+
+This page explains the key architectural differences, when to choose each, and how Sayiir's design decisions simplify workflow development at the cost of some of Temporal's enterprise features.
+
+## Recovery Model: Checkpoint vs Replay
+
+This is the most fundamental difference.
+
+**Temporal uses deterministic replay.** When a workflow resumes after a crash or restart, Temporal re-executes your workflow code from the beginning. Completed activities are skipped (their results are retrieved from history), but the orchestration logic runs again. This requires your workflow code to be strictly deterministic: no system time, no random values, no direct I/O, no side effects outside Temporal's SDK.
+
+**Sayiir uses checkpoint-based recovery.** After each task completes, Sayiir saves the workflow state to persistent storage. When a workflow resumes, it loads the last checkpoint and continues from where it left off. Your code runs once per execution. No replay, no determinism constraints.
+
+### What This Means in Practice
+
+In Temporal, this code is **invalid**:
+
+```python
+# Temporal workflow code (INVALID)
+@workflow.defn
+class MyWorkflow:
+    @workflow.run
+    async def run(self):
+        # These break determinism
+        now = time.time()  # Non-deterministic
+        random_id = uuid.uuid4()  # Non-deterministic
+        result = await some_http_call()  # Direct I/O in workflow
+```
+
+You must rewrite it as:
+
+```python
+# Temporal workflow code (VALID)
+@workflow.defn
+class MyWorkflow:
+    @workflow.run
+    async def run(self):
+        # Use workflow APIs for time
+        now = workflow.now()
+        # Use workflow APIs for randomness
+        random_id = workflow.uuid4()
+        # Move I/O to activities
+        result = await workflow.execute_activity(
+            some_http_call,
+            start_to_close_timeout=timedelta(seconds=10)
+        )
+```
+
+In Sayiir, the first version **just works**:
+
+```python
+# Sayiir task (VALID)
+@task
+async def my_task():
+    now = time.time()  # Fine
+    random_id = uuid.uuid4()  # Fine
+    result = await some_http_call()  # Fine
+```
+
+Temporal's model provides powerful time-travel debugging and guaranteed consistency. Sayiir's model provides simplicity and zero learning curve.
+
+## Activities vs Workflows: The Split-Brain Pattern
+
+Temporal divides your code into two categories:
+
+1. **Workflow code** — deterministic orchestration logic. Cannot do I/O. Must use Temporal APIs for time, randomness, sleep. This code replays.
+2. **Activity code** — side effects, I/O, external calls. Does not replay. Retried independently.
+
+This split is Temporal's most commonly cited friction point. You must constantly decide: "Is this workflow code or activity code?" And you must refactor normal functions into activities, even for simple operations:
+
+```python
+# Temporal: Split logic across workflow and activity
+@activity.defn
+async def fetch_user(user_id: int) -> dict:
+    return await db.get_user(user_id)
+
+@activity.defn
+async def send_email(user: dict) -> None:
+    await email_service.send_welcome(user)
+
+@workflow.defn
+class WelcomeWorkflow:
+    @workflow.run
+    async def run(self, user_id: int):
+        user = await workflow.execute_activity(
+            fetch_user, user_id,
+            start_to_close_timeout=timedelta(seconds=10)
+        )
+        await workflow.execute_activity(
+            send_email, user,
+            start_to_close_timeout=timedelta(seconds=30)
+        )
+```
+
+In Sayiir, there's no split. Everything is a task:
+
+```python
+# Sayiir: Just write tasks
+@task
+async def fetch_user(user_id: int) -> dict:
+    return await db.get_user(user_id)
+
+@task
+async def send_email(user: dict) -> None:
+    await email_service.send_welcome(user)
+
+workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+```
+
+Temporal's split provides fine-grained control over retries, timeouts, and execution policies. Sayiir's unified model reduces cognitive overhead.
+
+## Infrastructure: Cluster vs Library
+
+**Temporal requires a multi-service cluster:**
+
+- **Frontend service** — API gateway, gRPC endpoint
+- **History service** — stores workflow state and event history
+- **Matching service** — dispatches tasks to workers
+- **Worker hosts** — execute workflow and activity code
+- **Database** — PostgreSQL or Cassandra for persistence
+- **Optionally Elasticsearch** — for workflow search and visibility
+
+This is a mature, horizontally scalable platform. It's also substantial operational overhead. Temporal Cloud removes this burden but adds cost and latency (data leaves your network).
+
+**Sayiir is a library you import.** Add it as a dependency, configure storage (in-memory for dev, PostgreSQL for production), and run. No separate services, no orchestrator, no control plane. Your application *is* the workflow engine.
+
+This means:
+
+- **Zero infrastructure** — no services to deploy, monitor, or scale
+- **Single process or distributed** — works in a monolith or across a cluster
+- **Serverless-friendly** — runs on Lambda, Cloud Run, Fly.io, anywhere
+- **Test with zero setup** — in-memory backend, no Docker needed
+
+Temporal's infrastructure provides strong durability guarantees, multi-tenancy, and operational tooling. Sayiir's library model provides simplicity and portability.
+
+## Learning Curve and Developer Experience
+
+Temporal's own documentation acknowledges a **one-month ramp-up time** before developers become productive. The determinism constraints, workflow/activity split, and versioning model require substantial learning.
+
+Common Temporal onboarding challenges:
+
+- Understanding determinism and what's allowed in workflow code
+- Knowing when to use activities vs workflows
+- Configuring timeouts correctly (start-to-close, schedule-to-close, schedule-to-start)
+- Handling versioning and workflow updates (patching, workflow versioning)
+- Debugging replay issues and non-determinism errors
+
+Sayiir's learning curve is **near zero**. Write async Python or Rust. Add `@task` or `#[task]`. Chain tasks with `.then()`. Done. No new concepts, no constraints, no split-brain pattern.
+
+## Versioning and Updates
+
+Temporal's replay model means **changing workflow code is complex**. If you modify workflow logic, old executions (which have history) may replay incorrectly. Temporal provides patching and workflow versioning APIs to handle this, but it's a common source of production incidents.
+
+Sayiir checkpoints state, not event history. Changing task logic is **just a deploy**. Old executions resume with new code. If you need versioned behavior, use normal code patterns (feature flags, version fields in state).
+
+## Language SDKs and Ecosystem
+
+**Temporal** has mature SDKs for Go, Java, TypeScript, Python, and .NET. Large community, extensive documentation, active Slack, many integrations.
+
+**Sayiir** currently supports Rust and Python, both wrapping the same Rust runtime. More SDKs planned. Smaller community, newer project, growing ecosystem.
+
+If you need Java or .NET, Temporal is the only option. If you're using Python or Rust and value simplicity, Sayiir is a strong fit.
+
+## When to Choose Temporal
+
+Choose Temporal if you need:
+
+- **Mature, battle-tested platform** — thousands of companies run Temporal in production
+- **Managed cloud offering** — Temporal Cloud handles all infrastructure
+- **Rich ecosystem** — extensive integrations, large community, many SDKs
+- **Strong consistency guarantees** — replay model ensures workflow history is the source of truth
+- **Time-travel debugging** — replay workflows from any point in history
+- **Enterprise features** — multi-tenancy, namespaces, advanced security, audit logs
+
+Temporal is a safe, proven choice for mission-critical workflows at scale.
+
+## When to Choose Sayiir
+
+Choose Sayiir if you need:
+
+- **Simplest possible model** — write async code, add `@task`, done
+- **No infrastructure** — library, not platform. Import and run.
+- **No determinism constraints** — use any API, any library, read the clock, no restrictions
+- **Zero learning curve** — no new concepts, no workflow/activity split, no versioning gotchas
+- **Rust performance** — shared Rust core, same guarantees across all language bindings
+- **Embedded workflows** — durability inside your application, not a separate service
+
+Sayiir is the fastest path to durable workflows, especially for teams without dedicated infrastructure resources.
+
+## Summary
+
+Temporal is a mature, powerful platform with a large community and proven track record. It's the right choice for teams that need enterprise features, managed cloud, or already have the operational capacity to run distributed systems.
+
+Sayiir is a library that prioritizes simplicity and developer experience. It's the right choice for teams that want durability without infrastructure, determinism constraints, or a steep learning curve.
+
+Both are MIT licensed. Both solve the same problem. The difference is philosophy: platform vs library, replay vs checkpoint, consistency vs simplicity.
+
+---
+
+See also: [Sayiir vs Airflow](/comparisons/vs-airflow/) and [Comparison Overview](/comparisons/overview/)

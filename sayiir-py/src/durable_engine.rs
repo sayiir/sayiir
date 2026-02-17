@@ -10,15 +10,18 @@ use std::sync::Arc;
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_core::workflow::WorkflowStatus;
-use sayiir_persistence::{InMemoryBackend, SignalStore, SnapshotStore};
+use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
-    execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
-    ResumeOutcome,
+    ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
+    prepare_run,
 };
 
-use crate::backend::PyInMemoryBackend;
+use sayiir_postgres::PostgresBackend;
+use sayiir_runtime::serialization::JsonCodec;
+
+use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend, with_backend};
 use crate::codec::{decode_to_pyobject, encode_pyobject};
-use crate::engine::{execute_python_task, PyWorkflowStatus};
+use crate::engine::{PyWorkflowStatus, execute_python_task};
 use crate::exceptions;
 use crate::flow::PyWorkflow;
 
@@ -26,25 +29,53 @@ use crate::flow::PyWorkflow;
 ///
 /// Uses Rust's checkpointing runtime to persist workflow state after each task.
 /// Python provides task implementations via a callback dictionary.
+///
+/// Accepts either `InMemoryBackend` or `PostgresBackend`.
 #[pyclass]
 pub struct PyDurableEngine {
-    backend: Arc<InMemoryBackend>,
+    backend: BackendKind,
     runtime: tokio::runtime::Runtime,
 }
 
 #[pymethods]
 impl PyDurableEngine {
+    /// Create a new durable engine.
+    ///
+    /// Args:
+    ///     backend: Either `InMemoryBackend()` or `PostgresBackend(url)`
     #[new]
-    fn new(backend: &PyInMemoryBackend) -> PyResult<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    fn new(backend: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(mem) = backend.extract::<PyInMemoryBackend>() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Ok(Self {
-            backend: Arc::clone(&backend.inner),
-            runtime,
-        })
+            Ok(Self {
+                backend: BackendKind::InMemory(Arc::clone(&mem.inner)),
+                runtime,
+            })
+        } else if let Ok(pg) = backend.extract::<PyPostgresBackend>() {
+            // Create a fresh pool on the engine's own runtime to avoid
+            // cross-runtime PgPool affinity issues.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+            let fresh_backend = runtime
+                .block_on(PostgresBackend::<JsonCodec>::connect(&pg.url))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+            Ok(Self {
+                backend: BackendKind::Postgres(Arc::new(fresh_backend)),
+                runtime,
+            })
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "backend must be InMemoryBackend or PostgresBackend",
+            ))
+        }
     }
 
     /// Run a workflow to completion with checkpointing.
@@ -59,12 +90,18 @@ impl PyDurableEngine {
         let input_bytes = encode_pyobject(py, input)?;
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
-        let backend = Arc::clone(&self.backend);
         let first_task_id = continuation.first_task_id().to_string();
         let registry = Arc::new(task_registry);
 
-        let (status, output_bytes) = py
-            .detach(|| {
+        tracing::info!(
+            workflow_id = %workflow.workflow_id,
+            %instance_id,
+            "starting durable workflow execution"
+        );
+
+        let (status, output_bytes) = with_backend!(self, |backend| {
+            let backend = Arc::clone(backend);
+            py.detach(|| {
                 self.runtime.block_on(async {
                     let mut snapshot = prepare_run(
                         instance_id,
@@ -90,9 +127,16 @@ impl PyDurableEngine {
             })
             .map_err(|e: sayiir_runtime::RuntimeError| {
                 PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
-            })?;
+            })?
+        });
 
         let mut py_status: PyWorkflowStatus = status.into();
+
+        tracing::info!(
+            status = %py_status.status,
+            "durable workflow execution finished"
+        );
+
         if let Some(bytes) = output_bytes {
             py_status.output = Some(decode_to_pyobject(py, &bytes)?);
         }
@@ -108,17 +152,22 @@ impl PyDurableEngine {
         task_registry: Py<PyDict>,
     ) -> PyResult<PyWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
-        let backend = Arc::clone(&self.backend);
+        let definition_hash = workflow.definition_hash.clone();
         let registry = Arc::new(task_registry);
 
-        let (status, output_bytes) = py
-            .detach(|| {
+        tracing::info!(
+            workflow_id = %workflow.workflow_id,
+            %instance_id,
+            "resuming workflow from checkpoint"
+        );
+
+        let (status, output_bytes) = with_backend!(self, |backend| {
+            let backend = Arc::clone(backend);
+            py.detach(|| {
                 self.runtime.block_on(async {
-                    match prepare_resume(&instance_id, &workflow.definition_hash, backend.as_ref())
-                        .await?
-                    {
+                    match prepare_resume(&instance_id, &definition_hash, backend.as_ref()).await? {
                         ResumeOutcome::AlreadyTerminal(status) => {
-                            // For completed workflows, load the output from the snapshot
+                            tracing::debug!(%instance_id, status = ?status, "workflow already terminal");
                             let output = if matches!(status, WorkflowStatus::Completed) {
                                 let snapshot = backend.load_snapshot(&instance_id).await.ok();
                                 snapshot.and_then(|s| s.state.completed_output().cloned())
@@ -127,7 +176,14 @@ impl PyDurableEngine {
                             };
                             Ok((status, output))
                         }
-                        ResumeOutcome::Paused(status) => Ok((status, None)),
+                        ResumeOutcome::Paused(status) => {
+                            tracing::debug!(%instance_id, "workflow is paused, cannot resume");
+                            Ok((status, None))
+                        }
+                        ResumeOutcome::NotReady(status) => {
+                            tracing::debug!(%instance_id, status = ?status, "workflow not ready to resume");
+                            Ok((status, None))
+                        }
                         ResumeOutcome::Ready {
                             mut snapshot,
                             input_bytes,
@@ -149,7 +205,8 @@ impl PyDurableEngine {
             })
             .map_err(|e: sayiir_runtime::RuntimeError| {
                 PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
-            })?;
+            })?
+        });
 
         let mut py_status: PyWorkflowStatus = status.into();
         if let Some(bytes) = output_bytes {
@@ -166,13 +223,16 @@ impl PyDurableEngine {
         reason: Option<String>,
         cancelled_by: Option<String>,
     ) -> PyResult<()> {
-        self.runtime
-            .block_on(self.backend.store_signal(
-                &instance_id,
-                SignalKind::Cancel,
-                SignalRequest::new(reason, cancelled_by),
-            ))
-            .map_err(backend_err_to_py)
+        tracing::info!(%instance_id, ?reason, ?cancelled_by, "requesting workflow cancellation");
+        with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.store_signal(
+                    &instance_id,
+                    SignalKind::Cancel,
+                    SignalRequest::new(reason, cancelled_by),
+                ))
+                .map_err(backend_err_to_py)
+        })
     }
 
     /// Request pausing of a running workflow.
@@ -183,21 +243,48 @@ impl PyDurableEngine {
         reason: Option<String>,
         paused_by: Option<String>,
     ) -> PyResult<()> {
-        self.runtime
-            .block_on(self.backend.store_signal(
-                &instance_id,
-                SignalKind::Pause,
-                SignalRequest::new(reason, paused_by),
-            ))
-            .map_err(backend_err_to_py)
+        tracing::info!(%instance_id, ?reason, ?paused_by, "requesting workflow pause");
+        with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.store_signal(
+                    &instance_id,
+                    SignalKind::Pause,
+                    SignalRequest::new(reason, paused_by),
+                ))
+                .map_err(backend_err_to_py)
+        })
+    }
+
+    /// Send an external signal (event) to a workflow instance.
+    ///
+    /// The payload is buffered per (`instance_id`, `signal_name`) in FIFO order.
+    /// The next time the workflow resumes and reaches the matching
+    /// `wait_for_signal` node, it will consume the oldest buffered event.
+    fn send_signal(
+        &self,
+        py: Python<'_>,
+        instance_id: String,
+        signal_name: String,
+        payload: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let payload_bytes = encode_pyobject(py, payload)?;
+        tracing::info!(%instance_id, %signal_name, "sending external signal");
+        with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.send_event(&instance_id, &signal_name, payload_bytes))
+                .map_err(backend_err_to_py)
+        })
     }
 
     /// Unpause a paused workflow so it can be resumed.
     fn unpause(&self, instance_id: String) -> PyResult<()> {
-        self.runtime
-            .block_on(self.backend.unpause(&instance_id))
-            .map(|_| ())
-            .map_err(backend_err_to_py)
+        tracing::info!(%instance_id, "unpausing workflow");
+        with_backend!(self, |backend| {
+            self.runtime
+                .block_on(backend.unpause(&instance_id))
+                .map(|_| ())
+                .map_err(backend_err_to_py)
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -222,8 +309,8 @@ fn make_task_executor(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Bytes, sayiir_core::error::BoxError>> + Send>,
 > + Send
-       + Sync
-       + '_ {
++ Sync
++ '_ {
     move |task_id: &str, task_input: Bytes| {
         let reg = Arc::clone(registry);
         let task_id = task_id.to_string();

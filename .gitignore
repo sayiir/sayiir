@@ -6,3 +6,12 @@ DS_Store
 .coverage
 __pycache__/
 *.so
+
+docs/plans/
+
+.venv/
+
+docs/plans/
+
+
+node_modules/

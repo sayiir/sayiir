@@ -1,0 +1,272 @@
+---
+title: Durable Workflows
+description: Checkpointing, crash recovery, lifecycle operations, and durable delays
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## What makes a workflow durable
+
+After each task completes, Sayiir saves a checkpoint (snapshot) of the workflow state. If the process crashes or restarts, you can call `resume` to continue execution from the last checkpoint. There is no replay—tasks that already completed are never re-executed.
+
+This checkpointing mechanism ensures that long-running workflows can survive process crashes, deployments, or infrastructure failures without losing progress.
+
+## InMemory vs PostgreSQL
+
+Sayiir supports two backend types:
+
+- **InMemoryBackend**: Fast, ephemeral storage for development and testing. State is lost when the process stops.
+- **PostgresBackend**: Durable, persistent storage for production. State survives process restarts.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import InMemoryBackend, PostgresBackend
+
+# Development/testing
+backend = InMemoryBackend()
+
+# Production
+backend = PostgresBackend(
+    host="localhost",
+    port=5432,
+    user="postgres",
+    password="password",
+    database="sayiir"
+)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { InMemoryBackend, PostgresBackend } from "sayiir";
+
+// Development/testing
+const backend = new InMemoryBackend();
+
+// Production
+const backend = PostgresBackend.connect(
+    "postgresql://postgres:password@localhost:5432/sayiir"
+);
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_persistence::{InMemoryBackend, PostgresBackend};
+
+// Development/testing
+let backend = InMemoryBackend::new();
+
+// Production
+let backend = PostgresBackend::new(
+    "host=localhost port=5432 user=postgres password=password dbname=sayiir"
+).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Lifecycle operations
+
+Sayiir provides full control over workflow execution with pause, unpause, cancel, and resume operations. These operations are all durable—the workflow state is persisted and can be resumed even after a process restart.
+
+### Cancel a workflow
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import cancel_workflow
+
+# Cancel a running or paused workflow
+cancel_workflow("job-123", backend=backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { cancelWorkflow } from "sayiir";
+
+// Cancel a running or paused workflow
+cancelWorkflow("job-123", backend, {
+    reason: "No longer needed",
+    cancelledBy: "admin"
+});
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Cancel using the runner
+runner.cancel("job-123").await?;
+```
+
+</TabItem>
+</Tabs>
+
+### Pause and unpause
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import pause_workflow, unpause_workflow
+
+# Pause a running workflow
+pause_workflow("job-123", backend=backend)
+
+# Unpause to allow resumption
+unpause_workflow("job-123", backend=backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { pauseWorkflow, unpauseWorkflow } from "sayiir";
+
+// Pause a running workflow
+pauseWorkflow("job-123", backend, {
+    reason: "Maintenance window",
+    pausedBy: "ops-team"
+});
+
+// Unpause to allow resumption
+unpauseWorkflow("job-123", backend);
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Pause a running workflow
+runner.pause("job-123").await?;
+
+// Unpause to allow resumption
+runner.unpause("job-123").await?;
+```
+
+</TabItem>
+</Tabs>
+
+### Resume after crash or pause
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import resume_workflow
+
+# Resume from last checkpoint
+status = resume_workflow(workflow, "job-123", backend=backend)
+print(f"Workflow status: {status}")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { resumeWorkflow } from "sayiir";
+
+// Resume from last checkpoint
+const status = resumeWorkflow(workflow, "job-123", backend);
+console.log(`Workflow status: ${status.status}`);
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Resume from last checkpoint
+let status = runner.resume(&workflow, "job-123").await?;
+println!("Workflow status: {:?}", status);
+```
+
+</TabItem>
+</Tabs>
+
+## Durable delays
+
+Delays are checkpointed just like task completions. If a workflow is waiting on a delay when the process crashes, the delay will be resumed from the correct point after recovery.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from datetime import timedelta
+from sayiir import task, Flow, run_durable_workflow
+
+@task
+def send_email(user_id: int) -> str:
+    return f"Email sent to user {user_id}"
+
+@task
+def send_reminder(user_id: int) -> str:
+    return f"Reminder sent to user {user_id}"
+
+# Wait 24 hours between email and reminder
+workflow = (
+    Flow("email_campaign")
+    .then(send_email)
+    .delay(timedelta(hours=24))
+    .then(send_reminder)
+    .build()
+)
+
+status = run_durable_workflow(workflow, "campaign-1", 42, backend=backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, runDurableWorkflow } from "sayiir";
+
+const sendEmail = task("send_email", (userId: number) => {
+    return `Email sent to user ${userId}`;
+});
+
+const sendReminder = task("send_reminder", (userId: number) => {
+    return `Reminder sent to user ${userId}`;
+});
+
+// Wait 24 hours between email and reminder
+const workflow = flow<number>("email_campaign")
+    .then(sendEmail)
+    .delay("wait_24h", "24h")
+    .then(sendReminder)
+    .build();
+
+const status = runDurableWorkflow(workflow, "campaign-1", 42, backend);
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use std::time::Duration;
+use sayiir_core::prelude::*;
+
+let workflow = WorkflowBuilder::new(ctx)
+    .then("send_email", |user_id: u64| async move {
+        Ok(format!("Email sent to user {}", user_id))
+    })
+    .delay("wait_24h", Duration::from_secs(86400))
+    .then("send_reminder", |user_id: u64| async move {
+        Ok(format!("Reminder sent to user {}", user_id))
+    })
+    .build()?;
+
+let status = runner.run(&workflow, "campaign-1", 42u64).await?;
+```
+
+</TabItem>
+</Tabs>
+
+If the process crashes during the 24-hour delay, calling `resume` will continue the delay from where it left off, not restart it from zero.

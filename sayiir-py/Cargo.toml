@@ -3,7 +3,7 @@ name = "sayiir-py"
 description = "PyO3 bridge between Python and the Sayiir workflow runtime"
 version.workspace = true
 authors.workspace = true
-edition = "2021"
+edition.workspace = true
 license.workspace = true
 publish = false
 
@@ -15,12 +15,14 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 bytes = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 serde_json = { workspace = true }
-sayiir-core = { version = "0.1.0", path = "../sayiir-core" }
-sayiir-persistence = { version = "0.1.0", path = "../sayiir-persistence" }
-sayiir-runtime = { version = "0.1.0", path = "../sayiir-runtime" }
+sayiir-core = { workspace = true }
+sayiir-persistence = { workspace = true }
+sayiir-postgres = { workspace = true }
+sayiir-runtime = { workspace = true, features = ["json"] }
+tracing = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = "0.28"

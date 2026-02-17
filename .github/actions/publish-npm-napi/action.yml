@@ -1,0 +1,76 @@
+name: Publish NAPI-RS packages to npm
+description: >
+  Stage platform binaries, detect dist-tag, and publish all NAPI-RS
+  platform packages plus the root TypeScript package to npm.
+
+inputs:
+  package-dir:
+    description: Path to the Node.js package root (e.g. sayiir-nodejs)
+    required: true
+  artifact-pattern:
+    description: Glob used when downloading artifacts
+    required: false
+    default: "node-*"
+  artifact-path:
+    description: Directory where artifacts were downloaded
+    required: false
+    default: artifacts/
+
+runs:
+  using: composite
+  steps:
+    # Place each binary into its platform package directory.
+    # After this step, each npm/<platform>/ has a sayiir-node.node file.
+    - name: Stage platform binaries
+      shell: bash
+      run: |
+        for dir in ${{ inputs.artifact-path }}${{ inputs.artifact-pattern }}; do
+          platform=$(basename "$dir" | sed 's/^node-//')
+          cp "$dir/sayiir-node.node" "${{ inputs.package-dir }}/npm/$platform/sayiir-node.node"
+          echo "Staged $platform"
+        done
+        ls -lhR ${{ inputs.package-dir }}/npm/
+
+    - name: Determine npm dist-tag
+      id: dist-tag
+      shell: bash
+      run: |
+        version=$(node -p "require('./${{ inputs.package-dir }}/package.json').version")
+        if echo "$version" | grep -qE '-(alpha|beta|rc)'; then
+          tag=$(echo "$version" | sed -E 's/.*-([a-z]+).*/\1/')
+        else
+          tag="latest"
+        fi
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "Publishing version $version with tag: $tag"
+
+    - name: Publish platform packages
+      shell: bash
+      run: |
+        for dir in ${{ inputs.package-dir }}/npm/*/; do
+          name=$(node -p "require('./${dir}package.json').name")
+          echo "Publishing $name ..."
+          cd "$dir"
+          npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
+          cd -
+        done
+
+    # Build the TypeScript source to dist/.
+    - name: Build TypeScript
+      shell: bash
+      working-directory: ${{ inputs.package-dir }}
+      run: |
+        pnpm install
+        pnpm tsc
+
+    # Resolve workspace:* refs to real versions before publishing.
+    # pnpm pack handles this automatically, then we publish the tarball
+    # with npm (required for OIDC trusted publishing / provenance).
+    - name: Publish root package
+      shell: bash
+      working-directory: ${{ inputs.package-dir }}
+      run: |
+        pnpm pack
+        tarball=$(ls -1 *.tgz | head -1)
+        echo "Publishing tarball: $tarball"
+        npm publish "$tarball" --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}

@@ -10,7 +10,7 @@ use sayiir_core::snapshot::{
     WorkflowSnapshotState,
 };
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 /// In-memory backend that stores snapshots in a HashMap.
@@ -23,6 +23,9 @@ pub struct InMemoryBackend {
     snapshots: Arc<RwLock<HashMap<String, WorkflowSnapshot>>>,
     claims: Arc<RwLock<HashMap<String, TaskClaim>>>, // Key: "{instance_id}:{task_id}"
     signals: Arc<RwLock<HashMap<String, HashMap<SignalKind, SignalRequest>>>>,
+    /// Buffered external events per `(instance_id, signal_name)`, FIFO order.
+    #[allow(clippy::type_complexity)]
+    events: Arc<RwLock<HashMap<(String, String), VecDeque<bytes::Bytes>>>>,
 }
 
 impl InMemoryBackend {
@@ -163,6 +166,35 @@ impl SignalStore for InMemoryBackend {
             }
         }
         Ok(())
+    }
+
+    async fn send_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+        payload: bytes::Bytes,
+    ) -> Result<(), BackendError> {
+        let mut events = self.events.write().map_err(Self::lock_error)?;
+        events
+            .entry((instance_id.to_string(), signal_name.to_string()))
+            .or_default()
+            .push_back(payload);
+        Ok(())
+    }
+
+    async fn consume_event(
+        &self,
+        instance_id: &str,
+        signal_name: &str,
+    ) -> Result<Option<bytes::Bytes>, BackendError> {
+        let mut events = self.events.write().map_err(Self::lock_error)?;
+        let key = (instance_id.to_string(), signal_name.to_string());
+        let payload = events.get_mut(&key).and_then(VecDeque::pop_front);
+        // Clean up empty queues
+        if events.get(&key).is_some_and(VecDeque::is_empty) {
+            events.remove(&key);
+        }
+        Ok(payload)
     }
 
     // Override check_and_cancel for more efficient locking (avoids load+save round-trip).
@@ -388,10 +420,15 @@ impl TaskClaimStore for InMemoryBackend {
         // Collect delay-expired workflows that need position advancement
         let mut delay_advances: Vec<(String, String)> = Vec::new();
         let mut delay_completions: Vec<(String, String)> = Vec::new();
+        // Signal-related advancements: (instance_id, signal_name, next_task_id_or_none)
+        let mut signal_advances: Vec<(String, String, Option<String>)> = Vec::new();
+        // Signal timeout expirations: (instance_id, signal_id, next_task_id_or_none)
+        let mut signal_timeout_advances: Vec<(String, String, Option<String>)> = Vec::new();
 
         {
             let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
             let signals = self.signals.read().map_err(Self::lock_error)?;
+            let events = self.events.read().map_err(Self::lock_error)?;
 
             for (instance_id, snapshot) in snapshots.iter() {
                 if !snapshot.state.is_in_progress() {
@@ -409,29 +446,61 @@ impl TaskClaimStore for InMemoryBackend {
                 {
                     continue;
                 }
-                if let WorkflowSnapshotState::InProgress {
-                    position:
-                        ExecutionPosition::AtDelay {
-                            wake_at,
-                            delay_id,
-                            next_task_id,
-                            ..
-                        },
-                    ..
-                } = &snapshot.state
-                    && Utc::now() >= *wake_at
-                {
-                    if let Some(next_id) = next_task_id {
-                        delay_advances.push((instance_id.clone(), next_id.clone()));
-                    } else {
-                        delay_completions.push((instance_id.clone(), delay_id.clone()));
+                match &snapshot.state {
+                    WorkflowSnapshotState::InProgress {
+                        position:
+                            ExecutionPosition::AtDelay {
+                                wake_at,
+                                delay_id,
+                                next_task_id,
+                                ..
+                            },
+                        ..
+                    } if Utc::now() >= *wake_at => {
+                        if let Some(next_id) = next_task_id {
+                            delay_advances.push((instance_id.clone(), next_id.clone()));
+                        } else {
+                            delay_completions.push((instance_id.clone(), delay_id.clone()));
+                        }
                     }
+                    WorkflowSnapshotState::InProgress {
+                        position:
+                            ExecutionPosition::AtSignal {
+                                signal_name,
+                                wake_at,
+                                next_task_id,
+                                ..
+                            },
+                        ..
+                    } => {
+                        let key = (instance_id.clone(), signal_name.clone());
+                        if events.get(&key).is_some_and(|q| !q.is_empty()) {
+                            // Signal arrived — advance
+                            signal_advances.push((
+                                instance_id.clone(),
+                                signal_name.clone(),
+                                next_task_id.clone(),
+                            ));
+                        } else if wake_at.is_some_and(|wt| Utc::now() >= wt) {
+                            // Timeout expired — advance with None payload
+                            signal_timeout_advances.push((
+                                instance_id.clone(),
+                                signal_name.clone(),
+                                next_task_id.clone(),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
         // Apply delay advancements with write lock
-        if !delay_advances.is_empty() || !delay_completions.is_empty() {
+        if !delay_advances.is_empty()
+            || !delay_completions.is_empty()
+            || !signal_advances.is_empty()
+            || !signal_timeout_advances.is_empty()
+        {
             let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
             for (instance_id, next_task_id) in &delay_advances {
                 if let Some(snapshot) = snapshots.get_mut(instance_id) {
@@ -444,6 +513,48 @@ impl TaskClaimStore for InMemoryBackend {
                 if let Some(snapshot) = snapshots.get_mut(instance_id) {
                     let output = snapshot.get_task_result_bytes(delay_id).unwrap_or_default();
                     snapshot.mark_completed(output);
+                }
+            }
+            // Consume signal events and advance position
+            {
+                let mut events = self.events.write().map_err(Self::lock_error)?;
+                for (instance_id, signal_name, next_task_id) in &signal_advances {
+                    let key = (instance_id.clone(), signal_name.clone());
+                    let payload = events
+                        .get_mut(&key)
+                        .and_then(VecDeque::pop_front)
+                        .unwrap_or_default();
+                    // Clean up empty queues
+                    if events.get(&key).is_some_and(VecDeque::is_empty) {
+                        events.remove(&key);
+                    }
+                    if let Some(snapshot) = snapshots.get_mut(instance_id) {
+                        // Store signal payload as a task result so the next step can use it
+                        snapshot.mark_task_completed(signal_name.clone(), payload);
+                        if let Some(next_id) = next_task_id {
+                            snapshot.update_position(ExecutionPosition::AtTask {
+                                task_id: next_id.clone(),
+                            });
+                        } else {
+                            let output = snapshot
+                                .get_task_result_bytes(signal_name)
+                                .unwrap_or_default();
+                            snapshot.mark_completed(output);
+                        }
+                    }
+                }
+            }
+            // Handle signal timeouts (advance with empty payload)
+            for (instance_id, signal_name, next_task_id) in &signal_timeout_advances {
+                if let Some(snapshot) = snapshots.get_mut(instance_id) {
+                    snapshot.mark_task_completed(signal_name.clone(), bytes::Bytes::new());
+                    if let Some(next_id) = next_task_id {
+                        snapshot.update_position(ExecutionPosition::AtTask {
+                            task_id: next_id.clone(),
+                        });
+                    } else {
+                        snapshot.mark_completed(bytes::Bytes::new());
+                    }
                 }
             }
         }
@@ -1754,5 +1865,61 @@ mod tests {
             loaded.state.is_completed(),
             "workflow should be completed when delay is last node and expired"
         );
+    }
+
+    // ── Event queue (send_event / consume_event) ────────────────────────
+
+    #[tokio::test]
+    async fn test_send_and_consume_event_fifo() {
+        let backend = InMemoryBackend::new();
+
+        // Send two events for the same signal
+        backend
+            .send_event("wf-1", "approval", bytes::Bytes::from("first"))
+            .await
+            .unwrap();
+        backend
+            .send_event("wf-1", "approval", bytes::Bytes::from("second"))
+            .await
+            .unwrap();
+
+        // Consume should return FIFO order
+        let first = backend.consume_event("wf-1", "approval").await.unwrap();
+        assert_eq!(first.as_deref(), Some(b"first".as_slice()));
+
+        let second = backend.consume_event("wf-1", "approval").await.unwrap();
+        assert_eq!(second.as_deref(), Some(b"second".as_slice()));
+
+        // Queue is now empty
+        let none = backend.consume_event("wf-1", "approval").await.unwrap();
+        assert!(none.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_consume_event_empty_returns_none() {
+        let backend = InMemoryBackend::new();
+        let result = backend.consume_event("wf-1", "nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_events_are_isolated_by_signal_name() {
+        let backend = InMemoryBackend::new();
+
+        backend
+            .send_event("wf-1", "sig_a", bytes::Bytes::from("a_payload"))
+            .await
+            .unwrap();
+        backend
+            .send_event("wf-1", "sig_b", bytes::Bytes::from("b_payload"))
+            .await
+            .unwrap();
+
+        // Consuming sig_a should not affect sig_b
+        let a = backend.consume_event("wf-1", "sig_a").await.unwrap();
+        assert_eq!(a.as_deref(), Some(b"a_payload".as_slice()));
+
+        let b = backend.consume_event("wf-1", "sig_b").await.unwrap();
+        assert_eq!(b.as_deref(), Some(b"b_payload".as_slice()));
     }
 }

@@ -4,14 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "sayiir"
-version = "0.1.0"
+version = "0.1.0-alpha.13"
 description = "Durable workflow engine with Rust core and Python bindings — checkpointing, fork/join, distributed workers"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [
-    { name = "Sayiir Contributors" },
-]
+authors = [{ name = "Yacine Bouraoui <ybsoft2011@live.com>" }]
 keywords = ["workflow", "orchestration", "durable", "rust", "distributed"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -37,10 +35,7 @@ Issues = "https://github.com/sayiir/sayiir/issues"
 Discord = "https://discord.gg/MWSzsHeg"
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.21",
-]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 pydantic = ["pydantic>=2.0"]
 
 [tool.ruff]
@@ -62,8 +57,4 @@ python-source = "."
 features = ["pyo3/extension-module"]
 
 [dependency-groups]
-dev = [
-    "maturin>=1.11.5",
-    "pytest>=9.0.2",
-    "pytest-asyncio>=1.3.0",
-]
+dev = ["maturin>=1.11.5", "pytest>=9.0.2", "pytest-asyncio>=1.3.0"]

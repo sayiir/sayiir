@@ -7,6 +7,7 @@ from ._sayiir import BackendError, TaskError, WorkflowError
 from ._sayiir import PyDurableEngine as DurableEngine
 from ._sayiir import PyFlowBuilder as FlowBuilder
 from ._sayiir import PyInMemoryBackend as InMemoryBackend
+from ._sayiir import PyPostgresBackend as PostgresBackend
 from ._sayiir import PyRetryPolicy as RetryPolicy
 from ._sayiir import PyTaskMetadata as TaskMetadata
 from ._sayiir import PyWorkflowEngine as WorkflowEngine
@@ -18,9 +19,11 @@ from .executor import (
     resume_workflow,
     run_durable_workflow,
     run_workflow,
+    send_signal,
     unpause_workflow,
 )
 from .flow import Flow, Workflow
+from .worker import Worker, WorkerHandle
 
 __all__ = [
     "BackendError",
@@ -28,6 +31,7 @@ __all__ = [
     "Flow",
     "FlowBuilder",
     "InMemoryBackend",
+    "PostgresBackend",
     "RetryPolicy",
     "TaskError",
     "TaskMetadata",
@@ -40,8 +44,11 @@ __all__ = [
     "resume_workflow",
     "run_durable_workflow",
     "run_workflow",
+    "send_signal",
     "unpause_workflow",
     "task",
+    "Worker",
+    "WorkerHandle",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.0-alpha.13"

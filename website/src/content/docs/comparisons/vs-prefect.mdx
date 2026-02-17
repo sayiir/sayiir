@@ -1,0 +1,403 @@
+---
+title: Sayiir vs Prefect
+description: Sayiir vs Prefect — lightweight library for durable workflows without the server infrastructure and deployment complexity of Prefect Cloud or Prefect Server
+---
+
+Prefect is a Python-native workflow orchestration platform designed for data pipelines and ML workflows. It's modern, developer-friendly, and offers both managed (Prefect Cloud) and self-hosted (Prefect Server) options. Sayiir takes a different approach: a library that embeds durable workflows directly in your application code without requiring any server infrastructure.
+
+This page explains the key differences, when to use each, and how Sayiir's embedded model compares to Prefect's server-based orchestration.
+
+## Design Philosophy: Library vs Platform
+
+**Prefect is an orchestration platform** that separates workflow definition from execution. You define workflows using `@flow` and `@task` decorators, but execution happens through a server (either Prefect Cloud or self-hosted Prefect Server). The server manages orchestration, state tracking, scheduling, and provides a rich UI dashboard.
+
+**Sayiir is a library** that embeds directly in your application. There's no server, no API, no separate orchestration layer. Your application code defines and executes workflows, using pluggable storage backends for durability. The workflow engine runs in your process.
+
+### What This Means in Practice
+
+In Prefect, workflows require a server for orchestration:
+
+```python
+# Prefect workflow (requires server for orchestration)
+from prefect import flow, task
+from prefect.deployments import Deployment
+
+@task
+def fetch_data(user_id: int):
+    # Fetch user data
+    return {"user_id": user_id, "data": "..."}
+
+@task
+def process_data(data: dict):
+    # Process the data
+    return f"Processed user {data['user_id']}"
+
+@flow
+def user_pipeline(user_id: int):
+    data = fetch_data(user_id)
+    result = process_data(data)
+    return result
+
+# Deploy to Prefect (requires server running)
+deployment = Deployment.build_from_flow(
+    flow=user_pipeline,
+    name="user-pipeline-deployment",
+    work_pool_name="my-work-pool"
+)
+deployment.apply()
+```
+
+In Sayiir, workflows are embedded in your application code:
+
+```python
+# Sayiir workflow (no server needed)
+from sayiir import Flow, run_workflow, task
+
+@task
+async def fetch_data(user_id: int) -> dict:
+    # Fetch user data
+    return {"user_id": user_id, "data": "..."}
+
+@task
+async def process_data(data: dict) -> str:
+    # Process the data
+    return f"Processed user {data['user_id']}"
+
+workflow = Flow("user_pipeline").then(fetch_data).then(process_data).build()
+
+# Run directly in your application
+@app.post("/process-user")
+async def process_user(user_id: int):
+    result = await run_workflow(workflow, user_id)
+    return {"result": result}
+```
+
+Prefect provides a server that orchestrates workflows. Sayiir runs workflows in your application process.
+
+## Infrastructure: Server-Based vs Zero Infrastructure
+
+**Prefect requires a server** even for local development. You have two options:
+
+1. **Prefect Cloud** — Managed service (SaaS). No infrastructure to manage, but requires network connectivity and may have latency for orchestration calls.
+2. **Prefect Server** — Self-hosted. Requires running `prefect server start` (includes API, database, and UI). Needs Postgres or SQLite for state storage.
+
+Both options require your application to communicate with the server API for workflow orchestration, state tracking, and execution coordination.
+
+**Sayiir requires zero infrastructure.** Install the library, configure a storage backend (in-memory for development, Postgres for production), and run. No server to start, no API to connect to, no deployment concepts.
+
+This means:
+
+- **No services to deploy** — no server, no database (unless you choose Postgres backend)
+- **Embedded execution** — workflows run in your application process
+- **Serverless-friendly** — works on Lambda, Cloud Run, Vercel, anywhere Python or Rust runs
+- **Test with zero setup** — in-memory backend, no `docker-compose` required
+- **No network calls** — all orchestration is local to your process
+
+Prefect's server provides a rich UI, scheduling, work pools, and centralized observability. Sayiir's library model provides simplicity and zero operational overhead.
+
+## Deployment Model: Work Pools vs Direct Execution
+
+**Prefect has deployment abstractions** that add complexity:
+
+- **Deployments** — packaged workflows with metadata, schedules, and parameters
+- **Work Pools** — execution environments (process, Kubernetes, Docker, etc.)
+- **Workers** — agents that pull work from work pools and execute flows
+- **Schedules** — cron expressions or interval-based triggers
+
+This model is powerful for complex orchestration scenarios but requires understanding multiple concepts. Even for simple use cases, you need to:
+
+1. Define your flow
+2. Create a deployment
+3. Start a worker
+4. Trigger the deployment (via UI, API, or schedule)
+
+**Sayiir has no deployment concept.** You define a workflow and call `run_workflow()`. That's it. The workflow runs in your application process. If you want distributed execution, you use Sayiir's worker model, but it's optional and simpler:
+
+```python
+# Sayiir distributed workers (optional)
+from sayiir import Flow, WorkerPool, task
+
+@task
+async def expensive_task(data: str) -> str:
+    # Long-running computation
+    return f"Processed {data}"
+
+workflow = Flow("distributed").then(expensive_task).build()
+
+# Start worker pool (separate process)
+pool = WorkerPool(backend=postgres_backend, concurrency=10)
+pool.start()
+
+# Submit from main application
+await run_workflow(workflow, "data", backend=postgres_backend)
+# Worker pool automatically picks up and executes
+```
+
+No deployments, no work pool configuration, no separate worker management API. Just a worker pool that pulls tasks from the storage backend.
+
+## Python-Only vs Multi-Language
+
+**Prefect is Python-only.** Workflows, tasks, and all tooling are written in Python. If you need workflows in other languages, Prefect can call external processes via subprocess operators, but the orchestration layer is Python.
+
+**Sayiir has a Rust core with Python bindings.** The workflow engine is written in Rust (performance, safety), with first-class Python bindings via PyO3. You can:
+
+- Use Sayiir from Python (`pip install sayiir`)
+- Use Sayiir from Rust (Cargo dependency)
+- Mix Rust and Python tasks in the same workflow (future capability)
+
+For Python-only teams, this is neutral. For teams using Rust or wanting Rust's performance characteristics, Sayiir is a better fit.
+
+## Recovery Model: Task Retries vs Checkpoint-Resume
+
+**Prefect uses task-level retries** and flow-level state tracking. When a task fails, Prefect can retry it based on configured retry policies. The server tracks which tasks succeeded and which failed. If the entire flow fails, you restart from the beginning (or use Prefect's resume feature, which requires server-side state).
+
+**Sayiir uses checkpoint-resume durability.** After each task completes, its output is serialized and stored in the backend. If a workflow crashes, resuming picks up from the last checkpoint. No replay, no re-execution of completed tasks. This is similar to Temporal's durable execution but without determinism constraints.
+
+```python
+# Sayiir checkpoint-resume example
+@task
+async def task_a() -> str:
+    print("Task A executed")
+    return "A done"
+
+@task
+async def task_b(a_result: str) -> str:
+    print("Task B executed")
+    raise Exception("Crash!")
+
+@task
+async def task_c(b_result: str) -> str:
+    print("Task C executed")
+    return "C done"
+
+workflow = Flow("recovery").then(task_a).then(task_b).then(task_c).build()
+
+# First run: A completes, B crashes
+try:
+    await run_workflow(workflow, backend=postgres_backend)
+except Exception:
+    pass  # Crash after A completes
+
+# Resume: A is skipped (already completed), B retries, C runs
+result = await run_workflow(workflow, backend=postgres_backend)
+# Output: Only "Task B executed" and "Task C executed" print
+# task_a is not re-executed
+```
+
+Prefect's retry model is simpler for stateless tasks. Sayiir's checkpoint model is better for long-running, expensive, or stateful operations where you don't want to replay completed work.
+
+## Data Passing: Task Results vs Direct Passing
+
+**Prefect uses result persistence** to pass data between tasks. By default, Prefect serializes task results and stores them in the configured result storage (local file system, S3, GCS, etc.). The server tracks result locations, and downstream tasks fetch them when needed.
+
+You can configure result persistence per task:
+
+```python
+from prefect import task, flow
+from prefect.filesystems import LocalFileSystem
+
+@task(persist_result=True, result_storage=LocalFileSystem())
+def fetch_data():
+    return {"large": "data"}
+
+@task
+def process_data(data: dict):
+    return f"Processed {len(data)} keys"
+
+@flow
+def pipeline():
+    data = fetch_data()
+    result = process_data(data)
+    return result
+```
+
+**Sayiir passes data directly via checkpoints.** After a task completes, its output is serialized and stored in the backend. The next task receives it as input. No configuration needed, no separate result storage:
+
+```python
+@task
+async def fetch_data() -> dict:
+    return {"large": "data"}
+
+@task
+async def process_data(data: dict) -> str:
+    return f"Processed {len(data)} keys"
+
+workflow = Flow("pipeline").then(fetch_data).then(process_data).build()
+```
+
+Both approaches work. Prefect gives more control over result storage. Sayiir is simpler but less flexible.
+
+## UI and Observability
+
+**Prefect ships with a comprehensive UI dashboard** (both Cloud and Server):
+
+- Flow run visualization
+- Task execution timeline
+- Real-time logs
+- Manual flow triggers
+- Deployment management
+- Work pool monitoring
+- Artifact tracking
+- Notification configuration
+
+This is a major value-add. For teams that need operational visibility, Prefect's UI is production-ready out of the box.
+
+**Sayiir's open-source core has no built-in UI.** You can use your existing observability stack (structured logging, Prometheus, OpenTelemetry, Sentry). [Sayiir Server](/server/) (coming soon) adds a web dashboard with real-time workflow monitoring, execution history, scheduled triggers, and multi-tenant observability — closing this gap for teams that need operational visibility out of the box.
+
+For teams with existing observability infrastructure, Sayiir integrates naturally. For teams starting fresh, Sayiir Server will provide a comparable experience to Prefect's dashboard.
+
+## Scheduling and Triggers
+
+**Prefect has built-in scheduling:**
+
+- Cron expressions (`cron="0 0 * * *"`)
+- Interval-based (`interval=timedelta(hours=1)`)
+- Event-based triggers (via automations, webhooks)
+- Manual triggers via UI or API
+
+Scheduling is a core feature. Deployments are scheduled, and the server handles execution.
+
+**Sayiir has no scheduler.** Workflows are triggered by your application code. If you need scheduling:
+
+- Use a cron job that calls your application endpoint
+- Use a task queue (Celery, RQ) that triggers workflows
+- Use your cloud provider's scheduler (CloudWatch Events, Cloud Scheduler)
+- Embed a scheduler in your application (APScheduler, Temporal's workflow-as-cron pattern)
+
+Prefect is better for scheduled workloads. Sayiir is better for event-driven workloads (HTTP requests, queue messages, database triggers).
+
+## Integration Ecosystem
+
+**Prefect has a rich integration library:**
+
+- Pre-built integrations for AWS, GCP, Azure
+- Database connectors (Postgres, MySQL, Snowflake, BigQuery)
+- Data tools (dbt, Great Expectations)
+- Notifications (Slack, email, PagerDuty)
+- Version control (GitHub, GitLab)
+
+These are official, maintained integrations that reduce boilerplate.
+
+**Sayiir has no pre-built integrations.** You write tasks using normal Python or Rust. Need to query Postgres? Use `asyncpg`. Need to call AWS? Use `boto3`. This means flexibility but more integration code.
+
+For data engineering and ML teams, Prefect's ecosystem is a major advantage. For application developers, Sayiir's simplicity and "use any library" approach is often sufficient.
+
+## Code Example Comparison
+
+Here's the same workflow in both systems:
+
+### Prefect (Server Required)
+
+```python
+from prefect import flow, task, get_run_logger
+from prefect.deployments import Deployment
+import httpx
+
+@task(retries=3, retry_delay_seconds=10)
+async def fetch_user(user_id: int):
+    logger = get_run_logger()
+    logger.info(f"Fetching user {user_id}")
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"https://api.example.com/users/{user_id}")
+        return response.json()
+
+@task(retries=2)
+async def send_email(user: dict):
+    logger = get_run_logger()
+    logger.info(f"Sending email to {user['email']}")
+    # Send email logic
+    return f"Email sent to {user['email']}"
+
+@flow(name="user-onboarding")
+async def onboard_user(user_id: int):
+    user = await fetch_user(user_id)
+    result = await send_email(user)
+    return result
+
+# Requires: prefect server start (or Prefect Cloud)
+# Then deploy:
+if __name__ == "__main__":
+    deployment = Deployment.build_from_flow(
+        flow=onboard_user,
+        name="onboarding-deployment",
+        work_pool_name="default"
+    )
+    deployment.apply()
+```
+
+### Sayiir (No Server)
+
+```python
+from sayiir import Flow, run_workflow, task, RetryPolicy
+import httpx
+import logging
+
+logger = logging.getLogger(__name__)
+
+@task(retry_policy=RetryPolicy(max_attempts=3, initial_interval_ms=10000))
+async def fetch_user(user_id: int) -> dict:
+    logger.info(f"Fetching user {user_id}")
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"https://api.example.com/users/{user_id}")
+        return response.json()
+
+@task(retry_policy=RetryPolicy(max_attempts=2))
+async def send_email(user: dict) -> str:
+    logger.info(f"Sending email to {user['email']}")
+    # Send email logic
+    return f"Email sent to {user['email']}"
+
+workflow = Flow("user_onboarding").then(fetch_user).then(send_email).build()
+
+# Use directly in your application
+@app.post("/onboard")
+async def onboard_user(user_id: int):
+    result = await run_workflow(workflow, user_id, backend=postgres_backend)
+    return {"result": result}
+
+# No server needed, no deployment step
+```
+
+Prefect requires server infrastructure and deployment. Sayiir runs directly in your application.
+
+## When to Choose Prefect
+
+Choose Prefect if you need:
+
+- **Rich UI dashboard** — out-of-the-box monitoring, logs, manual triggers, operational visibility
+- **Built-in scheduling** — cron expressions, intervals, complex scheduling logic
+- **Managed orchestration** — Prefect Cloud handles infrastructure, scaling, reliability
+- **Python-native workflows** — deep Python integration, TaskFlow API, Python-first design
+- **Integration ecosystem** — pre-built connectors for data tools, cloud providers, SaaS platforms
+- **Data/ML pipelines** — designed for data engineering and machine learning workflows
+- **Centralized orchestration** — multiple applications submitting to a shared orchestration layer
+
+Prefect is the right choice for data teams building scheduled pipelines who value the UI and ecosystem over infrastructure simplicity.
+
+## When to Choose Sayiir
+
+Choose Sayiir if you need:
+
+- **Zero infrastructure** — library, not platform. No server, no deployment complexity.
+- **Embedded workflows** — workflows as part of your application, not a separate system
+- **Event-driven use cases** — workflows triggered by HTTP requests, queue messages, webhooks
+- **Checkpoint-resume recovery** — resume from the last completed task, no replay
+- **Multi-language support** — Rust core with Python bindings (and future Rust API)
+- **Serverless-friendly** — works on Lambda, Cloud Run, Vercel without external dependencies
+- **Simplicity** — pip install and run, no deployment concepts, no work pools
+
+Sayiir is the right choice for application developers building event-driven workflows who prioritize simplicity and embedded execution over UI and scheduling features.
+
+## Summary
+
+Prefect is a mature, feature-rich orchestration platform with a comprehensive UI, built-in scheduling, and a rich integration ecosystem. It requires server infrastructure (Cloud or self-hosted) but provides operational capabilities out of the box. It's the right choice for data and ML teams building scheduled pipelines.
+
+Sayiir is a library for embedding durable workflows in your application code. It requires zero infrastructure, runs in your process, and uses checkpoint-resume recovery. It's the right choice for application developers building event-driven workflows who want durability without deploying a separate orchestration platform.
+
+Both are open source (Prefect: Apache 2.0, Sayiir: MIT). Both provide durable workflow execution. The difference is architectural: server-based orchestration vs embedded library.
+
+If you need a UI, scheduling, and centralized orchestration, choose Prefect. If you need embedded workflows with zero infrastructure, choose Sayiir.
+
+---
+
+See also: [Sayiir vs Temporal](/comparisons/vs-temporal/) and [Comparison Overview](/comparisons/overview/)

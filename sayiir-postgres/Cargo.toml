@@ -1,0 +1,39 @@
+[package]
+name = "sayiir-postgres"
+description = "PostgreSQL persistence backend for Sayiir workflow engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+categories.workspace = true
+keywords.workspace = true
+
+[lib]
+name = "sayiir_postgres"
+path = "src/lib.rs"
+
+[dependencies]
+sayiir-core = { workspace = true }
+sayiir-persistence = { workspace = true }
+sqlx = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[[bench]]
+name = "postgres"
+harness = false
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+sayiir-core = { workspace = true }
+sayiir-runtime = { workspace = true, features = ["rkyv", "json", "macros"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+testcontainers = "0.26"
+testcontainers-modules = { version = "0.14", features = ["postgres"] }

@@ -34,6 +34,12 @@ class PyFlowBuilder:
     def __init__(self, name: str) -> None: ...
     def then(self, task_id: str, metadata: PyTaskMetadata | None = None) -> None: ...
     def delay(self, delay_id: str, seconds: float) -> None: ...
+    def wait_for_signal(
+        self,
+        signal_id: str,
+        signal_name: str,
+        timeout_secs: float | None = None,
+    ) -> None: ...
     def add_fork(
         self,
         branches: list[list[tuple[str, PyTaskMetadata | None]]],
@@ -57,13 +63,20 @@ class PyWorkflowStatus:
     error: str | None
     reason: str | None
     cancelled_by: str | None
+    paused_by: str | None
     output: Any | None
+    wake_at: str | None
+    delay_id: str | None
+    signal_id: str | None
+    signal_name: str | None
 
     def is_completed(self) -> bool: ...
     def is_failed(self) -> bool: ...
     def is_cancelled(self) -> bool: ...
     def is_in_progress(self) -> bool: ...
     def is_paused(self) -> bool: ...
+    def is_waiting(self) -> bool: ...
+    def is_awaiting_signal(self) -> bool: ...
     def __repr__(self) -> str: ...
 
 class PyWorkflowEngine:
@@ -83,10 +96,16 @@ class PyInMemoryBackend:
 
     def __init__(self) -> None: ...
 
+class PyPostgresBackend:
+    """PostgreSQL persistence backend for workflow snapshots."""
+
+    def __init__(self, url: str) -> None: ...
+    def __repr__(self) -> str: ...
+
 class PyDurableEngine:
     """Durable workflow engine with checkpointing, cancellation, and resume."""
 
-    def __init__(self, backend: PyInMemoryBackend) -> None: ...
+    def __init__(self, backend: PyInMemoryBackend | PyPostgresBackend) -> None: ...
     def run(
         self,
         workflow: PyWorkflow,
@@ -112,7 +131,55 @@ class PyDurableEngine:
         reason: str | None = None,
         paused_by: str | None = None,
     ) -> None: ...
+    def send_signal(
+        self,
+        instance_id: str,
+        signal_name: str,
+        payload: Any,
+    ) -> None: ...
     def unpause(self, instance_id: str) -> None: ...
+    def __repr__(self) -> str: ...
+
+class PyWorker:
+    """Distributed workflow worker."""
+
+    def __init__(
+        self,
+        worker_id: str,
+        backend: PyInMemoryBackend | PyPostgresBackend,
+        poll_interval_secs: float = 5.0,
+        claim_ttl_secs: float = 300.0,
+    ) -> None: ...
+    def start(
+        self,
+        workflows: list[tuple[PyWorkflow, dict[str, Any]]],
+    ) -> PyWorkerHandle: ...
+    def __repr__(self) -> str: ...
+
+class PyWorkerHandle:
+    """Handle for controlling a running worker."""
+
+    def shutdown(self) -> None: ...
+    def join(self) -> None: ...
+    def cancel_workflow(
+        self,
+        instance_id: str,
+        reason: str | None = None,
+        cancelled_by: str | None = None,
+    ) -> None: ...
+    def pause_workflow(
+        self,
+        instance_id: str,
+        reason: str | None = None,
+        paused_by: str | None = None,
+    ) -> None: ...
+    def unpause_workflow(self, instance_id: str) -> None: ...
+    def send_signal(
+        self,
+        instance_id: str,
+        signal_name: str,
+        payload: Any,
+    ) -> None: ...
     def __repr__(self) -> str: ...
 
 # Exception hierarchy

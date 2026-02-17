@@ -1,0 +1,355 @@
+---
+title: Distributed Workers
+description: Scale out with distributed workers — claim TTL, soft worker affinity, and graceful shutdown across Python, Node.js, and Rust
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## When to Go Distributed
+
+Single-process workflow execution is sufficient for most workloads. Consider distributed workers when you need:
+
+- **Horizontal scaling** — Handle high throughput by adding more worker processes
+- **High availability** — Ensure workflows continue if a worker crashes
+- **Resource isolation** — Separate CPU-intensive or memory-heavy tasks across machines
+
+## How It Works
+
+A distributed worker polls a shared backend (PostgreSQL) for claimable tasks, executes them using locally registered task functions, and checkpoints the result. Multiple workers can run across machines or processes, all polling the same backend.
+
+Sayiir needs two pieces of information per worker:
+
+- **Workflows** — The structural definitions (DAG shape, retry policies, timeouts). Workers use the definition hash to ensure all workers agree on the workflow version.
+- **Task functions** — The executable code for each task node. In Python and Node.js, these are automatically extracted from the compiled `Workflow` objects. In Rust, you build a `TaskRegistry` explicitly.
+
+## Setting Up a Worker
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+import signal
+from sayiir import task, Flow, PostgresBackend
+from sayiir.worker import Worker
+
+@task
+def fetch_order(order_id: int) -> dict:
+    return {"order_id": order_id, "total": 99.99}
+
+@task
+def charge_payment(order: dict) -> str:
+    return f"charged ${order['total']}"
+
+@task
+def send_confirmation(receipt: str) -> str:
+    return f"confirmed: {receipt}"
+
+workflow = (
+    Flow("order-pipeline")
+    .then(fetch_order)
+    .then(charge_payment)
+    .then(send_confirmation)
+    .build()
+)
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+worker = Worker("worker-1", backend, poll_interval=2.0)
+handle = worker.start([workflow])
+
+# Graceful shutdown on SIGTERM
+signal.signal(signal.SIGTERM, lambda *_: handle.shutdown())
+handle.join()  # blocks until shutdown completes
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, PostgresBackend, Worker } from "sayiir";
+
+const fetchOrder = task("fetch-order", (orderId: number) => {
+  return { orderId, total: 99.99 };
+});
+
+const chargePayment = task("charge-payment", (order: { total: number }) => {
+  return `charged $${order.total}`;
+});
+
+const sendConfirmation = task("send-confirmation", (receipt: string) => {
+  return `confirmed: ${receipt}`;
+});
+
+const workflow = flow<number>("order-pipeline")
+  .then(fetchOrder)
+  .then(chargePayment)
+  .then(sendConfirmation)
+  .build();
+
+const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
+const worker = new Worker("worker-1", backend, [workflow], {
+  pollInterval: "2s",
+});
+const handle = worker.start();
+
+// Graceful shutdown on SIGTERM
+process.on("SIGTERM", () => handle.shutdown());
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_runtime::prelude::*;
+use sayiir_runtime::WorkflowRegistry;
+use sayiir_postgres::PostgresBackend;
+use std::sync::Arc;
+use std::time::Duration;
+
+let url = "postgresql://localhost/sayiir";
+let codec = Arc::new(JsonCodec);
+
+// Build a task registry with all tasks this worker can execute
+fn build_task_registry(codec: Arc<JsonCodec>) -> TaskRegistry {
+    let mut r = TaskRegistry::new();
+    r.register_fn("step_1", codec, |input: String| async move {
+        Ok(format!("processed: {}", input))
+    });
+    // Register additional tasks here
+    r
+}
+
+// Create a workflow that uses registered tasks
+let workflow = WorkflowBuilder::new(ctx)
+    .with_existing_registry(build_task_registry(codec.clone()))
+    .then_registered::<String>("step_1")
+    .then("step_2", |data: String| async move {
+        Ok(data.to_uppercase())
+    })
+    .build()?;
+
+// Build workflow registry
+let workflows: WorkflowRegistry<_, _, _> = vec![
+    (workflow.definition_hash().to_string(), Arc::new(workflow)),
+];
+
+// Create backend and worker
+let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+let worker = PooledWorker::new("worker-1", backend, build_task_registry(codec))
+    .with_claim_ttl(Some(Duration::from_secs(300)));
+
+// Spawn worker thread
+let handle = worker.spawn(Duration::from_secs(1), workflows);
+
+// Graceful shutdown
+handle.shutdown();
+handle.join().await?;
+```
+
+</TabItem>
+</Tabs>
+
+Key components:
+
+- **Worker ID** — Unique identifier for this worker instance (e.g. hostname or container ID)
+- **Backend** — Shared PostgreSQL backend for cross-process coordination (`InMemoryBackend` works for testing)
+- **Workflows** — One or more compiled workflow definitions the worker can process
+- **Poll interval** — How often the worker checks for new tasks (default: 5s for Python, 5s for Node.js, configurable in Rust)
+- **Claim TTL** — How long a worker holds a task claim before it expires (default: 300s)
+
+## Submitting Workflows
+
+Workers only execute tasks — workflows are submitted separately through the durable execution API:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import run_durable_workflow, PostgresBackend
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+status = run_durable_workflow(workflow, "order-42", 123, backend=backend)
+# The workflow starts, and a worker will pick up tasks
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { runDurableWorkflow, PostgresBackend } from "sayiir";
+
+const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
+const status = runDurableWorkflow(workflow, "order-42", 123, backend);
+// The workflow starts, and a worker will pick up tasks
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+let runner = CheckpointingRunner::new(backend);
+runner.run(&workflow, "order-42", "hello".to_string()).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Lifecycle Operations via Worker Handle
+
+The worker handle provides methods to control workflows through the worker's backend connection — no need to create a separate backend instance:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+handle = worker.start([workflow])
+
+# Cancel a workflow
+handle.cancel_workflow("order-42", reason="Out of stock", cancelled_by="system")
+
+# Pause / unpause
+handle.pause_workflow("order-42", reason="Maintenance window")
+handle.unpause_workflow("order-42")
+
+# Send a signal
+handle.send_signal("order-42", "manager_approval", {"approved": True})
+
+# Graceful shutdown
+handle.shutdown()
+handle.join()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const handle = worker.start();
+
+// Cancel a workflow
+handle.cancelWorkflow("order-42", {
+  reason: "Out of stock",
+  cancelledBy: "system",
+});
+
+// Pause / unpause
+handle.pauseWorkflow("order-42", { reason: "Maintenance window" });
+handle.unpauseWorkflow("order-42");
+
+// Send a signal
+handle.sendSignal("order-42", "manager_approval", { approved: true });
+
+// Graceful shutdown
+handle.shutdown();
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Cancel a workflow
+handle.cancel("order-42", Some("Out of stock"), Some("system")).await?;
+
+// Graceful shutdown
+handle.shutdown();
+handle.join().await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Claim TTL
+
+Workers acquire a claim on a task before executing it. The claim prevents other workers from executing the same task concurrently.
+
+The claim includes a time-to-live (TTL):
+
+- If a worker crashes or becomes unresponsive, the claim expires after the TTL
+- Another worker can then pick up the abandoned task
+- Default TTL is 5 minutes (300 seconds)
+
+Set the TTL based on your longest expected task duration:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+worker = Worker("worker-1", backend, claim_ttl=600.0)  # 10 minutes
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const worker = new Worker("worker-1", backend, [workflow], {
+  claimTtl: "10m",
+});
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let worker = PooledWorker::new("worker-1", backend, registry)
+    .with_claim_ttl(Some(Duration::from_secs(600))); // 10 minutes
+```
+
+</TabItem>
+</Tabs>
+
+If a task takes longer than the TTL, another worker may claim and execute it, leading to duplicate execution. Always set the TTL higher than your maximum task duration.
+
+## Multiple Workflows
+
+A single worker can process tasks from multiple workflows:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+order_wf = Flow("orders").then(process_order).build()
+email_wf = Flow("emails").then(send_email).build()
+
+handle = worker.start([order_wf, email_wf])
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const orderWf = flow<Order>("orders").then(processOrder).build();
+const emailWf = flow<Email>("emails").then(sendEmail).build();
+
+const worker = new Worker("worker-1", backend, [orderWf, emailWf]);
+const handle = worker.start();
+```
+
+</TabItem>
+</Tabs>
+
+All task functions from all workflows are merged into a single registry. Ensure task IDs are unique across workflows.
+
+## Soft Worker Affinity
+
+When a task fails and is retried, Sayiir prefers to route the retry to a different worker. This "soft worker affinity" mechanism improves resilience:
+
+- **Fault isolation** — If a worker has a corrupted cache or bad state, the retry goes elsewhere
+- **Resource contention** — A worker struggling with resource limits won't keep retrying the same failing task
+- **Automatic recovery** — Transient worker issues resolve themselves through task migration
+
+The mechanism works through claim metadata:
+
+1. When a task fails, the system records which worker attempted it
+2. On retry, workers check if they previously attempted this task
+3. If a worker sees its own ID in the failure history, it deprioritizes claiming that task
+4. Another worker is more likely to pick up the retry
+
+This is a "soft" preference, not a hard rule. If only one worker is available, it will retry its own failed tasks. In a multi-worker setup, retries naturally distribute across healthy workers.
+
+## Operational Tips
+
+- **Ensure all workers register the same workflows** — Inconsistent task implementations lead to unpredictable behavior
+- **Use the same workflow definitions across workers** — The definition hash ensures version agreement; mismatched hashes prevent task execution
+- **Monitor claim TTL expirations** — Frequent expirations indicate worker crashes or tasks exceeding TTL
+- **Scale workers based on task throughput** — Add more workers when task queue depth increases
+- **Graceful shutdown** — Always call `shutdown()` (and `join()` in Python/Rust) to finish in-flight tasks before terminating
+- **Use unique worker IDs** — Include hostname or container ID to identify workers in logs and claim metadata

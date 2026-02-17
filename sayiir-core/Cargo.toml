@@ -7,6 +7,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "README.md"
 categories.workspace = true
 keywords.workspace = true
 
@@ -14,12 +15,17 @@ keywords.workspace = true
 name = "sayiir_core"
 path = "src/lib.rs"
 
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio"]
+
 [dependencies]
 bytes = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, optional = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
+strum = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

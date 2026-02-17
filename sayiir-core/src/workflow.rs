@@ -30,7 +30,8 @@ macro_rules! impl_find_duplicate_id {
                                 .find_map(|b| collect(deref_fn(b), seen))
                                 .or_else(|| join.as_ref().and_then(|j| collect(j, seen)))
                         }
-                        $name::Delay { id, next, $($delay_extra)* } => {
+                        $name::Delay { id, next, $($delay_extra)* }
+                        | $name::AwaitSignal { id, next, $($delay_extra)* } => {
                             if !seen.insert(id.clone()) {
                                 return Some(id.clone());
                             }
@@ -68,6 +69,15 @@ pub enum WorkflowContinuation {
         duration: std::time::Duration,
         next: Option<Box<WorkflowContinuation>>,
     },
+    /// Wait for an external signal (event). Input passes through unchanged
+    /// when no signal payload is provided; otherwise the signal payload
+    /// becomes the input to the next step.
+    AwaitSignal {
+        id: String,
+        signal_name: String,
+        timeout: Option<std::time::Duration>,
+        next: Option<Box<WorkflowContinuation>>,
+    },
 }
 
 impl_find_duplicate_id!(
@@ -92,7 +102,8 @@ impl WorkflowContinuation {
         match self {
             WorkflowContinuation::Task { id, .. }
             | WorkflowContinuation::Fork { id, .. }
-            | WorkflowContinuation::Delay { id, .. } => id,
+            | WorkflowContinuation::Delay { id, .. }
+            | WorkflowContinuation::AwaitSignal { id, .. } => id,
         }
     }
 
@@ -103,7 +114,9 @@ impl WorkflowContinuation {
     #[must_use]
     pub fn first_task_id(&self) -> &str {
         match self {
-            WorkflowContinuation::Task { id, .. } | WorkflowContinuation::Delay { id, .. } => id,
+            WorkflowContinuation::Task { id, .. }
+            | WorkflowContinuation::Delay { id, .. }
+            | WorkflowContinuation::AwaitSignal { id, .. } => id,
             WorkflowContinuation::Fork { branches, .. } => {
                 if let Some(first_branch) = branches.first() {
                     first_branch.first_task_id()
@@ -133,7 +146,8 @@ impl WorkflowContinuation {
                     next.set_task_timeout(target_id, timeout);
                 }
             }
-            WorkflowContinuation::Delay { next, .. } => {
+            WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => {
                 if let Some(next) = next {
                     next.set_task_timeout(target_id, timeout);
                 }
@@ -163,7 +177,8 @@ impl WorkflowContinuation {
                     next.set_task_retry_policy(target_id, policy);
                 }
             }
-            WorkflowContinuation::Delay { next, .. } => {
+            WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => {
                 if let Some(next) = next {
                     next.set_task_retry_policy(target_id, policy);
                 }
@@ -191,7 +206,8 @@ impl WorkflowContinuation {
                 }
                 next.as_ref().and_then(|n| n.get_task_retry_policy(task_id))
             }
-            WorkflowContinuation::Delay { next, .. } => {
+            WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => {
                 next.as_ref().and_then(|n| n.get_task_retry_policy(task_id))
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
@@ -221,7 +237,8 @@ impl WorkflowContinuation {
                 }
                 next.as_ref().and_then(|n| n.get_task_timeout(task_id))
             }
-            WorkflowContinuation::Delay { next, .. } => {
+            WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. } => {
                 next.as_ref().and_then(|n| n.get_task_timeout(task_id))
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
@@ -261,6 +278,18 @@ impl WorkflowContinuation {
             WorkflowContinuation::Delay { id, duration, next } => SerializableContinuation::Delay {
                 id: id.clone(),
                 duration_ms: duration.as_millis() as u64,
+                next: next.as_ref().map(|n| Box::new(n.to_serializable())),
+            },
+            #[allow(clippy::cast_possible_truncation)]
+            WorkflowContinuation::AwaitSignal {
+                id,
+                signal_name,
+                timeout,
+                next,
+            } => SerializableContinuation::AwaitSignal {
+                id: id.clone(),
+                signal_name: signal_name.clone(),
+                timeout_ms: timeout.map(|d| d.as_millis() as u64),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
         }
@@ -326,6 +355,13 @@ pub enum SerializableContinuation {
     Delay {
         id: String,
         duration_ms: u64,
+        next: Option<Box<SerializableContinuation>>,
+    },
+    AwaitSignal {
+        id: String,
+        signal_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
         next: Option<Box<SerializableContinuation>>,
     },
 }
@@ -413,6 +449,23 @@ impl SerializableContinuation {
                     next,
                 })
             }
+            SerializableContinuation::AwaitSignal {
+                id,
+                signal_name,
+                timeout_ms,
+                next,
+            } => {
+                let next = next
+                    .as_ref()
+                    .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
+                    .transpose()?;
+                Ok(WorkflowContinuation::AwaitSignal {
+                    id: id.clone(),
+                    signal_name: signal_name.clone(),
+                    timeout: timeout_ms.map(std::time::Duration::from_millis),
+                    next,
+                })
+            }
         }
     }
 
@@ -422,7 +475,8 @@ impl SerializableContinuation {
         fn collect<'a>(cont: &'a SerializableContinuation, ids: &mut Vec<&'a str>) {
             match cont {
                 SerializableContinuation::Task { id, next, .. }
-                | SerializableContinuation::Delay { id, next, .. } => {
+                | SerializableContinuation::Delay { id, next, .. }
+                | SerializableContinuation::AwaitSignal { id, next, .. } => {
                     ids.push(id.as_str());
                     if let Some(n) = next {
                         collect(n, ids);
@@ -509,6 +563,25 @@ impl SerializableContinuation {
                         hash_continuation(n, hasher);
                     }
                 }
+                SerializableContinuation::AwaitSignal {
+                    id,
+                    signal_name,
+                    timeout_ms,
+                    next,
+                } => {
+                    hasher.update(b"S:");
+                    hasher.update(id.as_bytes());
+                    hasher.update(b":");
+                    hasher.update(signal_name.as_bytes());
+                    if let Some(ms) = timeout_ms {
+                        hasher.update(b":t:");
+                        hasher.update(ms.to_string().as_bytes());
+                    }
+                    hasher.update(b";");
+                    if let Some(n) = next {
+                        hash_continuation(n, hasher);
+                    }
+                }
             }
         }
 
@@ -565,6 +638,15 @@ pub enum WorkflowStatus {
         wake_at: chrono::DateTime<chrono::Utc>,
         /// The delay node ID.
         delay_id: String,
+    },
+    /// The workflow is waiting for an external signal.
+    AwaitingSignal {
+        /// The signal node ID.
+        signal_id: String,
+        /// The named signal being waited on.
+        signal_name: String,
+        /// Optional timeout deadline.
+        wake_at: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 
@@ -1621,6 +1703,21 @@ mod proptests {
                     duration_ms,
                     next,
                 }),
+            // AwaitSignal with optional next
+            (
+                arb_id(),
+                arb_id(),
+                prop::option::of(any::<u64>()),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, signal_name, timeout_ms, next)| {
+                    SerializableContinuation::AwaitSignal {
+                        id,
+                        signal_name,
+                        timeout_ms,
+                        next,
+                    }
+                }),
         ]
         .boxed()
     }
@@ -1686,7 +1783,7 @@ mod proptests {
             },
             // Delay with optional next
             {
-                let id_d = id;
+                let id_d = id.clone();
                 let prefix_d = prefix.to_string();
                 (
                     any::<u64>(),
@@ -1703,6 +1800,27 @@ mod proptests {
                         }
                     })
             },
+            // AwaitSignal with optional next
+            {
+                let id_s = id;
+                let prefix_s = prefix.to_string();
+                (
+                    arb_id(),
+                    prop::option::of(any::<u64>()),
+                    prop::option::of(
+                        arb_unique_continuation(depth - 1, &format!("{prefix_s}s_"))
+                            .prop_map(Box::new),
+                    ),
+                )
+                    .prop_map(move |(signal_name, timeout_ms, next)| {
+                        SerializableContinuation::AwaitSignal {
+                            id: id_s.clone(),
+                            signal_name,
+                            timeout_ms,
+                            next,
+                        }
+                    })
+            },
         ]
         .boxed()
     }
@@ -1712,7 +1830,9 @@ mod proptests {
         let mut ids = Vec::new();
         fn walk(c: &SerializableContinuation, out: &mut Vec<String>) {
             match c {
-                SerializableContinuation::Task { id, next, .. } => {
+                SerializableContinuation::Task { id, next, .. }
+                | SerializableContinuation::Delay { id, next, .. }
+                | SerializableContinuation::AwaitSignal { id, next, .. } => {
                     out.push(id.clone());
                     if let Some(n) = next {
                         walk(n, out);
@@ -1725,12 +1845,6 @@ mod proptests {
                     }
                     if let Some(j) = join {
                         walk(j, out);
-                    }
-                }
-                SerializableContinuation::Delay { id, next, .. } => {
-                    out.push(id.clone());
-                    if let Some(n) = next {
-                        walk(n, out);
                     }
                 }
             }
@@ -1765,6 +1879,17 @@ mod proptests {
             } => SerializableContinuation::Delay {
                 id: dup_id.to_string(),
                 duration_ms: *duration_ms,
+                next: next.clone(),
+            },
+            SerializableContinuation::AwaitSignal {
+                signal_name,
+                timeout_ms,
+                next,
+                ..
+            } => SerializableContinuation::AwaitSignal {
+                id: dup_id.to_string(),
+                signal_name: signal_name.clone(),
+                timeout_ms: *timeout_ms,
                 next: next.clone(),
             },
         }

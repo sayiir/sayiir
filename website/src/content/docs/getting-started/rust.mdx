@@ -1,0 +1,117 @@
+---
+title: Rust Quick Start
+description: Get started with Sayiir in Rust — fast, native durable workflows with proc macros. Define tasks, compose with workflow!, run with native performance.
+---
+
+## Installation
+
+```toml
+# Cargo.toml
+[dependencies]
+sayiir-runtime = "0.1"       # core runtime + runners + macros
+
+# Optional — pick your backend
+sayiir-persistence = "0.1"   # InMemoryBackend (dev/testing)
+sayiir-postgres = "0.1"      # PostgreSQL backend (production)
+```
+
+Import the prelude:
+
+```rust
+use sayiir_runtime::prelude::*;
+// Re-exports: WorkflowBuilder, CheckpointingRunner, PooledWorker,
+// WorkerHandle, InMemoryBackend, JsonCodec, TaskRegistry,
+// task (macro), workflow (macro), etc.
+```
+
+## Define tasks with `#[task]`
+
+```rust
+use sayiir_runtime::prelude::*;
+use sayiir_core::error::BoxError;
+use std::sync::Arc;
+
+#[task(timeout = "30s", retries = 3, backoff = "100ms")]
+async fn charge(order: Order, #[inject] stripe: Arc<Stripe>) -> Result<Receipt, BoxError> {
+    stripe.charge(&order).await
+}
+
+// Generated: struct Charge with new(stripe), task_id(), metadata(),
+// register(), CoreTask impl.
+// The original `charge` function is preserved for direct use/testing.
+```
+
+The `#[task]` macro generates a struct (PascalCase of the function name) that implements `CoreTask`. The struct has `new()` (accepting injected deps), `task_id()`, `metadata()`, and `register()` methods. Your original function is kept intact so you can call it directly in tests.
+
+### Attribute options
+
+| Option | Example | Description |
+|--------|---------|-------------|
+| `id` | `id = "custom_name"` | Override task ID (default: fn name) |
+| `timeout` | `timeout = "30s"` | Task timeout (`ms`, `s`, `m`, `h`) |
+| `retries` | `retries = 3` | Max retry count |
+| `backoff` | `backoff = "100ms"` | Initial retry delay |
+| `backoff_multiplier` | `backoff_multiplier = 2.0` | Exponential multiplier (default: 2.0) |
+| `tags` | `tags = "io"` | Categorization tags (repeatable) |
+
+## Build workflows with `workflow!`
+
+```rust
+#[task]
+async fn validate(order: Order) -> Result<Order, BoxError> { Ok(order) }
+
+#[task]
+async fn charge(order: Order) -> Result<Receipt, BoxError> { Ok(Receipt { id: order.id }) }
+
+#[task]
+async fn send_email(receipt: Receipt) -> Result<(), BoxError> { Ok(()) }
+
+let workflow = workflow!("order-process", JsonCodec, TaskRegistry::new(),
+    validate => charge => send_email
+).unwrap();
+```
+
+### Pipeline syntax
+
+| Syntax | Meaning |
+|--------|---------|
+| `task_name` | Reference to a `#[task]`-generated struct |
+| `name(param: Type) { expr }` | Inline task (must return `Result`) |
+| `a \|\| b` | Parallel fork (branches) |
+| `delay "5s"` | Durable delay |
+| `signal "name"` | Wait for external signal |
+| `=>` | Sequential chain (or join after `\|\|`) |
+
+## Run durably with CheckpointingRunner
+
+```rust
+let backend = InMemoryBackend::new();
+let runner = CheckpointingRunner::new(backend);
+
+let status = runner.run(workflow.workflow(), "instance-001", input).await?;
+
+// After a crash: pick up where it left off
+let status = runner.resume(workflow.workflow(), "instance-001").await?;
+```
+
+### With PostgreSQL
+
+Swap the backend — the workflow code is unchanged:
+
+```rust
+use sayiir_postgres::PostgresBackend;
+
+// Connects and runs migrations automatically
+let backend = PostgresBackend::<JsonCodec>::connect("postgresql://localhost/sayiir").await?;
+let runner = CheckpointingRunner::new(backend);
+
+let status = runner.run(workflow.workflow(), "instance-001", input).await?;
+```
+
+## Next steps
+
+- [Retries & Timeouts](/guides/retries-and-timeouts/) — exponential backoff, timeout behavior
+- [Signals & Events](/guides/signals-and-events/) — wait for external events
+- [Parallel Workflows](/guides/parallel-workflows/) — fork/join parallelism
+- [Distributed Workers](/guides/distributed-workers/) — PooledWorker, TaskRegistry, scaling
+- [PostgreSQL in Production](/guides/postgres-production/) — connection pooling, operational tips

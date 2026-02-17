@@ -4,21 +4,67 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+      deny: ${{ steps.filter.outputs.deny }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'sayiir-core/**'
+              - 'sayiir-persistence/**'
+              - 'sayiir-postgres/**'
+              - 'sayiir-runtime/**'
+              - 'sayiir-macros/**'
+              - 'sayiir-py/**'
+              - 'sayiir-node/**'
+              - 'tests/**'
+              - 'benches/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            python:
+              - 'sayiir-python/**'
+              - 'sayiir-py/**'
+            node:
+              - 'sayiir-node/**'
+              - 'sayiir-nodejs/**'
+            deny:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+
   deny:
     name: Cargo Deny
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
-      
+
       - name: Run cargo deny check
         run: cargo deny check
 
   test:
     name: Test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -36,8 +82,19 @@ jobs:
       - name: Run cargo test
         run: cargo test --workspace --all-features
 
+      - name: Dry-run crate publish
+        run: |
+          for crate in $(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.source == null and .publish == null) | .name'); do
+            echo "::group::$crate"
+            cargo package --list -p "$crate"
+            echo "::endgroup::"
+          done
+
   python-lint:
     name: Python Lint
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -62,7 +119,8 @@ jobs:
 
   python:
     name: Python Binding
-    needs: python-lint
+    needs: [changes, python-lint]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -97,3 +155,98 @@ jobs:
         run: |
           uv pip install --system pytest pydantic
           pytest sayiir-python/tests/ -v
+
+      - name: Dry-run PyPI publish
+        run: |
+          uv pip install --system twine
+          twine check sayiir-python/dist/*
+
+  node:
+    name: Node.js Binding
+    needs: changes
+    if: needs.changes.outputs.node == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18", "20", "22"]
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Build native addon
+        run: cargo build -p sayiir-node --release
+
+      - name: Copy native addon
+        run: |
+          mkdir -p sayiir-nodejs/native
+          cp target/release/libsayiir_node.so sayiir-nodejs/native/sayiir-node.node
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        working-directory: sayiir-nodejs
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Type check
+        working-directory: sayiir-nodejs
+        run: pnpm tsc --noEmit
+
+      - name: Run tests
+        working-directory: sayiir-nodejs
+        run: pnpm vitest run
+
+      - name: Dry-run npm publish
+        working-directory: sayiir-nodejs
+        run: pnpm publish --dry-run --no-git-checks
+
+  bench:
+    name: Benchmarks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && contains(github.event.pull_request.labels.*.name, 'benchmarks')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@v2
+        with:
+          tool: critcmp
+
+      - name: Run benchmarks (PR)
+        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline pr
+
+      - name: Checkout main branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          clean: false
+
+      - name: Run benchmarks (baseline)
+        id: baseline
+        continue-on-error: true
+        run: cargo bench -p sayiir-postgres --bench postgres -- --save-baseline main
+
+      - name: Checkout PR branch again
+        uses: actions/checkout@v6
+        with:
+          clean: false
+
+      - name: Compare benchmarks
+        if: steps.baseline.outcome == 'success'
+        continue-on-error: true
+        run: critcmp main pr
