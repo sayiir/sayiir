@@ -188,12 +188,12 @@ The macro generates:
 
 ## workflow! Macro
 
-Build a workflow pipeline with a concise DSL.
+Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions into the provided `TaskRegistry` — no manual `registry.register(...)` calls needed. Pass `TaskRegistry::new()` and the macro populates it:
 
 ### Basic Syntax
 
 ```rust
-let workflow = workflow!("workflow-id", JsonCodec, registry,
+let workflow = workflow!("workflow-id", JsonCodec, TaskRegistry::new(),
     task_a => task_b => task_c
 ).unwrap();
 ```

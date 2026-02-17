@@ -20,7 +20,7 @@ A distributed worker polls a shared backend (PostgreSQL) for claimable tasks, ex
 Sayiir needs two pieces of information per worker:
 
 - **Workflows** — The structural definitions (DAG shape, retry policies, timeouts). Workers use the definition hash to ensure all workers agree on the workflow version.
-- **Task functions** — The executable code for each task node. In Python and Node.js, these are automatically extracted from the compiled `Workflow` objects. In Rust, you build a `TaskRegistry` explicitly.
+- **Task functions** — The executable code for each task node. In Python and Node.js, these are automatically extracted from the compiled `Workflow` objects. In Rust, tasks annotated with `#[task]` are registered automatically by the `workflow!` macro — no manual registry setup needed.
 
 ## Setting Up a Worker
 
@@ -106,26 +106,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 let url = "postgresql://localhost/sayiir";
-let codec = Arc::new(JsonCodec);
 
-// Build a task registry with all tasks this worker can execute
-fn build_task_registry(codec: Arc<JsonCodec>) -> TaskRegistry {
-    let mut r = TaskRegistry::new();
-    r.register_fn("step_1", codec, |input: String| async move {
-        Ok(format!("processed: {}", input))
-    });
-    // Register additional tasks here
-    r
+// With the #[task] macro + workflow! macro, tasks are registered
+// automatically — no manual TaskRegistry needed.
+#[task(timeout = "10s")]
+async fn step_1(input: String) -> Result<String, BoxError> {
+    Ok(format!("processed: {}", input))
 }
 
-// Create a workflow that uses registered tasks
-let workflow = WorkflowBuilder::new(ctx)
-    .with_existing_registry(build_task_registry(codec.clone()))
-    .then_registered::<String>("step_1")
-    .then("step_2", |data: String| async move {
-        Ok(data.to_uppercase())
-    })
-    .build()?;
+#[task]
+async fn step_2(data: String) -> Result<String, BoxError> {
+    Ok(data.to_uppercase())
+}
+
+let workflow = workflow!(
+    "my-pipeline", JsonCodec, TaskRegistry::new(),
+    step_1 => step_2
+)?;
 
 // Build workflow registry
 let workflows: WorkflowRegistry<_, _, _> = vec![
@@ -134,7 +131,7 @@ let workflows: WorkflowRegistry<_, _, _> = vec![
 
 // Create backend and worker
 let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
-let worker = PooledWorker::new("worker-1", backend, build_task_registry(codec))
+let worker = PooledWorker::new("worker-1", backend, TaskRegistry::new())
     .with_claim_ttl(Some(Duration::from_secs(300)));
 
 // Spawn worker thread
@@ -144,6 +141,8 @@ let handle = worker.spawn(Duration::from_secs(1), workflows);
 handle.shutdown();
 handle.join().await?;
 ```
+
+> **Note:** When using `#[task]` and `workflow!`, task registration is automatic. You only need to build a `TaskRegistry` manually if you're using `WorkflowBuilder` directly with closures or `register_fn`.
 
 </TabItem>
 </Tabs>

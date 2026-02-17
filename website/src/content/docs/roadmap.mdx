@@ -1,0 +1,236 @@
+---
+title: Roadmap
+description: What's planned for Sayiir — conditional branching, workflow context, loops, observability, child workflows, edge runtimes, and more
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, retries, signals, and crash recovery — all with zero infrastructure.
+
+This page is about what's missing and what we're building next. We're honest about gaps because that's how you decide if Sayiir is right for your use case today, or if you should wait.
+
+---
+
+## What exists today
+
+These features are stable and production-ready across Rust, Python, and Node.js:
+
+<CardGrid>
+  <Card title="Durable checkpointing" icon="approve-check-circle">
+    Continuation-based recovery. No replay, no determinism constraints.
+  </Card>
+  <Card title="Fork/join parallelism" icon="approve-check-circle">
+    Run branches in parallel, merge results with a join task.
+  </Card>
+  <Card title="Retries & timeouts" icon="approve-check-circle">
+    Exponential backoff, per-task timeouts, durable retry state.
+  </Card>
+  <Card title="Signals & events" icon="approve-check-circle">
+    Wait for external events with optional timeouts. Signals are durably buffered.
+  </Card>
+  <Card title="Delays" icon="approve-check-circle">
+    Durable delays that don't hold workers.
+  </Card>
+  <Card title="Distributed workers" icon="approve-check-circle">
+    Multiple workers polling a shared PostgreSQL backend.
+  </Card>
+  <Card title="Python & Node.js bindings" icon="approve-check-circle">
+    Thin wrappers around the shared Rust core. Pydantic and Zod integration.
+  </Card>
+  <Card title="PostgreSQL backend" icon="approve-check-circle">
+    Production-grade persistence with ACID transactions, claim-based distribution, and snapshot history.
+  </Card>
+</CardGrid>
+
+---
+
+## What's coming
+
+### Conditional Branching
+
+**Status:** Planned — highest priority
+
+Today, Sayiir workflows are static DAGs: the graph is fixed at build time. You can't route to different tasks based on a previous task's output. This is the single biggest gap for AI agent and business process use cases.
+
+**What it enables:**
+- Route to different sub-agents based on LLM classification
+- Handle success/failure paths differently
+- Skip expensive steps when results are already cached
+
+**Proposed API:**
+
+```python
+workflow = (
+    Flow("support-agent")
+    .then(classify_intent)
+    .branch_on(
+        lambda result: result["intent"],
+        {
+            "billing": billing_flow,
+            "technical": tech_support_flow,
+            "general": general_response,
+        },
+    )
+    .then(send_response)
+    .build()
+)
+```
+
+### Workflow Context (Shared State)
+
+**Status:** Planned
+
+Today, each task only sees the output of the previous task. Passing context through a fork requires workarounds — each branch must carry context in its output so the join task can reassemble it.
+
+**What it enables:**
+- Any task can read/write shared workflow-level state
+- No more passing context through branches manually
+- Cleaner data flow in complex workflows
+
+**Proposed API:**
+
+```python
+@task
+def search_web(query: dict, ctx: WorkflowContext) -> list[dict]:
+    depth = ctx.get("depth", "detailed")
+    results = do_search(query["topic"], depth)
+    ctx.set("web_results_count", len(results))
+    return results
+```
+
+### Loops with Exit Conditions
+
+**Status:** Planned
+
+Sayiir's DAG model is acyclic by definition — no loops. This prevents iterative patterns like "try a tool, check if the result is good enough, try again if not."
+
+**What it enables:**
+- Iterative AI agents that refine their output
+- Polling workflows that wait for external conditions
+- Retry-with-different-strategy patterns
+
+**Proposed API:**
+
+```python
+workflow = (
+    Flow("iterative-agent")
+    .then(initial_attempt)
+    .loop(
+        refine_and_check,
+        until=lambda result: result["quality_score"] > 0.8,
+        max_iterations=5,
+    )
+    .then(finalize)
+    .build()
+)
+```
+
+### Child Workflows
+
+**Status:** Planned
+
+Compose workflows from other workflows.
+
+- `run_child_workflow(workflow, input)` primitive
+- Independent lifecycle (own instance ID, own checkpointing)
+- Parent can wait for child or fire-and-forget
+
+### Structured Observability
+
+**Status:** Planned
+
+Sayiir has no built-in observability. In production, you need to know what's happening: which tasks are running, how long they take, where failures occur.
+
+- OpenTelemetry integration (span-per-task)
+- Prometheus/OpenMetrics export (task latency, queue depth, worker utilization)
+- Structured logging with correlation IDs
+
+This will ship as part of the open-source library, independent of [Sayiir Server](/server/).
+
+### Streaming Support
+
+**Status:** Exploring
+
+LLM responses benefit from token-by-token streaming. Sayiir tasks are atomic — they run to completion and get checkpointed. Streaming conflicts with this model.
+
+**What we're exploring:**
+- A `@streaming_task` decorator that streams partial results while still checkpointing the final output
+- Streaming as an opt-in mode that trades durability guarantees for responsiveness
+
+This is the hardest problem on the roadmap because it touches the core execution model.
+
+---
+
+## Advanced Runtime
+
+Features for high-scale and specialized production use cases.
+
+### Queuing Primitives
+
+- Concurrency control (max N instances of workflow X)
+- Rate limiting (max N tasks/second)
+- Priority queues (urgent workflows first)
+- Dead letter queue for permanently failed tasks
+
+### Eternal Workflows (ContinueAsNew)
+
+Long-running workflows that loop indefinitely (monitoring, polling, recurring processing) without unbounded state growth.
+
+- `continue_as_new(input)` primitive — restart with fresh state
+- Completed tasks from previous iteration discarded, keeping snapshot size constant
+- Less critical than in replay-based engines (Sayiir has no growing history), but needed for workflows accumulating results over thousands of iterations
+
+### Workflow Versioning
+
+The checkpoint model makes this fundamentally easier than replay-based systems.
+
+- Detect definition hash mismatch on resume
+- Migration strategies: complete-in-place, drain-and-restart, version routing
+- No replay storms — just resume from last checkpoint
+
+### Scheduling / Cron
+
+- Cron-style recurring workflow triggers
+- Backfill support
+- Timezone-aware scheduling
+
+---
+
+## Edge & Serverless
+
+### Cloudflare Workers
+
+- Durable Objects as persistence backend
+- WASM compilation of core runtime
+- Cold start optimization
+
+### SQLite Backend
+
+Single-binary durable execution with zero infrastructure. For CLI tools, edge functions, embedded systems.
+
+- SQLite via rusqlite with WAL mode
+- Expose to all language bindings
+
+---
+
+## Enterprise — [Sayiir Server](/server/)
+
+Commercial offering for teams that need operational tooling on top of the open-source core.
+
+- **Web dashboard** — Workflow visualization, real-time monitoring, manual interventions
+- **Multi-tenancy** — Namespace isolation, resource quotas, RBAC
+- **Managed scheduling** — Cron triggers, webhook ingestion, recurring workflows
+- **Security** — Encryption at rest (AES-256-GCM), mTLS, audit logging, secret management
+- **Kubernetes-native** — Helm chart, HPA auto-scaling, rolling upgrades, worker affinity
+
+See the [Sayiir Server page](/server/) for details.
+
+---
+
+## Get involved
+
+The roadmap is shaped by real use cases. If you're hitting one of these gaps, or have a use case we haven't considered:
+
+- [Open an issue](https://github.com/sayiir/sayiir/issues) with your use case
+- [Join the Discord](https://discord.gg/MWSzsHeg) to discuss design decisions
+- PRs welcome — especially for observability and conditional branching

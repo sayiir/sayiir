@@ -246,36 +246,22 @@ Key benefits:
 
 For production, scale to multiple worker processes pulling from a shared queue:
 
-### Step 1: Create Task Registry
+### Step 1: Register Workflow
+
+Since our tasks use the `#[task]` macro, the `workflow!` macro registers them automatically — no manual `TaskRegistry` setup needed:
 
 ```rust
 use sayiir_runtime::prelude::*;
-use std::sync::Arc;
-
-pub fn build_task_registry() -> TaskRegistry {
-    let mut registry = TaskRegistry::new();
-
-    registry.register("fetch_recipients", Arc::new(fetch_recipients));
-    registry.register("render_template", Arc::new(render_template));
-    registry.register("send_emails", Arc::new(send_emails));
-
-    registry
-}
-```
-
-### Step 2: Register Workflow
-
-```rust
 use sayiir_runtime::WorkflowRegistry;
 
 pub fn build_workflow_registry() -> WorkflowRegistry {
     let mut registry = WorkflowRegistry::new();
 
-    let task_registry = build_task_registry();
+    // workflow! auto-registers #[task]-annotated functions
     let workflow = workflow!(
         "email-pipeline",
         JsonCodec,
-        task_registry,
+        TaskRegistry::new(),
         fetch_recipients => render_template => send_emails
     ).unwrap();
 
@@ -368,22 +354,14 @@ use sayiir_postgres::PostgresBackend;
 use std::sync::Arc;
 use tasks::{Campaign, fetch_recipients, render_template, send_emails};
 
-fn build_task_registry() -> TaskRegistry {
-    let mut registry = TaskRegistry::new();
-    registry.register("fetch_recipients", Arc::new(fetch_recipients));
-    registry.register("render_template", Arc::new(render_template));
-    registry.register("send_emails", Arc::new(send_emails));
-    registry
-}
-
 fn build_workflow_registry() -> WorkflowRegistry {
     let mut registry = WorkflowRegistry::new();
-    let task_registry = build_task_registry();
 
+    // workflow! auto-registers #[task]-annotated functions
     let workflow = workflow!(
         "email-pipeline",
         JsonCodec,
-        task_registry,
+        TaskRegistry::new(),
         fetch_recipients => render_template => send_emails
     ).unwrap();
 

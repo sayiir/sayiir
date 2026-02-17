@@ -84,12 +84,20 @@ export default defineConfig({
               slug: "tutorials/order-processing-python",
             },
             {
+              label: "Order Processing (Node.js)",
+              slug: "tutorials/order-processing-nodejs",
+            },
+            {
               label: "Background Jobs (Rust)",
               slug: "tutorials/background-jobs-rust",
             },
             {
               label: "Approval Workflow (Signals)",
               slug: "tutorials/approval-workflow",
+            },
+            {
+              label: "AI Research Agent (Python)",
+              slug: "tutorials/ai-research-agent",
             },
           ],
         },
@@ -119,6 +127,7 @@ export default defineConfig({
             { label: "Platform Overview", slug: "server", badge: "Soon" },
           ],
         },
+        { label: "Roadmap", slug: "roadmap" },
       ],
     }),
   ],

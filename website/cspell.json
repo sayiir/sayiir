@@ -64,7 +64,9 @@
     "signups",
     "automations",
     "deprioritizes",
-    "seti"
+    "seti",
+    "rusqlite",
+    "Ollama"
   ],
   "flagWords": [],
   "dictionaries": ["softwareTerms", "typescript", "python", "rust", "node"]
