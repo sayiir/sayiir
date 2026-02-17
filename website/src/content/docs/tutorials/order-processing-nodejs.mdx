@@ -77,8 +77,8 @@ const chargePayment = task(
   },
   {
     timeout: "30s",
-    retries: {
-      maxRetries: 3,
+    retry: {
+      maxAttempts: 3,
       initialDelay: "1s",
       backoffMultiplier: 2.0,
     },
@@ -212,25 +212,6 @@ Now your workflow state survives:
 - Server restarts
 - Deployments
 
-You can query workflow status from anywhere:
-
-```typescript
-import { getWorkflowStatus } from "sayiir";
-
-const status = getWorkflowStatus("order-3", backend);
-
-switch (status.status) {
-  case "running":
-    console.log("Still processing...");
-    break;
-  case "completed":
-    console.log(`Done: ${status.output}`);
-    break;
-  case "failed":
-    console.log(`Failed: ${status.error}`);
-    break;
-}
-```
 
 ## Full Code Listing
 
@@ -279,7 +260,7 @@ const chargePayment = task(
     // Integrate with payment provider
     return { ...order, paymentId: "pay_123abc", charged: true };
   },
-  { timeout: "30s", retries: { maxRetries: 3, initialDelay: "1s", backoffMultiplier: 2.0 } }
+  { timeout: "30s", retry: { maxAttempts: 3, initialDelay: "1s", backoffMultiplier: 2.0 } }
 );
 
 const checkInventory = task(
