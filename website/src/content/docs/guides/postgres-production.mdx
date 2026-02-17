@@ -25,9 +25,12 @@ Examples:
 - `postgresql://user:pass@db.example.com:5432/workflows`
 - `postgresql://localhost/sayiir?sslmode=require`
 
-## Python Setup
+## Connecting to PostgreSQL
 
-Create a `PostgresBackend` instance and pass it to `run_durable_workflow`:
+Create a `PostgresBackend` and pass it to the runner or worker. The backend connects to the database and initializes tables on first use.
+
+<Tabs>
+<TabItem label="Python">
 
 ```python
 from sayiir import PostgresBackend, Flow, run_durable_workflow
@@ -36,14 +39,18 @@ backend = PostgresBackend("postgresql://localhost/sayiir")
 status = run_durable_workflow(workflow, "order-123", 42, backend=backend)
 ```
 
-The backend connects to the database and initializes tables on first use.
+</TabItem>
+<TabItem label="Node.js">
 
-## Rust Setup
+```typescript
+import { PostgresBackend, runDurableWorkflow } from "sayiir";
 
-Use the `sayiir_postgres` crate and await the connection:
+const backend = PostgresBackend.connect("postgresql://localhost/sayiir");
+const status = runDurableWorkflow(workflow, "order-123", 42, backend);
+```
 
-<Tabs>
-<TabItem label="Basic">
+</TabItem>
+<TabItem label="Rust">
 
 ```rust
 use sayiir_postgres::PostgresBackend;
@@ -55,7 +62,11 @@ let status = runner.run(&workflow, "order-123", input).await?;
 ```
 
 </TabItem>
-<TabItem label="With Custom Codec">
+</Tabs>
+
+### Rust: Custom Codec
+
+In Rust, you can use a custom codec instead of the default `JsonCodec`:
 
 ```rust
 use sayiir_postgres::PostgresBackend;
@@ -66,9 +77,6 @@ let codec = Arc::new(JsonCodec);
 let backend = PostgresBackend::connect_with_codec("postgresql://localhost/sayiir", codec).await?;
 let runner = CheckpointingRunner::new(backend);
 ```
-
-</TabItem>
-</Tabs>
 
 The `connect` method is async and returns a `Result`. It establishes the connection pool and runs migrations automatically.
 
@@ -117,7 +125,7 @@ let pool = PgPoolOptions::new()
     .connect("postgresql://localhost/sayiir")
     .await?;
 
-let backend = PostgresBackend::from_pool(pool);
+let backend = PostgresBackend::<JsonCodec>::connect_with(pool).await?;
 ```
 
 For Python, connection pooling is managed automatically with sensible defaults.

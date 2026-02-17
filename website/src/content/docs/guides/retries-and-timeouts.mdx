@@ -18,6 +18,7 @@ You can configure retry behavior per task using `RetryPolicy`. The policy specif
 - `max_retries`: Maximum number of retry attempts
 - `initial_delay`: First backoff duration
 - `backoff_multiplier`: Multiplier for exponential backoff (e.g., 2.0 doubles the delay each retry)
+- `max_delay` *(optional)*: Cap on the backoff duration to prevent unbounded growth
 
 <Tabs>
 <TabItem label="Python">
@@ -132,10 +133,15 @@ async fn process(data: serde_json::Value) -> Result<String, BoxError> {
     Ok(format!("processed {} keys", data.as_object().map_or(0, |o| o.len())))
 }
 
+// Register macro-decorated tasks into the registry
+let mut registry = TaskRegistry::new();
+CallApi::register(&mut registry, codec.clone(), CallApi::new());
+Process::register(&mut registry, codec.clone(), Process::new());
+
 let workflow = WorkflowBuilder::new(ctx)
-    .with_registry()
-    .then_fn(call_api)
-    .then_fn(process)
+    .with_existing_registry(registry)
+    .then_registered::<serde_json::Value>(CallApi::task_id())?
+    .then_registered::<String>(Process::task_id())?
     .build()?;
 ```
 

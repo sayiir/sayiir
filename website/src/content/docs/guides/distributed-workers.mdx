@@ -247,7 +247,15 @@ handle.shutdown();
 
 ```rust
 // Cancel a workflow
-handle.cancel("order-42", Some("Out of stock"), Some("system")).await?;
+handle.cancel_workflow("order-42", Some("Out of stock".into()), Some("system".into())).await?;
+
+// Pause a workflow
+handle.pause_workflow("order-42", Some("Maintenance window".into()), None).await?;
+
+// Unpause and send signals go through the backend directly
+let backend = handle.backend();
+backend.unpause("order-42").await?;
+backend.send_event("order-42", "manager_approval", payload).await?;
 
 // Graceful shutdown
 handle.shutdown();
@@ -321,6 +329,25 @@ const emailWf = flow<Email>("emails").then(sendEmail).build();
 
 const worker = new Worker("worker-1", backend, [orderWf, emailWf]);
 const handle = worker.start();
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let order_wf = WorkflowBuilder::new(order_ctx)
+    .then("process_order", process_order)
+    .build()?;
+let email_wf = WorkflowBuilder::new(email_ctx)
+    .then("send_email", send_email)
+    .build()?;
+
+let workflows: WorkflowRegistry<_, _, _> = vec![
+    (order_wf.definition_hash().to_string(), Arc::new(order_wf)),
+    (email_wf.definition_hash().to_string(), Arc::new(email_wf)),
+];
+
+let handle = worker.spawn(Duration::from_secs(1), workflows);
 ```
 
 </TabItem>

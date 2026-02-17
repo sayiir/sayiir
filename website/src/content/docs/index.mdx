@@ -3,7 +3,7 @@ title: Sayiir — Fast, Simple Durable Workflow Engine
 description: Fast, lightweight durable workflow engine for Python, Node.js, and Rust. Zero learning curve — write normal async code with automatic checkpointing, retries, and crash recovery. No DSL, no infrastructure, native performance.
 template: splash
 hero:
-  tagline: The fast, simple durable workflow engine. Zero learning curve — just write normal Python, TypeScript, or Rust. Native performance, automatic checkpointing, no infrastructure to deploy.
+  tagline: The fast, simple durable workflow engine. Graph-based, continuation-driven execution — just write normal Python, TypeScript, or Rust. Native performance, automatic checkpointing, no infrastructure to deploy.
   actions:
     - text: Get Started (Python)
       link: /getting-started/python/
@@ -23,7 +23,7 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid>
   <Card title="Zero Learning Curve" icon="rocket">
-    No new DSL. No replay constraints. Write normal async code — Sayiir makes it durable automatically.
+    No new DSL. No replay constraints. Define your task graph with normal async code — Sayiir makes it durable automatically via continuation-based execution.
   </Card>
   <Card title="Simple — Library Not Platform" icon="puzzle">
     `pip install sayiir`, `pnpm add sayiir`, or add a Cargo dependency. No orchestrator to deploy, no infrastructure to manage.
