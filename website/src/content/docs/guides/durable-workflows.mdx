@@ -7,9 +7,9 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## What makes a workflow durable
 
-After each task completes, Sayiir saves a checkpoint (snapshot) of the workflow state. If the process crashes or restarts, you can call `resume` to continue execution from the last checkpoint. There is no replay—tasks that already completed are never re-executed.
+Sayiir uses **continuation-based execution**: after each task completes, it saves a checkpoint (snapshot) of the workflow state — including the current position in the task graph. If the process crashes or restarts, you call `resume` to continue from the last checkpointed continuation. There is no replay — tasks that already completed are never re-executed.
 
-This checkpointing mechanism ensures that long-running workflows can survive process crashes, deployments, or infrastructure failures without losing progress.
+This checkpoint-resume mechanism ensures that long-running workflows can survive process crashes, deployments, or infrastructure failures without losing progress.
 
 ## InMemory vs PostgreSQL
 

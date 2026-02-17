@@ -1,19 +1,25 @@
 ---
 title: How Sayiir Works
-description: Why Sayiir is the fastest, simplest durable workflow engine — zero learning curve, native Rust performance, no infrastructure overhead
+description: Continuation-based workflow execution with graph-defined task dependencies — zero learning curve, native Rust performance, no replay, no infrastructure overhead
 ---
 
 Most workflow engines force you to learn their mental model, their DSL, their way of thinking. You end up writing code *for the engine* instead of writing code *for your business*. The learning curve is steep, the infrastructure burden is heavy, and performance suffers under layers of abstraction.
 
 **Sayiir is different.** Write async Rust or plain Python. That's it. Your existing code, your existing patterns, your existing tests — they all just work. There's virtually **zero learning curve** because there's nothing new to learn. If you can write a function, you can build a durable workflow.
 
-## No Deterministic Replay
+## Task Graph Model
+
+Workflows in Sayiir are defined as a **task graph** — a directed acyclic graph (DAG) of tasks, forks, delays, and signals connected by dependency edges. You build the graph using the `Flow` builder (Python/Node.js) or `workflow!` macro (Rust), and Sayiir traverses it at runtime.
+
+Internally, the graph is represented as a **continuation tree**: each node in the workflow knows what comes next. Sequential tasks chain via `next` pointers, parallel branches fan out from `Fork` nodes and reconverge at `Join` nodes. This structure is serializable — the entire remaining execution plan can be checkpointed and resumed on any machine.
+
+## Continuation-Based Execution (No Deterministic Replay)
 
 This is the big one. Temporal, Restate, Azure Durable Functions, and most durable execution engines use **replay-based recovery**: when a workflow resumes, they re-execute your code from the beginning and skip completed steps. This requires your workflow code to be **deterministic** — no system time, no random values, no direct I/O, no side effects outside SDK-approved APIs.
 
 Developers consistently report this as the #1 source of production incidents, versioning nightmares, and onboarding friction.
 
-**Sayiir doesn't replay.** It checkpoints after each task and resumes from the last checkpoint. Your tasks can call any API, use any library, read the clock, generate random values — there are no determinism constraints. When a process crashes, Sayiir loads the last snapshot and picks up from where it left off. No re-execution. No replay storms. No versioning headaches.
+**Sayiir uses continuation-based execution instead.** After each task completes, Sayiir checkpoints the output and advances to the next continuation in the graph. When a process crashes, it loads the last snapshot and picks up from the current continuation — no re-execution of completed work. Your tasks can call any API, use any library, read the clock, generate random values — there are no determinism constraints. No replay storms. No versioning headaches.
 
 Execution is also **panic-safe** — if a Rust task panics or a Python task raises an unhandled exception, Sayiir catches it, records the failure, and the workflow can be retried or resumed without corrupting state.
 

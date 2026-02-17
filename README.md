@@ -1,6 +1,6 @@
 # Sayiir
 
-**Durable, fast workflow engine that feels like writing normal code.** Rust core with Python and Node.js bindings — no DSL, workflows from your plain code.
+**Durable, fast workflow engine that feels like writing normal code.** Graph-based, continuation-driven execution with a Rust core and Python/Node.js bindings — no DSL, no replay, workflows from your plain code.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
@@ -26,9 +26,9 @@
 
 &#9889;&ensp;**Fast by design.** Rust-native orchestration with zero-copy serialization (rkyv) and no replay overhead — resume from the last checkpoint, not from the beginning of your workflow history.
 
-&#128274;&ensp;**No deterministic replay.** Sayiir checkpoints after each task and resumes from the last checkpoint — your code can call any API, use any library, with zero determinism constraints.
+&#128274;&ensp;**No deterministic replay.** Continuation-based execution — Sayiir checkpoints after each task and resumes from the last checkpoint. Your code can call any API, use any library, with zero determinism constraints.
 
-&#128230;&ensp;**A library, not a platform.** Import it, write your workflow, run it. No separate infrastructure to deploy or operate.
+&#128230;&ensp;**A library, not a platform.** Import it, define your task graph, run it. No separate infrastructure to deploy or operate.
 
 #### 🐍 Python
 
