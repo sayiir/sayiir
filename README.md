@@ -91,7 +91,6 @@ const workflow = flow<number>("welcome")
   .then(fetchUser)
   .then(sendEmail)
   .build();
-
 const result = await runWorkflow(workflow, 42);
 ```
 
