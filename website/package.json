@@ -7,7 +7,10 @@
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "spell": "cspell \"src/content/**/*.mdx\" \"src/content/**/*.md\"",
+    "links:external": "lychee --root-dir dist --exclude-path dist/404.html \"dist/**/*.html\"",
+    "lint": "pnpm spell && pnpm build && pnpm links:external"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.37",
@@ -15,5 +18,9 @@
     "astro-mermaid": "^1.3.1",
     "mermaid": "^11.12.2",
     "sharp": "^0.33"
+  },
+  "devDependencies": {
+    "cspell": "^9.6.4",
+    "starlight-links-validator": "^0.19.2"
   }
 }

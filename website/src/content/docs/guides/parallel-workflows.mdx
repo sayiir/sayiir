@@ -76,18 +76,17 @@ const result = await runWorkflow(workflow, { order_id: 1 });
 ```rust
 let workflow = WorkflowBuilder::new(ctx)
     .then("fetch_order", fetch_order)
-    .fork(|fork| {
-        fork.branch("validate_payment", validate_payment)
-            .branch("check_inventory", check_inventory)
-            .branch("calculate_shipping", calculate_shipping)
-    })
-    .join("finalize_order", |results| async move {
-        let payment = results.get("validate_payment")?;
-        let inventory = results.get("check_inventory")?;
-        let shipping = results.get("calculate_shipping")?;
+    .fork()
+        .branch("validate_payment", validate_payment)
+        .branch("check_inventory", check_inventory)
+        .branch("calculate_shipping", calculate_shipping)
+    .join("finalize_order", |results: BranchOutputs<JsonCodec>| async move {
+        let payment: PaymentResult = results.get("validate_payment")?;
+        let inventory: InventoryResult = results.get("check_inventory")?;
+        let shipping: ShippingResult = results.get("calculate_shipping")?;
         Ok(Order::finalize(payment, inventory, shipping))
     })
-    .build();
+    .build()?;
 ```
 
 </TabItem>
@@ -98,9 +97,9 @@ let workflow = WorkflowBuilder::new(ctx)
 Rust also supports a concise macro syntax for fork/join:
 
 ```rust
-workflow! {
+let wf = workflow!("checkout", JsonCodec, registry,
     validate_payment || check_inventory => finalize
-}
+);
 ```
 
 The `||` operator denotes parallel execution, and `=>` connects the fork to the join handler.
@@ -154,10 +153,10 @@ def finalize(results: dict) -> str:
 <TabItem label="Rust">
 
 ```rust
-.join("finalize_order", |results| async move {
-    let payment = results.get("validate_payment")?;
-    let inventory = results.get("check_inventory")?;
-    let shipping = results.get("calculate_shipping")?;
+.join("finalize_order", |results: BranchOutputs<JsonCodec>| async move {
+    let payment: PaymentResult = results.get("validate_payment")?;
+    let inventory: InventoryResult = results.get("check_inventory")?;
+    let shipping: ShippingResult = results.get("calculate_shipping")?;
 
     Ok(format!(
         "Order processed: payment={:?}, stock={:?}, shipping={:?}",

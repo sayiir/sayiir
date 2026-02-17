@@ -1,0 +1,28 @@
+{
+  "name": "Sayiir Dev",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+  "postCreateCommand": "npm install -g pnpm && cargo build && pip install -e sayiir-python/ && cd sayiir-nodejs && pnpm install",
+  "postStartCommand": "echo '\n🚀 Sayiir dev environment ready!\n\n  Rust:    cd examples/hello-world-rs && cargo run\n  Python:  python examples/hello-world-py/main.py\n  Node.js: cd examples/hello-world-node && pnpm install && pnpm tsx index.ts\n'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "ms-python.python"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

@@ -56,14 +56,16 @@ const backend = PostgresBackend.connect(
 <TabItem label="Rust">
 
 ```rust
-use sayiir_persistence::{InMemoryBackend, PostgresBackend};
+use sayiir_persistence::InMemoryBackend;
+use sayiir_postgres::PostgresBackend;
+use sayiir_runtime::prelude::*;
 
 // Development/testing
 let backend = InMemoryBackend::new();
 
 // Production
-let backend = PostgresBackend::new(
-    "host=localhost port=5432 user=postgres password=password dbname=sayiir"
+let backend = PostgresBackend::<JsonCodec>::connect(
+    "postgresql://localhost/sayiir"
 ).await?;
 ```
 
@@ -104,7 +106,7 @@ cancelWorkflow("job-123", backend, {
 
 ```rust
 // Cancel using the runner
-runner.cancel("job-123").await?;
+runner.cancel("job-123", Some("No longer needed".into()), Some("admin".into())).await?;
 ```
 
 </TabItem>
@@ -119,7 +121,7 @@ runner.cancel("job-123").await?;
 from sayiir import pause_workflow, unpause_workflow
 
 # Pause a running workflow
-pause_workflow("job-123", backend=backend)
+pause_workflow("job-123", backend=backend, reason="Maintenance window")
 
 # Unpause to allow resumption
 unpause_workflow("job-123", backend=backend)
@@ -146,7 +148,7 @@ unpauseWorkflow("job-123", backend);
 
 ```rust
 // Pause a running workflow
-runner.pause("job-123").await?;
+runner.pause("job-123", Some("Maintenance window".into()), Some("ops-team".into())).await?;
 
 // Unpause to allow resumption
 runner.unpause("job-123").await?;

@@ -18,6 +18,7 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       node: ${{ steps.filter.outputs.node }}
       deny: ${{ steps.filter.outputs.deny }}
+      website: ${{ steps.filter.outputs.website }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
@@ -46,6 +47,8 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+            website:
+              - 'website/**'
 
   deny:
     name: Cargo Deny
@@ -250,3 +253,42 @@ jobs:
         if: steps.baseline.outcome == 'success'
         continue-on-error: true
         run: critcmp main pr
+
+  docs-lint:
+    name: Docs Lint
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      - name: Spell check
+        working-directory: website
+        run: pnpm spell
+
+      - name: Build & validate internal links
+        working-directory: website
+        run: pnpm build
+
+      - name: Install lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          installOnly: true
+
+      - name: Check external links
+        working-directory: website
+        run: lychee --root-dir dist --exclude-path dist/404.html "dist/**/*.html"

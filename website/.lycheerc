@@ -1,0 +1,36 @@
+# Lychee configuration — run against built dist/ output
+# Internal links are validated by starlight-links-validator at build time
+
+glob_ignore_case = true
+
+# Only check remote URLs — skip internal/relative links
+scheme = ["https", "http"]
+
+# Exclude patterns
+exclude = [
+  # Edit links point to GitHub source (may not exist yet)
+  "https://github.com/sayiir/sayiir/edit/",
+  # Localhost URLs in code examples
+  "http://localhost",
+  "http://127.0.0.1",
+  # Placeholder URLs
+  "https://example.com",
+]
+
+# Accept these status codes
+accept = [200, 204, 301, 302, 429]
+
+# Timeout per request (seconds)
+timeout = 30
+
+# Max retries
+max_retries = 3
+
+# Max concurrent requests
+max_concurrency = 8
+
+# Don't check fragments (anchors)
+include_fragments = false
+
+# Skip these paths
+exclude_path = ["node_modules"]
