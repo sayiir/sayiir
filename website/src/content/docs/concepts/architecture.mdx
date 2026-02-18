@@ -11,7 +11,7 @@ graph TB
     Bindings[Language Bindings<br/>thin layer — workflow definition only]
     Rust[Rust Bindings<br/>native]
     Python[Python Bindings<br/>PyO3]
-    Node[Node.js<br/>planned]
+    Node[Node.js<br/>NAPI-RS]
     Runtime[Sayiir Runtime Rust]
     CheckpointRunner[CheckpointingRunner<br/>single process]
     PooledWorker[PooledWorker<br/>distributed, multi-machine]
@@ -37,6 +37,10 @@ graph TB
     Persistence --> Custom
     Persistence --> Enterprise
 ```
+
+:::tip[Full Feature Parity]
+All language bindings — Rust, Python, and Node.js — expose the exact same feature set. Sequential and parallel workflows, retries, timeouts, delays, signals, conditional branching, distributed workers, pluggable backends — everything is available in every language. The only variation is in serialization: Rust offers a choice of codecs (JSON, rkyv, or custom), while Python and Node.js use JSON by default. Even this is extensible by design through the pluggable `Codec` trait.
+:::
 
 ## Core Concepts
 

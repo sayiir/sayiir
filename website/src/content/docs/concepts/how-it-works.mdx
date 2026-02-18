@@ -35,6 +35,8 @@ Temporal recognized this was the right architecture — their newer Python, Type
 
 The Rust runtime handles all orchestration, checkpointing, serialization, and execution. Language bindings are thin: you define tasks in your language, Rust does everything else. This means every language gets the same performance, correctness, and safety guarantees — because they share the same battle-tested core.
 
+**All bindings expose the exact same features** — If a feature exists in one language, it exists in all of them. The only difference is in serialization: Rust offers a choice of codecs (JSON, rkyv, or custom), while Python and Node.js use JSON by default. Even this is extensible by design — the `Codec` trait is a public port, so custom serialization formats can be plugged in at any layer.
+
 ## Hexagonal Architecture
 
 Sayiir's internals follow hexagonal (ports & adapters) architecture. The core domain (`sayiir-core`) has **zero infrastructure dependencies** — pure business logic. All dependencies flow inward:
