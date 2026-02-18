@@ -267,7 +267,7 @@ wheels = [
 
 [[package]]
 name = "sayiir"
-version = "0.1.0a14"
+version = "0.1.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

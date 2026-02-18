@@ -328,6 +328,8 @@ MIT
 
 ## Links
 
+- [Documentation](https://docs.sayiir.dev/getting-started/python/)
+- [Examples](https://github.com/sayiir/sayiir/tree/main/examples)
 - [GitHub](https://github.com/sayiir/sayiir)
 - [Discord](https://discord.gg/MWSzsHeg)
 - [Roadmap](https://github.com/sayiir/sayiir/blob/main/ROADMAP.md)

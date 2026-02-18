@@ -2,7 +2,8 @@
 
 A durable AI research agent built with Sayiir. Given a topic, it searches
 multiple sources in parallel, synthesizes findings with a local LLM via
-Ollama, and waits for human approval before saving the final report.
+Ollama, routes through a quality gate, and waits for human approval before
+saving the final report.
 
 **Zero API keys required** — everything runs locally.
 
@@ -10,19 +11,26 @@ Ollama, and waits for human approval before saving the final report.
 
 Sayiir is not an AI agent framework — it's a **durable workflow engine**.
 But many AI "agents" are really pipelines: fetch data, process it, call an
-LLM, wait for a human, save the result. For these, Sayiir is simpler than
-agent-specific frameworks. The entire research agent in 12 lines:
+LLM, evaluate quality, wait for a human, save the result. For these, Sayiir
+is simpler than agent-specific frameworks:
 
 ```python
 workflow = (
     Flow("ai-research-agent")
     .then(parse_query)
     .fork()
-    .branch(search_web)
-    .branch(search_wikipedia)
-    .branch(search_arxiv)
+        .branch(search_web)
+        .branch(search_wikipedia)
+        .branch(search_arxiv)
     .join(merge_sources)
     .then(synthesize)
+    .then(assess_quality)
+    .route(extract_verdict, keys=["publish", "revise", "insufficient"])
+        .branch("publish", pass_through)
+        .branch("revise", revise_report)
+        .branch("insufficient", flag_insufficient)
+    .done()
+    .then(save_draft)
     .wait_for_signal("human_approval", timeout=timedelta(hours=48))
     .then(save_report)
     .build()
@@ -30,12 +38,12 @@ workflow = (
 ```
 
 **Where Sayiir shines:** retries with backoff for flaky LLM APIs, parallel
-search, human-in-the-loop signals, and crash recovery for long-running
-pipelines — all with no infrastructure and no determinism constraints.
+search, conditional routing based on LLM output, human-in-the-loop signals,
+and crash recovery for long-running pipelines — all with no infrastructure
+and no determinism constraints.
 
-**Where Sayiir is not the right fit (today):** if your agent needs dynamic
-branching (route based on LLM output), loops (retry with different
-strategies), or token streaming. See the
+**Where Sayiir is not the right fit (today):** if your agent needs loops
+(retry with different strategies) or token streaming. See the
 [roadmap](https://docs.sayiir.dev/roadmap/) for what's coming.
 
 ## Sayiir features demonstrated
@@ -43,28 +51,33 @@ strategies), or token streaming. See the
 | Feature | How it's used |
 |---|---|
 | **Fork/join** | Search DuckDuckGo, Wikipedia, and arxiv in parallel |
+| **Conditional branching** | Route based on LLM quality assessment (publish / revise / insufficient) |
 | **Retries + backoff** | All external calls (search + LLM) with exponential backoff |
-| **Timeouts** | 30s per search task, 120s for LLM synthesis |
+| **Timeouts** | 30s per search, 60s for quality assessment, 120s for synthesis |
 | **Signals** | Human reviews the draft, then approves or rejects |
 | **Durability** | Every step is checkpointed — crash at any point and resume |
 | **Pydantic models** | Typed, validated data flowing between every task |
 
 ## Workflow
 
-```
-parse_query
-     │
-     ├── search_web       ┐
-     ├── search_wikipedia ├─ 3 searches in parallel (fork)
-     └── search_arxiv     ┘
-              │
-        merge_sources (join)
-              │
-         synthesize (Ollama / llama3.2)
-              │
-        wait_for_signal ← human approval, 48h timeout
-              │
-         save_report → reports/{topic}-{timestamp}.md
+```mermaid
+graph TD
+    A[parse_query] --> B[search_web]
+    A --> C[search_wikipedia]
+    A --> D[search_arxiv]
+    B --> E[merge_sources — join]
+    C --> E
+    D --> E
+    E --> F[synthesize\nOllama / llama3.2]
+    F --> G[assess_quality\nLLM self-assessment]
+    G --> H[publish\nas-is]
+    G --> I[revise\nLLM revises]
+    G --> J[insufficient\nflag with warning]
+    H --> K[save_draft]
+    I --> K
+    J --> K
+    K --> L[wait_for_signal\nhuman approval · 48h timeout]
+    L --> M[save_report]
 ```
 
 ## Prerequisites
@@ -110,9 +123,10 @@ What happens step by step:
 2. Three searches run **in parallel** (DuckDuckGo, Wikipedia, arxiv)
 3. Results are merged into a single source list
 4. The local LLM synthesizes everything into a Markdown report
-5. The draft is printed to your terminal and saved to `reports/drafts/`
-6. You're prompted: `Approve this report? [y/N]`
-7. If you approve, the final report is saved to `reports/`
+5. The LLM self-assesses quality → routes to **publish** (as-is), **revise** (LLM improves it), or **insufficient** (flagged with warning)
+6. The draft is printed to your terminal and saved to `reports/drafts/`
+7. You're prompted: `Approve this report? [y/N]`
+8. If you approve, the final report is saved to `reports/`
 
 ### Options
 

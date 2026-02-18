@@ -67,6 +67,10 @@ export default defineConfig({
               slug: "guides/parallel-workflows",
             },
             {
+              label: "Composing Workflows",
+              slug: "guides/composing-workflows",
+            },
+            {
               label: "Distributed Workers",
               slug: "guides/distributed-workers",
             },

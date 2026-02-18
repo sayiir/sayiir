@@ -1,325 +1,67 @@
 ---
 title: "Tutorial: Order Processing (Node.js)"
-description: Build a complete order processing pipeline in TypeScript with validation, payment, and confirmation
+description: Build an order processing pipeline with fork/join, webhook signals, and durable checkpointing
 ---
 
-Learn how to build a production-ready order processing pipeline with Sayiir and TypeScript. We'll start with a simple sequential flow and progressively add durability, retries, and parallelism.
+import { LinkCard } from '@astrojs/starlight/components';
 
-## What We're Building
-
-An order processing pipeline that:
-- Validates incoming orders
-- Charges payment (with automatic retries)
-- Checks inventory
-- Sends confirmation emails
-
-By the end, you'll have a durable workflow that survives crashes and scales to handle thousands of orders.
-
-## Project Setup
-
-Create a new project and install Sayiir:
-
-```bash
-mkdir order-processor && cd order-processor
-pnpm init
-pnpm add sayiir
-```
-
-If you're using TypeScript (recommended):
-
-```bash
-pnpm add -D typescript @types/node
-npx tsc --init
-```
-
-## Define Tasks
-
-Tasks are the building blocks of workflows. Let's define our order processing tasks with proper error handling and retry policies:
+Build an order processing pipeline that validates orders, charges payment and checks inventory in parallel, then **parks until a shipping provider calls your webhook** — resuming automatically to send the confirmation.
 
 ```typescript
-import { task, RetryPolicy } from "sayiir";
+import { task, flow, branch, runDurableWorkflow, sendSignal, resumeWorkflow } from "sayiir";
 
-interface Order {
-  orderId: number;
-  customerEmail: string;
-  amount: number;
-}
-
-interface ValidatedOrder extends Order {
-  validated: true;
-}
-
-interface ChargedOrder extends ValidatedOrder {
-  paymentId: string;
-  charged: true;
-}
-
-const validateOrder = task("validate-order", (order: Order): ValidatedOrder => {
-  if (order.amount <= 0) {
-    throw new Error("Invalid amount: must be positive");
-  }
-  if (!order.customerEmail) {
-    throw new Error("Customer email is required");
-  }
-  return { ...order, validated: true };
+const validateOrder = task("validate-order", (order: Order) => {
+  if (order.amount <= 0) throw new Error("Invalid amount");
+  return { ...order, validated: true as const };
 });
 
-const chargePayment = task(
-  "charge-payment",
-  (order: ValidatedOrder): ChargedOrder => {
-    // In production: integrate with Stripe, Square, etc.
-    // const paymentIntent = await stripe.paymentIntents.create({
-    //   amount: Math.round(order.amount * 100),
-    //   currency: "usd",
-    // });
+const chargePayment = task("charge-payment", (order: Order) => {
+  return { ...order, paymentId: `pay_${order.orderId}`, charged: true as const };
+}, { timeout: "30s", retry: { maxAttempts: 3, initialDelay: "1s", backoffMultiplier: 2.0 } });
 
-    return { ...order, paymentId: "pay_123abc", charged: true };
-  },
-  {
-    timeout: "30s",
-    retry: {
-      maxAttempts: 3,
-      initialDelay: "1s",
-      backoffMultiplier: 2.0,
-    },
-  }
-);
-
-const sendConfirmation = task(
-  "send-confirmation",
-  (order: ChargedOrder): string => {
-    // In production: integrate with SendGrid, Postmark, etc.
-    return `Order ${order.orderId} confirmed (payment: ${order.paymentId})`;
-  }
-);
-```
-
-Notice the task options configure:
-- **timeout**: Fails if `chargePayment` takes longer than 30 seconds
-- **retries**: Automatically retries failed payments up to 3 times with exponential backoff (1s, 2s, 4s)
-
-## Build a Simple Workflow
-
-Compose these tasks into a sequential workflow:
-
-```typescript
-import { flow, runWorkflow } from "sayiir";
-
-const workflow = flow<Order>("order-processing")
-  .then(validateOrder)
-  .then(chargePayment)
-  .then(sendConfirmation)
-  .build();
-
-const orderData: Order = {
-  orderId: 1,
-  customerEmail: "alice@example.com",
-  amount: 99.99,
-};
-
-const result = await runWorkflow(workflow, orderData);
-console.log(result); // "Order 1 confirmed (payment: pay_123abc)"
-```
-
-This works great for simple cases, but what happens if your process crashes during payment? The order might be charged twice on restart.
-
-## Make It Durable
-
-Switch to `runDurableWorkflow` to get automatic checkpointing and crash recovery:
-
-```typescript
-import { runDurableWorkflow, InMemoryBackend } from "sayiir";
-
-const backend = new InMemoryBackend();
-
-const status = runDurableWorkflow(workflow, "order-1", orderData, backend);
-
-console.log(status.status); // "completed"
-if (status.status === "completed") {
-  console.log(status.output); // "Order 1 confirmed (payment: pay_123abc)"
-}
-```
-
-Now if your process crashes:
-- Tasks are checkpointed after each step
-- On restart, the workflow resumes from the last checkpoint
-- Already-completed tasks are never re-executed
-
-**Testing durability**: Try running this twice with the same workflow ID. The second run will immediately return the cached result without re-executing tasks.
-
-## Add Parallel Branches
-
-Real order processing needs to do multiple things at once. Let's check inventory while charging payment:
-
-```typescript
-import { branch } from "sayiir";
-
-interface InventoryResult extends ValidatedOrder {
-  inStock: true;
-}
-
-const checkInventory = task(
-  "check-inventory",
-  (order: ValidatedOrder): InventoryResult => {
-    // In production: query inventory database
-    return { ...order, inStock: true };
-  }
-);
-
-const finalize = task(
-  "finalize",
-  ([payment, inventory]: [ChargedOrder, InventoryResult]): string => {
-    return `Order complete: paid=${payment.charged}, stock=${inventory.inStock}`;
-  }
-);
-
-const workflow = flow<Order>("order-v2")
-  .then(validateOrder)
-  .fork([
-    branch("payment", chargePayment),
-    branch("inventory", checkInventory),
-  ])
-  .join("finalize", finalize)
-  .build();
-
-const status = runDurableWorkflow(workflow, "order-2", orderData, backend);
-
-if (status.status === "completed") {
-  console.log(status.output); // "Order complete: paid=true, stock=true"
-}
-```
-
-The `fork()`/`join()` pattern:
-1. Executes `chargePayment` and `checkInventory` in parallel
-2. Waits for both to complete
-3. Passes results as a tuple to `finalize` in declaration order
-
-## Switch to Postgres
-
-For production, use `PostgresBackend` for true durability across server restarts:
-
-```typescript
-import { PostgresBackend } from "sayiir";
-
-// Connects and runs migrations automatically
-const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
-
-const status = runDurableWorkflow(workflow, "order-3", orderData, backend);
-```
-
-Now your workflow state survives:
-- Process crashes
-- Server restarts
-- Deployments
-
-
-## Full Code Listing
-
-Here's the complete working example:
-
-```typescript
-import {
-  task,
-  flow,
-  branch,
-  runDurableWorkflow,
-  PostgresBackend,
-} from "sayiir";
-
-// Types
-interface Order {
-  orderId: number;
-  customerEmail: string;
-  productId: string;
-  amount: number;
-}
-
-interface ValidatedOrder extends Order {
-  validated: true;
-}
-
-interface ChargedOrder extends ValidatedOrder {
-  paymentId: string;
-  charged: true;
-}
-
-interface InventoryResult extends ValidatedOrder {
-  inStock: true;
-}
-
-// Task definitions
-const validateOrder = task("validate-order", (order: Order): ValidatedOrder => {
-  if (order.amount <= 0) throw new Error("Invalid amount: must be positive");
-  if (!order.customerEmail) throw new Error("Customer email is required");
-  return { ...order, validated: true };
+const checkInventory = task("check-inventory", (order: Order) => {
+  return { ...order, inStock: true as const };
 });
 
-const chargePayment = task(
-  "charge-payment",
-  (order: ValidatedOrder): ChargedOrder => {
-    // Integrate with payment provider
-    return { ...order, paymentId: "pay_123abc", charged: true };
-  },
-  { timeout: "30s", retry: { maxAttempts: 3, initialDelay: "1s", backoffMultiplier: 2.0 } }
-);
-
-const checkInventory = task(
-  "check-inventory",
-  (order: ValidatedOrder): InventoryResult => {
-    // Query inventory database
-    return { ...order, inStock: true };
-  }
-);
-
-const finalize = task(
-  "finalize",
-  ([payment, inventory]: [ChargedOrder, InventoryResult]): string => {
-    return `Order complete: paid=${payment.charged}, stock=${inventory.inStock}`;
-  }
-);
-
-// Workflow definition
 const workflow = flow<Order>("order-processing")
   .then(validateOrder)
   .fork([
     branch("payment", chargePayment),
     branch("inventory", checkInventory),
   ])
-  .join("finalize", finalize)
+  .join("finalize", ([payment, inventory]) => ({
+    orderId: payment.orderId,
+    paymentId: payment.paymentId,
+    inStock: inventory.inStock,
+  }))
+  .waitForSignal<ShipmentEvent>("shipping-wait", "shipment_dispatched", { timeout: "72h" })
+  .then("send-confirmation", (shipment) =>
+    `Order shipped via ${shipment.carrier}, tracking: ${shipment.trackingNumber}`)
   .build();
-
-// Execution
-const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
-
-const order: Order = {
-  orderId: 1001,
-  customerEmail: "alice@example.com",
-  productId: "widget-42",
-  amount: 99.99,
-};
-
-const status = runDurableWorkflow(
-  workflow,
-  `order-${order.orderId}`,
-  order,
-  backend
-);
-
-if (status.status === "completed") {
-  console.log(status.output);
-}
 ```
+
+The workflow parks at `waitForSignal` — no workers are held. When the shipping provider hits your webhook, deliver the payload as a signal:
+
+```typescript
+// POST /webhooks/shipping handler
+sendSignal(body.orderId, "shipment_dispatched", {
+  trackingNumber: body.trackingNumber,
+  carrier: body.carrier,
+}, backend);
+
+const result = resumeWorkflow(workflow, body.orderId, backend);
+```
+
+The full example includes a working HTTP server that receives the webhook and resumes the workflow.
+
+<LinkCard
+  title="Full example: Order Processing (Node.js)"
+  description="Complete source code with webhook server and curl commands."
+  href="https://github.com/sayiir/sayiir/tree/main/examples/order-processing-node"
+/>
 
 ## Next Steps
 
-Now that you have a working order processing pipeline, explore:
-
-- **[Retry Policies](/guides/retries-and-timeouts/)** — Fine-tune retry behavior for different failure scenarios
+- **[Retries & Timeouts](/guides/retries-and-timeouts/)** — Fine-tune retry behavior
+- **[Signals & Events](/guides/signals-and-events/)** — Advanced signal patterns
 - **[Distributed Workers](/guides/distributed-workers/)** — Scale to multiple worker processes
-- **[Signals](/guides/signals-and-events/)** — Add manual approval steps or cancellation
-
-Try adding more features:
-- Send notification to warehouse system after payment
-- Add fraud detection as a parallel branch
-- Implement order cancellation with signals
-- Add webhook notifications for order status updates

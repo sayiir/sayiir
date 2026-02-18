@@ -1,0 +1,217 @@
+---
+title: Composing Workflows
+description: Call one workflow from another to build modular, reusable workflow pipelines
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Overview
+
+You can compose workflows by calling one workflow inside a task step of another. This lets you build modular pipelines from smaller, reusable workflow definitions.
+
+Today, composition works by invoking the child workflow's execution function inside a parent task. The child runs inline — its output becomes the task's output, and the parent continues.
+
+:::note[Native child workflows are planned]
+First-class `run_child_workflow()` support — with independent lifecycle, automatic checkpointing, and cancellation propagation — is on the [Roadmap](/roadmap/#child-workflows). The pattern below works today and covers most composition use cases.
+:::
+
+## Basic Composition
+
+Define a sub-workflow, then call it from a parent workflow's task step:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def validate(order: dict) -> dict:
+    return {**order, "validated": True}
+
+@task
+def charge(order: dict) -> dict:
+    return {"charge_id": f"ch_{order['id']}", "amount": order["amount"]}
+
+# Sub-workflow: handles billing
+billing_workflow = (
+    Flow("billing")
+    .then(validate)
+    .then(charge)
+    .build()
+)
+
+@task
+def prepare(order: dict) -> dict:
+    return {**order, "prepared": True}
+
+@task
+def run_billing(order: dict) -> dict:
+    return run_workflow(billing_workflow, order)
+
+@task
+def confirm(charge: dict) -> str:
+    return f"Order complete: {charge['charge_id']}"
+
+# Parent workflow: calls billing as a step
+order_workflow = (
+    Flow("order-pipeline")
+    .then(prepare)
+    .then(run_billing)
+    .then(confirm)
+    .build()
+)
+
+result = run_workflow(order_workflow, {"id": "abc", "amount": 49.99})
+# "Order complete: ch_abc"
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+// Sub-workflow: handles billing
+const billingWorkflow = flow<{ id: string; amount: number }>("billing")
+  .then("validate", (order) => ({ ...order, validated: true }))
+  .then("charge", (order) => ({
+    chargeId: `ch_${order.id}`,
+    amount: order.amount,
+  }))
+  .build();
+
+// Parent workflow: calls billing as a step
+const orderWorkflow = flow<{ id: string; amount: number }>("order-pipeline")
+  .then("prepare", (order) => ({ ...order, prepared: true }))
+  .then("billing", (order) => runWorkflow(billingWorkflow, order))
+  .then("confirm", (charge) => `Order complete: ${charge.chargeId}`)
+  .build();
+
+const result = await runWorkflow(orderWorkflow, {
+  id: "abc",
+  amount: 49.99,
+});
+// "Order complete: ch_abc"
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Sub-workflow
+let billing_wf = WorkflowBuilder::new(ctx.clone())
+    .then("validate", validate_order)
+    .then("charge", charge_payment)
+    .build()?;
+
+// Parent workflow — call the sub-workflow inside a task closure
+let billing_wf_ref = Arc::new(billing_wf);
+let order_wf = WorkflowBuilder::new(ctx)
+    .then("prepare", prepare_order)
+    .then("run_billing", move |input: Order| {
+        let wf = billing_wf_ref.clone();
+        async move {
+            run_workflow(&wf, input).await
+        }
+    })
+    .then("confirm", confirm_order)
+    .build()?;
+```
+
+</TabItem>
+</Tabs>
+
+## Durable Composition
+
+For durable workflows, use the durable execution function inside the task step. Each child workflow gets its own instance ID and checkpoints independently:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task, Flow, run_durable_workflow, PostgresBackend
+
+backend = PostgresBackend.connect("postgresql://localhost/sayiir")
+
+@task
+def run_billing(order: dict) -> dict:
+    # Child gets its own instance ID for independent checkpointing
+    status = run_durable_workflow(
+        billing_workflow,
+        f"billing-{order['id']}",
+        order,
+        backend,
+    )
+    if status["status"] == "completed":
+        return status["output"]
+    raise RuntimeError(f"Billing failed: {status}")
+
+order_workflow = (
+    Flow("order-pipeline")
+    .then(prepare)
+    .then(run_billing)
+    .then(confirm)
+    .build()
+)
+
+status = run_durable_workflow(order_workflow, "order-abc", input, backend)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import {
+  flow,
+  runDurableWorkflow,
+  PostgresBackend,
+  WorkflowError,
+} from "sayiir";
+
+const backend = PostgresBackend.connect("postgresql://localhost/sayiir");
+
+const orderWorkflow = flow<{ id: string; amount: number }>("order-pipeline")
+  .then("prepare", (order) => ({ ...order, prepared: true }))
+  .then("billing", (order) => {
+    // Child gets its own instance ID for independent checkpointing
+    const status = runDurableWorkflow(
+      billingWorkflow,
+      `billing-${order.id}`,
+      order,
+      backend,
+    );
+    if (status.status === "completed") return status.output;
+    throw new WorkflowError(`Billing failed: ${status.status}`);
+  })
+  .then("confirm", (charge) => `Order complete: ${charge.chargeId}`)
+  .build();
+
+const status = runDurableWorkflow(orderWorkflow, "order-abc", input, backend);
+```
+
+</TabItem>
+</Tabs>
+
+## Current Limitations
+
+The workaround-based approach has a few constraints compared to planned native child workflows:
+
+| Capability | Today (workaround) | Planned (native) |
+|---|---|---|
+| Basic composition | Yes | Yes |
+| Independent checkpointing | Manual (own instance ID) | Automatic |
+| Cancellation propagation | Manual | Automatic |
+| Parent-child linking | Not tracked | Engine-managed |
+| Fire-and-forget | Manual (skip waiting) | Built-in |
+
+For most use cases — modular pipelines, reusable sub-flows, separating concerns — the workaround is sufficient. Native support will add lifecycle management and operational visibility.
+
+## When to Compose
+
+Workflow composition is useful when:
+
+- **Reuse** — The same sequence of tasks appears in multiple parent workflows (e.g., billing, notification, approval)
+- **Separation of concerns** — Teams own different sub-workflows independently
+- **Testing** — Sub-workflows can be tested in isolation
+- **Readability** — Breaking a large workflow into named sub-workflows clarifies intent

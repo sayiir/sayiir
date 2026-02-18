@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-categories.workspace = true
+categories = ["development-tools::procedural-macro-helpers", "asynchronous", "concurrency"]
 keywords.workspace = true
 documentation = "https://docs.rs/sayiir-macros"
 

@@ -37,7 +37,6 @@ export interface StepOptions {
  * Used internally in registries and native bindings wherever a
  * task function reference is stored.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type TaskCallback = (input: any) => unknown | Promise<unknown>;
 
 /** Minimal Zod-like schema interface (avoids hard dependency). */

@@ -204,6 +204,10 @@ jobs:
         working-directory: sayiir-nodejs
         run: pnpm install --no-frozen-lockfile
 
+      - name: Lint
+        working-directory: sayiir-nodejs
+        run: pnpm lint
+
       - name: Type check
         working-directory: sayiir-nodejs
         run: pnpm tsc --noEmit
