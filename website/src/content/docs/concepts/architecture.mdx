@@ -69,6 +69,39 @@ In **distributed mode** (`PooledWorker`), a run is split across multiple workers
 
 Both modes use the same workflow definition, the same persistence traits, and the same snapshot format. The only difference is who drives the execution loop.
 
+### Pooled Workers
+
+```mermaid
+sequenceDiagram
+    participant W1 as Worker 1
+    participant W2 as Worker 2
+    participant W3 as Worker 3
+    participant DB as Persistence Backend
+    participant WF as Workflow Instance
+
+    Note over WF: fetch_user → enrich → send_email
+
+    W1->>DB: poll for available tasks
+    DB-->>W1: fetch_user (instance "order-123")
+    W1->>DB: claim task
+    W1->>W1: execute fetch_user
+    W1->>DB: checkpoint result, release claim
+
+    W3->>DB: poll for available tasks
+    DB-->>W3: enrich (instance "order-123")
+    W3->>DB: claim task
+    W3->>W3: execute enrich
+    W3->>DB: checkpoint result, release claim
+
+    W2->>DB: poll for available tasks
+    DB-->>W2: send_email (instance "order-123")
+    W2->>DB: claim task
+    W2->>W2: execute send_email
+    W2->>DB: checkpoint result — workflow complete
+```
+
+Each worker independently polls for work, claims a single task, executes it, checkpoints the result, and releases its claim. No worker owns the full workflow — they collaborate through the persistence layer. Three different workers can execute three consecutive tasks of the same workflow instance, with the checkpoint ensuring continuity.
+
 ## The Checkpoint-Resume Lifecycle (Continuation-Based Execution)
 
 ```mermaid
