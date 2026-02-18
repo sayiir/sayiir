@@ -86,17 +86,17 @@ expense_data = {
 
 status = run_durable_workflow(
     workflow=workflow,
-    workflow_id="exp-001",
-    initial_input=expense_data,
+    instance_id="exp-001",
+    input_data=expense_data,
     backend=backend
 )
 
-print(f"Workflow status: {status.state()}")  # "waiting_for_signal"
+print(f"Workflow status: {status.status}")  # "waiting_for_signal"
 print("Expense submitted — awaiting manager approval...")
 
 # Step 2: Manager approves (could happen minutes or days later)
 send_signal(
-    workflow_id="exp-001",
+    instance_id="exp-001",
     signal_name="manager_approval",
     payload={
         "approver": "Bob Johnson",
@@ -111,12 +111,12 @@ print("Signal sent — resuming workflow...")
 # Step 3: Resume workflow to process approval
 status = resume_workflow(
     workflow=workflow,
-    workflow_id="exp-001",
+    instance_id="exp-001",
     backend=backend
 )
 
-print(f"Final status: {status.state()}")  # "completed"
-print(f"Result: {status.output()}")
+print(f"Final status: {status.status}")  # "completed"
+print(f"Result: {status.output}")
 # "Expense approved by Bob Johnson — processing reimbursement. Notes: Valid expense, approved"
 ```
 
@@ -157,24 +157,20 @@ workflow = (
 What happens when the 48-hour timeout expires?
 
 ```python
-from sayiir import get_workflow_status, WorkflowState
-
 # Submit expense
 status = run_durable_workflow(
     workflow=workflow,
-    workflow_id="exp-002",
-    initial_input=expense_data,
+    instance_id="exp-002",
+    input_data=expense_data,
     backend=backend
 )
 
 # Simulate 48 hours passing with no approval...
-# (In production, a background job would check timeouts)
+# After timeout, resume to observe the failure
+status = resume_workflow(workflow, "exp-002", backend)
 
-# After timeout, workflow fails with timeout error
-status = get_workflow_status("exp-002", backend)
-
-if status.state() == WorkflowState.FAILED:
-    error = status.error()
+if status.is_failed():
+    error = status.error
     if "timeout" in error.lower():
         print("Approval timeout — escalating to director")
         # Trigger escalation workflow
@@ -205,8 +201,8 @@ def submit_with_escalation(expense: dict) -> str:
     # Try manager approval first
     status = run_durable_workflow(
         workflow=workflow,
-        workflow_id=f"exp-{expense['id']}",
-        initial_input=expense,
+        instance_id=f"exp-{expense['id']}",
+        input_data=expense,
         backend=backend
     )
 
@@ -214,16 +210,16 @@ def submit_with_escalation(expense: dict) -> str:
     status = resume_workflow(workflow, f"exp-{expense['id']}", backend)
 
     # If manager timeout, escalate
-    if status.is_failed() and "timeout" in str(status.error()):
+    if status.is_failed() and "timeout" in str(status.error):
         print("Manager timeout — escalating to director")
         status = run_durable_workflow(
             workflow=escalation_workflow,
-            workflow_id=f"exp-{expense['id']}-escalated",
-            initial_input=expense,
+            instance_id=f"exp-{expense['id']}-escalated",
+            input_data=expense,
             backend=backend
         )
 
-    return status.output()
+    return status.output
 ```
 
 ## Node.js Implementation
@@ -535,7 +531,7 @@ async fn main() -> anyhow::Result<()> {
 Use `InMemoryBackend` for fast testing without database setup:
 
 ```python
-from sayiir import InMemoryBackend, get_workflow_status
+from sayiir import InMemoryBackend, resume_workflow
 
 backend = InMemoryBackend()
 
@@ -553,7 +549,7 @@ send_signal("test-001", "manager_approval", {"decision": "approved"}, backend=ba
 status = resume_workflow(workflow, "test-001", backend=backend)
 
 assert status.is_completed()
-assert "approved" in status.output()
+assert "approved" in status.output
 ```
 
 Benefits for testing:
@@ -568,7 +564,7 @@ Here's how to integrate with a web API:
 
 ```python
 from fastapi import FastAPI, HTTPException
-from sayiir import PostgresBackend, run_durable_workflow, send_signal, get_workflow_status
+from sayiir import PostgresBackend, run_durable_workflow, send_signal, resume_workflow
 
 app = FastAPI()
 backend = PostgresBackend("postgresql://localhost/expenses")
@@ -580,8 +576,8 @@ async def submit_expense(expense: dict):
 
     status = run_durable_workflow(
         workflow=workflow,
-        workflow_id=workflow_id,
-        initial_input=expense,
+        instance_id=workflow_id,
+        input_data=expense,
         backend=backend
     )
 
@@ -594,7 +590,7 @@ async def submit_expense(expense: dict):
 async def approve_expense(workflow_id: str, approval: dict):
     """Manager approves expense."""
     send_signal(
-        workflow_id=workflow_id,
+        instance_id=workflow_id,
         signal_name="manager_approval",
         payload=approval,
         backend=backend
@@ -605,20 +601,20 @@ async def approve_expense(workflow_id: str, approval: dict):
 
     return {
         "workflow_id": workflow_id,
-        "status": status.state(),
-        "result": status.output() if status.is_completed() else None
+        "status": status.status,
+        "result": status.output if status.is_completed() else None
     }
 
 @app.get("/expenses/{workflow_id}")
 async def get_expense_status(workflow_id: str):
     """Check expense approval status."""
-    status = get_workflow_status(workflow_id, backend)
+    status = resume_workflow(workflow, workflow_id, backend)
 
     return {
         "workflow_id": workflow_id,
-        "status": status.state(),
-        "result": status.output() if status.is_completed() else None,
-        "error": status.error() if status.is_failed() else None
+        "status": status.status,
+        "result": status.output if status.is_completed() else None,
+        "error": status.error if status.is_failed() else None
     }
 ```
 
@@ -636,8 +632,6 @@ from sayiir import (
     send_signal,
     resume_workflow,
     InMemoryBackend,
-    get_workflow_status,
-    WorkflowState
 )
 
 @task
@@ -684,12 +678,12 @@ def process_expense(expense: dict, backend: InMemoryBackend) -> str:
     status = resume_workflow(manager_workflow, workflow_id, backend)
 
     # Handle timeout
-    if status.is_failed() and "timeout" in str(status.error()):
+    if status.is_failed() and "timeout" in str(status.error):
         print("Escalating to director...")
         escalation_id = f"{workflow_id}-escalated"
         status = run_durable_workflow(director_workflow, escalation_id, expense, backend=backend)
 
-    return status.output() if status.is_completed() else "Processing..."
+    return status.output if status.is_completed() else "Processing..."
 
 if __name__ == "__main__":
     backend = InMemoryBackend()

@@ -2,6 +2,7 @@
 
 use backon::{BlockingRetryable, Retryable};
 use bytes::Bytes;
+use sayiir_core::codec::EnvelopeCodec;
 use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::workflow::WorkflowContinuation;
 use sayiir_persistence::SignalStore;
@@ -16,6 +17,7 @@ use super::fork::{
 };
 use super::helpers::{
     check_guards, execute_task_step, park_at_delay, park_at_signal, policy_to_backoff,
+    resolve_branch,
 };
 
 // ── Sync ────────────────────────────────────────────────────────────────
@@ -32,13 +34,16 @@ use super::helpers::{
 ///
 /// # Errors
 /// Returns an error if task execution fails.
-pub fn execute_continuation_sync<F>(
+#[allow(clippy::too_many_lines)]
+pub fn execute_continuation_sync<F, E>(
     continuation: &WorkflowContinuation,
     input: Bytes,
     execute_task: &F,
+    envelope_codec: &E,
 ) -> Result<Bytes, RuntimeError>
 where
     F: Fn(&str, Bytes) -> Result<Bytes, BoxError>,
+    E: EnvelopeCodec,
 {
     let mut current = continuation;
     let mut current_input = input;
@@ -79,12 +84,16 @@ where
 
                 for branch in branches {
                     let branch_id = branch.id().to_string();
-                    let output =
-                        execute_continuation_sync(branch, current_input.clone(), execute_task)?;
+                    let output = execute_continuation_sync(
+                        branch,
+                        current_input.clone(),
+                        execute_task,
+                        envelope_codec,
+                    )?;
                     branch_results.push((branch_id, output));
                 }
 
-                match resolve_join(join.as_deref(), &branch_results)? {
+                match resolve_join(join.as_deref(), &branch_results, envelope_codec)? {
                     JoinResolution::Continue { next, input } => {
                         current = next;
                         current_input = input;
@@ -108,6 +117,35 @@ where
                 ))
                 .into());
             }
+            WorkflowContinuation::Branch {
+                id,
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                let key_bytes =
+                    execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())?;
+                let (key, chosen) =
+                    resolve_branch(id, &key_bytes, branches, default.as_deref(), envelope_codec)?;
+                let branch_output = execute_continuation_sync(
+                    chosen,
+                    current_input.clone(),
+                    execute_task,
+                    envelope_codec,
+                )?;
+                let envelope_bytes = envelope_codec
+                    .encode_branch_envelope(&key, &branch_output)
+                    .map_err(RuntimeError::from)?;
+
+                match next {
+                    Some(next_cont) => {
+                        current = next_cont;
+                        current_input = envelope_bytes;
+                    }
+                    None => return Ok(envelope_bytes),
+                }
+            }
         }
     }
 }
@@ -125,11 +163,12 @@ where
 ///
 /// # Errors
 /// Returns an error if task execution fails.
-pub async fn execute_continuation_async(
+pub async fn execute_continuation_async<E: EnvelopeCodec + Clone + 'static>(
     continuation: &WorkflowContinuation,
     input: Bytes,
+    envelope_codec: &E,
 ) -> Result<Bytes, RuntimeError> {
-    execute_async_inner(continuation, input, true).await
+    execute_async_inner(continuation, input, true, envelope_codec).await
 }
 
 /// Execute a task function with optional timeout wrapping and retry backoff.
@@ -181,10 +220,12 @@ async fn run_task_with_retry(
 /// spawning), branches run sequentially.
 ///
 /// Returns a boxed future so the recursive call is provably `Send` for `tokio::spawn`.
-fn execute_async_inner<'a>(
+#[allow(clippy::too_many_lines)]
+fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
     continuation: &'a WorkflowContinuation,
     input: Bytes,
     parallel_branches: bool,
+    envelope_codec: &'a E,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<Bytes, RuntimeError>> + Send + 'a>> {
     Box::pin(async move {
         let mut current = continuation;
@@ -235,16 +276,58 @@ fn execute_async_inner<'a>(
                     ))
                     .into());
                 }
+                WorkflowContinuation::Branch {
+                    id,
+                    key_fn: Some(key_fn),
+                    branches,
+                    default,
+                    next,
+                } => {
+                    let key_bytes = key_fn
+                        .run(current_input.clone())
+                        .await
+                        .map_err(RuntimeError::from)?;
+                    let (key, chosen) = resolve_branch(
+                        id,
+                        &key_bytes,
+                        branches,
+                        default.as_deref(),
+                        envelope_codec,
+                    )?;
+                    let branch_output =
+                        execute_async_inner(chosen, current_input.clone(), false, envelope_codec)
+                            .await?;
+                    let envelope_bytes = envelope_codec
+                        .encode_branch_envelope(&key, &branch_output)
+                        .map_err(RuntimeError::from)?;
+
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = envelope_bytes;
+                        }
+                        None => return Ok(envelope_bytes),
+                    }
+                }
+                WorkflowContinuation::Branch {
+                    key_fn: None, id, ..
+                } => {
+                    return Err(WorkflowError::TaskNotImplemented(
+                        sayiir_core::workflow::key_fn_id(id),
+                    )
+                    .into());
+                }
                 WorkflowContinuation::Fork { branches, join, .. } => {
                     let branch_results = if parallel_branches && branches.len() > 1 {
-                        // Multiple branches: spawn each as a tokio task for parallelism
+                        // Multiple branches: spawn each as a tokio task for parallelism.
                         let mut set = tokio::task::JoinSet::new();
                         for branch in branches {
                             let branch_id = branch.id().to_string();
                             let branch = Arc::clone(branch);
                             let branch_input = current_input.clone();
+                            let branch_codec = envelope_codec.clone();
                             set.spawn(async move {
-                                execute_async_inner(&branch, branch_input, false)
+                                execute_async_inner(&branch, branch_input, false, &branch_codec)
                                     .await
                                     .map(|output| (branch_id, output))
                             });
@@ -260,14 +343,19 @@ fn execute_async_inner<'a>(
                         let mut results = Vec::with_capacity(branches.len());
                         for branch in branches {
                             let branch_id = branch.id().to_string();
-                            let output =
-                                execute_async_inner(branch, current_input.clone(), false).await?;
+                            let output = execute_async_inner(
+                                branch,
+                                current_input.clone(),
+                                false,
+                                envelope_codec,
+                            )
+                            .await?;
                             results.push((branch_id, output));
                         }
                         results
                     };
 
-                    match resolve_join(join.as_deref(), &branch_results)? {
+                    match resolve_join(join.as_deref(), &branch_results, envelope_codec)? {
                         JoinResolution::Continue { next, input } => {
                             current = next;
                             current_input = input;
@@ -302,17 +390,19 @@ fn execute_async_inner<'a>(
 /// # Errors
 /// Returns an error if task execution, cancellation checking, or snapshot saving fails.
 #[allow(clippy::too_many_lines)]
-pub async fn execute_continuation_with_checkpointing<F, Fut, B>(
+pub async fn execute_continuation_with_checkpointing<F, Fut, B, E>(
     continuation: &WorkflowContinuation,
     input: Bytes,
     snapshot: &mut sayiir_core::snapshot::WorkflowSnapshot,
     backend: &B,
     execute_task: &F,
+    envelope_codec: &E,
 ) -> Result<Bytes, RuntimeError>
 where
     B: SignalStore,
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
+    E: EnvelopeCodec,
 {
     let mut current = continuation;
     let mut current_input = input;
@@ -432,18 +522,73 @@ where
                             snapshot,
                             backend,
                             execute_task,
+                            envelope_codec,
                         )
                         .await?;
                         settle_fork_outcome(fork_id, outcome, join.as_deref(), snapshot, backend)
                             .await?
                     };
 
-                match resolve_join(join.as_deref(), &branch_results)? {
+                match resolve_join(join.as_deref(), &branch_results, envelope_codec)? {
                     JoinResolution::Continue { next, input } => {
                         current = next;
                         current_input = input;
                     }
                     JoinResolution::Done(output) => return Ok(output),
+                }
+            }
+            WorkflowContinuation::Branch {
+                id,
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                check_guards(backend, &snapshot.instance_id, Some(id)).await?;
+
+                // Check if the branch result is already cached (resume case)
+                if let Some(result) = snapshot.get_task_result(id) {
+                    match next {
+                        Some(n) => {
+                            current = n;
+                            current_input = result.output.clone();
+                            continue;
+                        }
+                        None => return Ok(result.output.clone()),
+                    }
+                }
+
+                let key_bytes =
+                    execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())
+                        .await
+                        .map_err(RuntimeError::from)?;
+                let (key, chosen) =
+                    resolve_branch(id, &key_bytes, branches, default.as_deref(), envelope_codec)?;
+                let branch_output = super::fork::execute_branch_with_checkpointing(
+                    chosen,
+                    current_input.clone(),
+                    &snapshot.instance_id,
+                    backend,
+                    execute_task,
+                    envelope_codec,
+                )
+                .await?;
+
+                // Wrap in discriminated envelope
+                let envelope_bytes = envelope_codec
+                    .encode_branch_envelope(&key, &branch_output)
+                    .map_err(RuntimeError::from)?;
+
+                // Checkpoint the branch result
+                snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
+                backend.save_snapshot(snapshot).await?;
+
+                match next {
+                    Some(next_cont) => {
+                        current = next_cont;
+                        current_input = envelope_bytes;
+                    }
+                    None => return Ok(envelope_bytes),
                 }
             }
         }

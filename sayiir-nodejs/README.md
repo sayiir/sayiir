@@ -178,6 +178,41 @@ sendSignal("req-1", "manager_approval", { approved: true }, backend);
 const final = resumeWorkflow(workflow, "req-1", backend);
 ```
 
+### Conditional branching
+
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+const classify = task("classify", (ticket: { id: number; type: string }) => {
+  return ticket.type === "invoice" ? "billing" : "tech";
+});
+
+const handleBilling = task("handle-billing", (ticket: { id: number }) => {
+  return `Billing handled: ${ticket.id}`;
+});
+
+const handleTech = task("handle-tech", (ticket: { id: number }) => {
+  return `Tech resolved: ${ticket.id}`;
+});
+
+const fallback = task("fallback", (ticket: { id: number }) => {
+  return `Routed to general: ${ticket.id}`;
+});
+
+const workflow = flow<{ id: number; type: string }>("support-router")
+  .route((ticket) => ticket.type === "invoice" ? "billing" : "tech", ["billing", "tech"] as const)
+    .branch("billing", handleBilling)
+    .branch("tech", handleTech)
+    .defaultBranch("fallback", fallback)
+  .done()
+  .build();
+
+const result = await runWorkflow(workflow, { id: 1, type: "invoice" });
+// { branch: "billing", result: "Billing handled: 1" }
+```
+
+The key function returns a string routing key. The matching branch runs; if no match and no default, the workflow fails. The output is a `BranchEnvelope<T>` with `branch` (the key) and `result` (the branch output).
+
 ### Zod validation
 
 ```typescript
@@ -227,6 +262,10 @@ const processPayment = task("process-payment", (order) => {
 - **`.join(id, fn)`** — Merge branches with a combining function.
 - **`.delay(id, duration)`** — Durable delay (`"30s"`, `"5m"`, `"1h"`, or milliseconds).
 - **`.waitForSignal(id, signalName, opts?)`** — Wait for an external signal.
+- **`.route(keyFn, keys)`** — Start conditional branching with declared keys. Returns a `RouteBuilder`.
+- **`.branch(key, fn)`** / **`.branch(key, id, fn)`** — Add a named branch for a routing key.
+- **`.defaultBranch(fn)`** / **`.defaultBranch(id, fn)`** — Set the fallback branch for unmatched keys.
+- **`.done()`** — Finish branching and return to the `Flow` builder. Output is `BranchEnvelope<T>`.
 - **`.build()`** — Compile and return a `Workflow<TIn, TOut>`.
 
 ### Execution
@@ -267,7 +306,7 @@ Your TypeScript code       Sayiir (Rust)              Storage
 │  task()       │───>│  Orchestration      │───>│  Checkpoint  │
 │  functions   │    │  Checkpointing      │    │  after each  │
 │              │<───│  Crash recovery     │<───│  task        │
-└──────────────┘    │  Fork/join          │    └──────────────┘
+└──────────────┘    │  Fork/join/branch   │    └──────────────┘
                     │  Serialization      │
                     └─────────────────────┘
 ```

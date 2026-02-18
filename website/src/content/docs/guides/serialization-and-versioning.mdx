@@ -1,0 +1,262 @@
+---
+title: Serialization & Versioning
+description: Choose a codec, make types serializable, and deploy workflow changes safely
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Choosing a Codec
+
+A **codec** controls how task inputs and outputs are serialized when checkpointed. The codec is set per-backend instance, not per-workflow.
+
+:::note
+Python and Node.js always use JSON internally — no codec choice is needed. This section applies to **Rust only**.
+:::
+
+### JsonCodec (default)
+
+Human-readable JSON via `serde_json`. Types must derive `serde::Serialize` and `serde::Deserialize`.
+
+```rust
+use sayiir_runtime::prelude::*;
+
+// JsonCodec is the default — no explicit codec needed
+let workflow = workflow! {
+    name: "order_pipeline",
+    registry: registry,
+    steps: [validate, charge, ship]
+}.unwrap();
+```
+
+### RkyvCodec
+
+Zero-copy binary serialization via `rkyv`. Types must derive `rkyv::Archive`, `rkyv::Serialize`, and `rkyv::Deserialize`.
+
+```rust
+use sayiir_runtime::serialization::RkyvCodec;
+
+let workflow = workflow! {
+    name: "order_pipeline",
+    codec: RkyvCodec,
+    registry: registry,
+    steps: [validate, charge, ship]
+}.unwrap();
+```
+
+### When to Use Which
+
+| Criteria | JsonCodec | RkyvCodec |
+|----------|-----------|-----------|
+| Readability | Human-readable, easy to inspect | Binary, requires tooling |
+| Performance | Slower, larger payloads | Fast, zero-copy deserialization |
+| Ecosystem | Language-agnostic (serde) | Rust-only |
+| Debugging | Easy — `jq` on snapshots | Harder — opaque bytes |
+| Best for | Development, mixed-language stacks | High-throughput Rust workloads |
+
+**Rule of thumb:** Start with `JsonCodec` (the default). Switch to `RkyvCodec` when serialization shows up in profiling.
+
+## Making Types Serializable
+
+Every type that flows through a task (inputs and outputs) must be serializable by the codec you choose.
+
+<Tabs>
+<TabItem label="JsonCodec (serde)">
+
+```rust
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
+struct OrderInput {
+    order_id: String,
+    amount: f64,
+
+    /// New field — old snapshots without it will use the default
+    #[serde(default)]
+    currency: String,
+}
+```
+
+</TabItem>
+<TabItem label="RkyvCodec">
+
+```rust
+use rkyv::{Archive, Serialize, Deserialize};
+
+#[derive(Archive, Serialize, Deserialize)]
+struct OrderInput {
+    order_id: String,
+    amount: f64,
+}
+```
+
+</TabItem>
+<TabItem label="Both codecs">
+
+```rust
+use serde::{Serialize as SerdeSerialize, Deserialize as SerdeDeserialize};
+use rkyv::{Archive, Serialize as RkyvSerialize, Deserialize as RkyvDeserialize};
+
+#[derive(
+    SerdeSerialize, SerdeDeserialize,
+    Archive, RkyvSerialize, RkyvDeserialize,
+)]
+struct OrderInput {
+    order_id: String,
+    amount: f64,
+}
+```
+
+</TabItem>
+</Tabs>
+
+For **Python**, any type that `json.dumps` / `json.loads` can handle works (dicts, lists, strings, numbers, booleans, `None`). For **Node.js**, anything that survives `JSON.stringify` / `JSON.parse`.
+
+## Definition Hash — What Breaks Resumability
+
+When a workflow is built, Sayiir computes a **SHA-256 definition hash** from the workflow's structural shape. This hash is stored with every snapshot. On resume, the engine compares the current hash to the snapshot's hash — if they differ, the workflow cannot resume and a `DefinitionMismatch` error is raised.
+
+### What's Hashed
+
+The hash covers the **structure** of the workflow:
+
+- Task IDs and their sequential order
+- Timeout values
+- Retry policies (max retries, initial delay, backoff multiplier)
+- Fork IDs and branch structure
+- Branch IDs, keys, and default handlers
+- Delay durations and IDs
+- Signal names, IDs, and timeouts
+
+### What's NOT Hashed
+
+- Task **implementations** (the function body)
+- The codec used
+- The backend used
+- Task metadata (tags, descriptions, display names)
+
+### Breaking vs Non-Breaking Changes
+
+| Change | Hash Impact | Safe for In-Flight? |
+|--------|-------------|---------------------|
+| Change task logic (same signature) | No change | Yes |
+| Swap backend (InMemory → Postgres) | No change | Yes |
+| Switch codec (Json → Rkyv) | No change | Yes* |
+| Update task tags or descriptions | No change | Yes |
+| Add a new task to the pipeline | **Changes** | No |
+| Remove a task | **Changes** | No |
+| Reorder tasks | **Changes** | No |
+| Change a timeout value | **Changes** | No |
+| Change retry policy | **Changes** | No |
+| Add/remove a fork branch | **Changes** | No |
+| Rename a task ID | **Changes** | No |
+| Change a signal name | **Changes** | No |
+
+\* Switching codecs is hash-safe but existing serialized bytes must still be decodable by the new codec. In practice, switching codecs on a live system with in-flight data requires a drain first.
+
+### The Error
+
+When a hash mismatch occurs:
+
+```
+Workflow definition mismatch: expected hash 'a1b2c3...', found 'd4e5f6...'
+```
+
+In Rust this is `BuildError::DefinitionMismatch` (at build time) or `WorkflowError::DefinitionMismatch` (at runtime). Python and Node.js raise equivalent exceptions.
+
+## Schema Evolution for Task Inputs/Outputs
+
+Even when the workflow **structure** doesn't change (same definition hash), the **data types** flowing through tasks can evolve. Here's how to do it safely with `JsonCodec` / serde.
+
+### Adding Fields
+
+Use `#[serde(default)]` so existing snapshots without the new field deserialize correctly:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct OrderInput {
+    order_id: String,
+    amount: f64,
+    #[serde(default)]
+    priority: Option<String>,  // new field — old data deserializes as None
+}
+```
+
+In Python, this happens naturally with `dict.get("priority")`.
+
+### Removing Fields
+
+Don't delete the field while in-flight workflows may still carry it. Instead, stop writing it:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct OrderInput {
+    order_id: String,
+    amount: f64,
+    #[serde(skip_serializing, default)]
+    legacy_field: Option<String>,  // still readable, no longer written
+}
+```
+
+Once all in-flight workflows have drained, you can remove the field entirely.
+
+### Renaming Fields
+
+Use `#[serde(rename)]` or `#[serde(alias)]` for backward compatibility:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct OrderInput {
+    #[serde(alias = "order_id")]
+    id: String,  // renamed from order_id — old snapshots still work
+    amount: f64,
+}
+```
+
+### Enum Variants
+
+- **Adding** a variant is safe — existing data won't contain it.
+- **Removing** a variant breaks deserialization for in-flight workflows that stored it.
+
+## Deploying Workflow Changes
+
+### Safe Deployments (No Hash Change)
+
+These changes can be deployed at any time, even with in-flight workflows:
+
+- **Bug fixes in task logic** — the function body isn't hashed
+- **Infrastructure swaps** — changing backends, scaling workers
+- **Codec switches** — only if you drain first (see note above)
+- **Metadata updates** — tags, descriptions
+
+Just deploy as usual. In-flight workflows resume normally.
+
+### Breaking Deployments (Hash Changes)
+
+When you need to change the workflow structure (add/remove tasks, change timeouts, etc.):
+
+1. **Stop starting new workflow instances** with the old definition
+2. **Wait for in-flight workflows to complete** (drain)
+3. **Deploy** the new workflow definition
+4. **Start new instances** with the new definition
+
+```mermaid
+graph LR
+    A[Stop new submissions] --> B[Drain in-flight]
+    B --> C[Deploy new definition]
+    C --> D[Resume traffic]
+```
+
+### Distributed Workers
+
+When running multiple workers, **all workers must agree on the definition hash**. During a rolling deployment:
+
+1. Workers with the **old** definition will reject snapshots created with the new definition
+2. Workers with the **new** definition will reject snapshots created with the old definition
+
+This means you should either:
+- **Drain, then deploy all workers at once** (simplest)
+- **Blue/green deploy** — bring up new workers, shift traffic, shut down old workers
+
+### Future: Version Routing
+
+Automatic version routing (running multiple workflow versions side-by-side) is on the [roadmap](/roadmap). Until then, use the drain-and-restart strategy above.

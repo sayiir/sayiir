@@ -17,6 +17,24 @@ pub fn snake_to_pascal(s: &str) -> String {
         .collect()
 }
 
+/// Convert a `PascalCase` identifier to `snake_case`.
+pub fn pascal_to_snake(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            for lower in ch.to_lowercase() {
+                result.push(lower);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Create a `syn::Error` at the given span.
 pub fn err(span: Span, msg: impl std::fmt::Display) -> syn::Error {
     syn::Error::new(span, msg)
@@ -25,6 +43,15 @@ pub fn err(span: Span, msg: impl std::fmt::Display) -> syn::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pascal_to_snake() {
+        assert_eq!(pascal_to_snake("Billing"), "billing");
+        assert_eq!(pascal_to_snake("TechSupport"), "tech_support");
+        assert_eq!(pascal_to_snake("A"), "a");
+        assert_eq!(pascal_to_snake("ABC"), "a_b_c");
+        assert_eq!(pascal_to_snake("already"), "already");
+    }
 
     #[test]
     fn test_snake_to_pascal() {

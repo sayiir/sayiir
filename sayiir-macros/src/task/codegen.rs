@@ -6,7 +6,7 @@ use crate::util::snake_to_pascal;
 
 /// Generate all output code from a parsed task definition.
 pub fn generate(parsed: &ParsedTask) -> TokenStream {
-    let name = format_ident!("{}", snake_to_pascal(&parsed.fn_name.to_string()));
+    let name = format_ident!("{}Task", snake_to_pascal(&parsed.fn_name.to_string()));
 
     let struct_def = gen_struct(parsed, &name);
     let impl_block = gen_impl(parsed, &name);

@@ -151,7 +151,7 @@ fn test_serialize_branch_results_roundtrip() {
         ("branch_b".to_string(), Bytes::from(vec![4, 5])),
     ];
 
-    let serialized = serialize_branch_results(&results).unwrap();
+    let serialized = serialize_branch_results(&results, &JsonCodec).unwrap();
     let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
     let map = deserialized.into_map();
 
@@ -163,7 +163,7 @@ fn test_serialize_branch_results_roundtrip() {
 #[test]
 fn test_serialize_branch_results_empty() {
     let results: Vec<(String, Bytes)> = vec![];
-    let serialized = serialize_branch_results(&results).unwrap();
+    let serialized = serialize_branch_results(&results, &JsonCodec).unwrap();
     let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
     assert!(deserialized.is_empty());
 }
@@ -171,7 +171,7 @@ fn test_serialize_branch_results_empty() {
 #[test]
 fn test_serialize_branch_results_single() {
     let results = vec![("only".to_string(), Bytes::from("data"))];
-    let serialized = serialize_branch_results(&results).unwrap();
+    let serialized = serialize_branch_results(&results, &JsonCodec).unwrap();
     let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
     let map = deserialized.into_map();
     assert_eq!(map.len(), 1);
@@ -192,7 +192,7 @@ fn test_sync_single_task() {
         Ok(encode_u32(val + 1))
     };
 
-    let result = execute_continuation_sync(&cont, input, &callback).unwrap();
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
     assert_eq!(decode_u32(&result), 6);
 }
 
@@ -211,7 +211,7 @@ fn test_sync_chained_tasks() {
         }
     };
 
-    let result = execute_continuation_sync(&add_one, input, &callback).unwrap();
+    let result = execute_continuation_sync(&add_one, input, &callback, &JsonCodec).unwrap();
     // 10 + 1 = 11, 11 * 2 = 22
     assert_eq!(decode_u32(&result), 22);
 }
@@ -246,7 +246,7 @@ fn test_sync_fork_with_join() {
         }
     };
 
-    let result = execute_continuation_sync(&fork, input, &callback).unwrap();
+    let result = execute_continuation_sync(&fork, input, &callback, &JsonCodec).unwrap();
     // branch_a: 10*2=20, branch_b: 10+5=15, join: 20+15=35
     assert_eq!(decode_u32(&result), 35);
 }
@@ -274,7 +274,7 @@ fn test_sync_fork_without_join() {
     };
 
     // Without join, returns last branch result
-    let result = execute_continuation_sync(&fork, input, &callback).unwrap();
+    let result = execute_continuation_sync(&fork, input, &callback, &JsonCodec).unwrap();
     assert_eq!(decode_u32(&result), 15); // branch_b: 10+5
 }
 
@@ -286,7 +286,7 @@ fn test_sync_task_failure_propagates() {
     let callback =
         |_id: &str, _input: Bytes| -> Result<Bytes, BoxError> { Err("task exploded".into()) };
 
-    let result = execute_continuation_sync(&cont, input, &callback);
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("task exploded"));
 }
@@ -300,7 +300,9 @@ async fn test_async_single_task() {
     let input = encode_u32(5);
     let cont = task_node("add_one", |i: u32| async move { Ok(i + 1) }, None);
 
-    let result = execute_continuation_async(&cont, input).await.unwrap();
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 6);
 }
 
@@ -314,7 +316,9 @@ async fn test_async_chained_tasks() {
     );
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&add_one, input).await.unwrap();
+    let result = execute_continuation_async(&add_one, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 22);
 }
 
@@ -339,7 +343,9 @@ async fn test_async_fork_with_parallel_branches() {
     };
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&fork, input).await.unwrap();
+    let result = execute_continuation_async(&fork, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 15); // branch_b: 10+5
 }
 
@@ -353,7 +359,7 @@ async fn test_async_task_no_implementation() {
         next: None,
     };
 
-    let result = execute_continuation_async(&cont, Bytes::new()).await;
+    let result = execute_continuation_async(&cont, Bytes::new(), &JsonCodec).await;
     assert!(result.is_err());
     assert!(
         result
@@ -372,7 +378,7 @@ async fn test_async_task_failure_propagates() {
     );
 
     let input = encode_u32(1);
-    let result = execute_continuation_async(&cont, input).await;
+    let result = execute_continuation_async(&cont, input, &JsonCodec).await;
     assert!(result.is_err());
 }
 
@@ -391,7 +397,7 @@ async fn test_async_task_completes_within_timeout() {
     };
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&cont, input).await;
+    let result = execute_continuation_async(&cont, input, &JsonCodec).await;
     assert!(result.is_ok());
     assert_eq!(decode_u32(&result.unwrap()), 11);
 }
@@ -415,7 +421,7 @@ async fn test_async_task_exceeds_timeout() {
     };
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&cont, input).await;
+    let result = execute_continuation_async(&cont, input, &JsonCodec).await;
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
     assert!(err.to_string().contains("slow"));
@@ -439,7 +445,7 @@ async fn test_async_task_no_timeout_unlimited() {
     };
 
     let input = encode_u32(42);
-    let result = execute_continuation_async(&cont, input).await;
+    let result = execute_continuation_async(&cont, input, &JsonCodec).await;
     assert!(result.is_ok());
     assert_eq!(decode_u32(&result.unwrap()), 43);
 }
@@ -468,9 +474,15 @@ async fn test_checkpointing_task_timeout() {
         Ok(input)
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &slow_task)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &slow_task,
+        &JsonCodec,
+    )
+    .await;
 
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
@@ -510,6 +522,7 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
         &mut snapshot,
         &backend,
         &never_called,
+        &JsonCodec,
     )
     .await;
 
@@ -746,10 +759,16 @@ async fn test_checkpointing_single_task() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(decode_u32(&result), 6);
     assert!(snapshot.get_task_result("add_one").is_some());
@@ -785,6 +804,7 @@ async fn test_checkpointing_chain() {
         &mut snapshot,
         &backend,
         &callback,
+        &JsonCodec,
     )
     .await
     .unwrap();
@@ -833,6 +853,7 @@ async fn test_checkpointing_skips_completed_tasks() {
         &mut snapshot,
         &backend,
         &callback,
+        &JsonCodec,
     )
     .await
     .unwrap();
@@ -881,10 +902,16 @@ async fn test_checkpointing_fork_sequential() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&fork, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &fork,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     // branch_a: 10*2=20, branch_b: 10+5=15, join: 20+15=35
     assert_eq!(decode_u32(&result), 35);
@@ -917,9 +944,15 @@ async fn test_checkpointing_cancellation() {
     let callback =
         |_id: &str, _input: Bytes| async { Err::<Bytes, BoxError>("Should not be called".into()) };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -994,7 +1027,7 @@ fn test_sync_delay_passthrough() {
         panic!("callback should not be called for delay");
     };
 
-    let result = execute_continuation_sync(&delay, input, &callback).unwrap();
+    let result = execute_continuation_sync(&delay, input, &callback, &JsonCodec).unwrap();
     // Delay passes input through unchanged
     assert_eq!(decode_u32(&result), 42);
 }
@@ -1019,7 +1052,7 @@ fn test_sync_delay_in_chain() {
         }
     };
 
-    let result = execute_continuation_sync(&add_one, input, &callback).unwrap();
+    let result = execute_continuation_sync(&add_one, input, &callback, &JsonCodec).unwrap();
     // 10 + 1 = 11, delay (passthrough 11), 11 * 2 = 22
     assert_eq!(decode_u32(&result), 22);
 }
@@ -1033,7 +1066,9 @@ async fn test_async_delay_passthrough() {
     };
 
     let input = encode_u32(99);
-    let result = execute_continuation_async(&delay, input).await.unwrap();
+    let result = execute_continuation_async(&delay, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 99);
 }
 
@@ -1052,7 +1087,9 @@ async fn test_async_delay_in_chain() {
     );
 
     let input = encode_u32(5);
-    let result = execute_continuation_async(&add_one, input).await.unwrap();
+    let result = execute_continuation_async(&add_one, input, &JsonCodec)
+        .await
+        .unwrap();
     // 5 + 1 = 6, delay (passthrough 6), 6 * 2 = 12
     assert_eq!(decode_u32(&result), 12);
 }
@@ -1076,9 +1113,15 @@ async fn test_checkpointing_delay_returns_waiting() {
     let callback =
         |_id: &str, _input: Bytes| async { Err::<Bytes, BoxError>("Should not be called".into()) };
 
-    let result =
-        execute_continuation_with_checkpointing(&delay, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &delay,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     // Should return a Waiting error
     assert!(result.is_err());
@@ -1138,10 +1181,16 @@ async fn test_checkpointing_delay_skip_on_resume() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&delay, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &delay,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     // Delay was skipped (already completed), process received 42, output 52
     assert_eq!(decode_u32(&result), 52);
@@ -1178,9 +1227,15 @@ async fn test_checkpointing_delay_cancellation() {
     let callback =
         |_id: &str, _input: Bytes| async { Err::<Bytes, BoxError>("Should not be called".into()) };
 
-    let result =
-        execute_continuation_with_checkpointing(&delay, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &delay,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     assert!(result.is_err());
     assert!(matches!(
@@ -1295,9 +1350,15 @@ async fn test_fork_with_delay_parks_at_fork() {
     let fork = fork_with_delay_in_branch();
     let callback = make_fork_callback();
 
-    let result =
-        execute_continuation_with_checkpointing(&fork, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &fork,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     // Should return Waiting because branch_b hits a delay
     assert!(result.is_err());
@@ -1367,6 +1428,7 @@ async fn test_fork_with_delay_resumes_after_expiry() {
         &mut snapshot,
         &backend,
         &callback,
+        &JsonCodec,
     )
     .await;
     assert!(matches!(
@@ -1381,9 +1443,15 @@ async fn test_fork_with_delay_resumes_after_expiry() {
     snapshot = backend.load_snapshot("inst-1").await.unwrap();
 
     // Re-execute — cached tasks and expired delay should be skipped
-    let result =
-        execute_continuation_with_checkpointing(&fork, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &fork,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -1434,9 +1502,15 @@ async fn test_fork_with_delays_in_multiple_branches() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&fork, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &fork,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     // Should return Waiting
     assert!(matches!(
@@ -1506,9 +1580,15 @@ async fn test_fork_normal_branch_completes_delayed_branch_parks() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&fork, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &fork,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     assert!(matches!(
         result.unwrap_err(),
@@ -1555,7 +1635,7 @@ fn test_sync_retry_succeeds_after_failures() {
         }
     };
 
-    let result = execute_continuation_sync(&cont, input, &callback).unwrap();
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
@@ -1574,7 +1654,7 @@ fn test_sync_retry_exhaustion() {
         Err("permanent error".into())
     };
 
-    let result = execute_continuation_sync(&cont, input, &callback);
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("permanent error"));
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -1594,7 +1674,7 @@ fn test_sync_retry_no_retry_on_success() {
         Ok(encode_u32(val + 1))
     };
 
-    let result = execute_continuation_sync(&cont, input, &callback).unwrap();
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
     assert_eq!(decode_u32(&result), 6);
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
@@ -1624,7 +1704,7 @@ fn test_sync_retry_in_chain() {
         }
     };
 
-    let result = execute_continuation_sync(&flaky, input, &callback).unwrap();
+    let result = execute_continuation_sync(&flaky, input, &callback, &JsonCodec).unwrap();
     // flaky: 10+1=11 (after 1 retry), double: 11*2=22
     assert_eq!(decode_u32(&result), 22);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -1657,7 +1737,9 @@ async fn test_async_retry_succeeds_after_failure() {
     );
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&cont, input).await.unwrap();
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
@@ -1681,7 +1763,7 @@ async fn test_async_retry_exhaustion() {
     );
 
     let input = encode_u32(1);
-    let result = execute_continuation_async(&cont, input).await;
+    let result = execute_continuation_async(&cont, input, &JsonCodec).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("permanent"));
     // max_retries: 1 → backon max_times: 1 → 2 total calls
@@ -1707,7 +1789,9 @@ async fn test_async_retry_no_retry_on_success() {
     );
 
     let input = encode_u32(42);
-    let result = execute_continuation_async(&cont, input).await.unwrap();
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 43);
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
@@ -1736,7 +1820,9 @@ async fn test_async_retry_with_timeout_triggers_retry() {
     );
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&cont, input).await.unwrap();
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
@@ -1765,7 +1851,9 @@ async fn test_async_retry_in_chain() {
     );
 
     let input = encode_u32(5);
-    let result = execute_continuation_async(&flaky, input).await.unwrap();
+    let result = execute_continuation_async(&flaky, input, &JsonCodec)
+        .await
+        .unwrap();
     // flaky: 5+1=6 (after retry), double: 6*2=12
     assert_eq!(decode_u32(&result), 12);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -1804,10 +1892,16 @@ async fn test_checkpointing_retry_succeeds_after_failure() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -1841,9 +1935,15 @@ async fn test_checkpointing_retry_exhaustion() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("permanent error"));
@@ -1881,10 +1981,16 @@ async fn test_checkpointing_retry_state_persisted() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
@@ -1931,10 +2037,16 @@ async fn test_checkpointing_retry_with_timeout() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&cont, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(decode_u32(&result), 10);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -1975,10 +2087,16 @@ async fn test_checkpointing_retry_in_chain() {
         }
     };
 
-    let result =
-        execute_continuation_with_checkpointing(&flaky, input, &mut snapshot, &backend, &callback)
-            .await
-            .unwrap();
+    let result = execute_continuation_with_checkpointing(
+        &flaky,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
 
     // flaky: 5+1=6 (after retry), double: 6*2=12
     assert_eq!(decode_u32(&result), 12);
@@ -2015,7 +2133,7 @@ async fn test_async_timeout_mid_chain_fails() {
     );
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&fast_task, input).await;
+    let result = execute_continuation_async(&fast_task, input, &JsonCodec).await;
     let err = result.unwrap_err();
     assert!(err.to_string().contains("timed out"));
     assert!(err.to_string().contains("slow"));
@@ -2040,7 +2158,9 @@ async fn test_async_timeout_passes_in_chain() {
     };
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&first, input).await.unwrap();
+    let result = execute_continuation_async(&first, input, &JsonCodec)
+        .await
+        .unwrap();
     // first: 10+1=11, second: 11*2=22
     assert_eq!(decode_u32(&result), 22);
 }
@@ -2090,6 +2210,7 @@ async fn test_checkpointing_timeout_mid_chain() {
         &mut snapshot,
         &backend,
         &callback,
+        &JsonCodec,
     )
     .await;
 
@@ -2123,9 +2244,15 @@ async fn test_checkpointing_delay_terminal_parks() {
     let callback =
         |_id: &str, _input: Bytes| async { Err::<Bytes, BoxError>("Should not be called".into()) };
 
-    let result =
-        execute_continuation_with_checkpointing(&delay, input, &mut snapshot, &backend, &callback)
-            .await;
+    let result = execute_continuation_with_checkpointing(
+        &delay,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
 
     assert!(result.is_err());
     assert!(matches!(
@@ -2191,6 +2318,7 @@ async fn test_checkpointing_delay_after_task_chain() {
         &mut snapshot,
         &backend,
         &callback,
+        &JsonCodec,
     )
     .await;
     assert!(matches!(
@@ -2210,6 +2338,7 @@ async fn test_checkpointing_delay_after_task_chain() {
         &mut snapshot,
         &backend,
         &callback,
+        &JsonCodec,
     )
     .await
     .unwrap();
@@ -2244,7 +2373,7 @@ fn test_sync_delay_multiple_in_chain() {
         }
     };
 
-    let result = execute_continuation_sync(&first, input, &callback).unwrap();
+    let result = execute_continuation_sync(&first, input, &callback, &JsonCodec).unwrap();
     // first: 7+3=10, delay1: pass 10, delay2: pass 10, final: 10*10=100
     assert_eq!(decode_u32(&result), 100);
 }
@@ -2269,7 +2398,9 @@ async fn test_async_delay_multiple_in_chain() {
     );
 
     let input = encode_u32(7);
-    let result = execute_continuation_async(&first, input).await.unwrap();
+    let result = execute_continuation_async(&first, input, &JsonCodec)
+        .await
+        .unwrap();
     // first: 7+3=10, delay1: pass 10, delay2: pass 10, final: 10*10=100
     assert_eq!(decode_u32(&result), 100);
 }
@@ -2307,7 +2438,7 @@ fn test_sync_retry_after_delay() {
         }
     };
 
-    let result = execute_continuation_sync(&delay, input, &callback).unwrap();
+    let result = execute_continuation_sync(&delay, input, &callback, &JsonCodec).unwrap();
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
@@ -2341,7 +2472,9 @@ async fn test_async_retry_after_delay() {
     };
 
     let input = encode_u32(10);
-    let result = execute_continuation_async(&delay, input).await.unwrap();
+    let result = execute_continuation_async(&delay, input, &JsonCodec)
+        .await
+        .unwrap();
     assert_eq!(decode_u32(&result), 11);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
@@ -2371,7 +2504,7 @@ mod proptests {
                 .map(|(n, d)| (n, Bytes::from(d)))
                 .collect();
 
-            let serialized = serialize_branch_results(&typed).unwrap();
+            let serialized = serialize_branch_results(&typed, &JsonCodec).unwrap();
             let deserialized: NamedBranchResults = serde_json::from_slice(&serialized).unwrap();
 
             prop_assert_eq!(deserialized.as_slice(), typed.as_slice());
@@ -2418,3 +2551,149 @@ mod proptests {
         }
     }
 }
+
+// ── Branch tests ──────────────────────────────────────────────────────
+
+fn branch_node(
+    id: &str,
+    key: &'static str,
+    branches: std::collections::HashMap<String, Box<WorkflowContinuation>>,
+    default: Option<Box<WorkflowContinuation>>,
+    next: Option<Box<WorkflowContinuation>>,
+) -> WorkflowContinuation {
+    let c = codec();
+    let key_task = to_core_task(
+        move |_input: serde_json::Value| async move { Ok(key.to_string()) },
+        c,
+    );
+    WorkflowContinuation::Branch {
+        id: id.to_string(),
+        key_fn: Some(key_task),
+        branches,
+        default,
+        next,
+    }
+}
+
+#[test]
+fn test_sync_branch_selects_correct_branch() {
+    let billing = stub_node("handle_billing", None);
+    let tech = stub_node("handle_tech", None);
+
+    let mut branches = std::collections::HashMap::new();
+    branches.insert("billing".to_string(), Box::new(billing));
+    branches.insert("tech".to_string(), Box::new(tech));
+
+    let branch = branch_node("route", "billing", branches, None, None);
+
+    let input = encode_u32(10);
+    let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let val = decode_u32(&input);
+        match id {
+            "route::key_fn" => Ok(Bytes::from(serde_json::to_vec("billing").unwrap())),
+            "handle_billing" => Ok(encode_u32(val * 100)),
+            "handle_tech" => Ok(encode_u32(val + 1)),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&branch, input, &callback, &JsonCodec).unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(envelope["branch"], "billing");
+    assert_eq!(envelope["result"], 1000); // 10 * 100
+}
+
+#[test]
+fn test_sync_branch_uses_default() {
+    let billing = stub_node("handle_billing", None);
+    let fallback = stub_node("handle_fallback", None);
+
+    let mut branches = std::collections::HashMap::new();
+    branches.insert("billing".to_string(), Box::new(billing));
+
+    let branch = branch_node(
+        "route",
+        "unknown_key",
+        branches,
+        Some(Box::new(fallback)),
+        None,
+    );
+
+    let input = encode_u32(5);
+    let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let val = decode_u32(&input);
+        match id {
+            "route::key_fn" => Ok(Bytes::from(serde_json::to_vec("unknown_key").unwrap())),
+            "handle_billing" => Ok(encode_u32(val * 100)),
+            "handle_fallback" => Ok(encode_u32(val + 999)),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&branch, input, &callback, &JsonCodec).unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(envelope["branch"], "unknown_key");
+    assert_eq!(envelope["result"], 1004); // 5 + 999
+}
+
+#[test]
+fn test_sync_branch_key_not_found() {
+    let billing = stub_node("handle_billing", None);
+
+    let mut branches = std::collections::HashMap::new();
+    branches.insert("billing".to_string(), Box::new(billing));
+
+    let branch = branch_node("route", "nonexistent", branches, None, None);
+
+    let input = encode_u32(5);
+    let callback = |id: &str, _input: Bytes| -> Result<Bytes, BoxError> {
+        match id {
+            "route::key_fn" => Ok(Bytes::from(serde_json::to_vec("nonexistent").unwrap())),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let err = execute_continuation_sync(&branch, input, &callback, &JsonCodec).unwrap_err();
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("no branch matches key 'nonexistent'"),
+        "Error was: {err_str}"
+    );
+}
+
+#[test]
+fn test_sync_branch_then_next() {
+    let billing = stub_node("handle_billing", None);
+
+    let mut branches = std::collections::HashMap::new();
+    branches.insert("billing".to_string(), Box::new(billing));
+
+    let next = stub_node("finalize", None);
+    let branch = branch_node("route", "billing", branches, None, Some(Box::new(next)));
+
+    let input = encode_u32(10);
+    let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        match id {
+            "route::key_fn" => Ok(Bytes::from(serde_json::to_vec("billing").unwrap())),
+            "handle_billing" => {
+                let val = decode_u32(&input);
+                Ok(encode_u32(val * 2))
+            }
+            "finalize" => {
+                // Receives BranchEnvelope JSON
+                let envelope: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                assert_eq!(envelope["branch"], "billing");
+                let inner = envelope["result"].as_u64().unwrap() as u32;
+                Ok(encode_u32(inner + 1))
+            }
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&branch, input, &callback, &JsonCodec).unwrap();
+    // handle_billing: 10*2=20, finalize: 20+1=21
+    assert_eq!(decode_u32(&result), 21);
+}
+
+// Async and checkpointing branch tests are covered by the distributed runner tests
+// in sayiir-runtime/src/runner/distributed.rs (test_route_*).

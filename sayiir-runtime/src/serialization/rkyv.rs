@@ -2,7 +2,7 @@ use bytecheck::CheckBytes;
 use bytes::Bytes;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
-use sayiir_core::codec::{Decoder, Encoder, sealed};
+use sayiir_core::codec::{Decoder, Encoder, EnvelopeCodec, sealed};
 use sayiir_core::error::BoxError;
 
 /// A codec that can serialize and deserialize values using rkyv.
@@ -27,6 +27,7 @@ use sayiir_core::error::BoxError;
 /// let decoded: Example = codec.decode(encoded).unwrap();
 /// assert_eq!(decoded, value);
 /// ```
+#[derive(Clone, Copy)]
 pub struct RkyvCodec;
 
 impl Encoder for RkyvCodec {}
@@ -62,5 +63,37 @@ where
         from_bytes::<T, Error>(&bytes).map_err(|e| -> BoxError {
             format!("Failed to deserialize value with rkyv: {e}").into()
         })
+    }
+}
+
+impl EnvelopeCodec for RkyvCodec {
+    fn decode_string(&self, bytes: &[u8]) -> Result<String, BoxError> {
+        from_bytes::<String, Error>(bytes)
+            .map_err(|e| -> BoxError { format!("Failed to decode string with rkyv: {e}").into() })
+    }
+
+    fn encode_branch_envelope(&self, key: &str, result_bytes: &[u8]) -> Result<Bytes, BoxError> {
+        use sayiir_core::task::BranchEnvelope;
+
+        let envelope = BranchEnvelope {
+            branch: key.to_string(),
+            result: Bytes::copy_from_slice(result_bytes),
+        };
+        let aligned_vec = to_bytes::<Error>(&envelope).map_err(|e| -> BoxError {
+            format!("Failed to encode branch envelope with rkyv: {e}").into()
+        })?;
+        let vec: Vec<u8> = aligned_vec.into();
+        Ok(Bytes::from(vec))
+    }
+
+    fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
+        use sayiir_core::branch_results::NamedBranchResults;
+
+        let nbr = NamedBranchResults::new(results.to_vec());
+        let aligned_vec = to_bytes::<Error>(&nbr).map_err(|e| -> BoxError {
+            format!("Failed to encode named results with rkyv: {e}").into()
+        })?;
+        let vec: Vec<u8> = aligned_vec.into();
+        Ok(Bytes::from(vec))
     }
 }

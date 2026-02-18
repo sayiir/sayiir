@@ -18,10 +18,14 @@ from sayiir import task
 def my_task(input: dict) -> dict:
     return {"result": input["value"] * 2}
 
+@task("custom_name")  # Positional name argument
+def my_task(input: dict) -> dict:
+    return {"result": input["value"] * 2}
+
 @task(
     name="custom_name",
-    timeout_secs=30,
-    retries=RetryPolicy(max_retries=3),
+    timeout="30s",
+    retries=3,
     tags=["io", "external"],
     description="Processes data from external API"
 )
@@ -31,9 +35,10 @@ def my_task(input: dict) -> dict:
 
 **Parameters:**
 
-- `name` (str, optional) — Override task ID (default: function name)
-- `timeout_secs` (float, optional) — Task timeout in seconds
-- `retries` (RetryPolicy, optional) — Retry configuration
+- `name` (str, optional) — Override task ID. Can also be passed as first positional argument: `@task("task_name")`
+- `timeout` (str | float, optional) — Task timeout as duration string (`"30s"`, `"5m"`, `"1h"`) or seconds
+- `timeout_secs` (float, optional) — Legacy timeout parameter (use `timeout` instead)
+- `retries` (int | RetryPolicy, optional) — Retry count (int shorthand with 1s/2x defaults) or full `RetryPolicy`
 - `tags` (list[str], optional) — Categorization tags
 - `description` (str, optional) — Human-readable description
 
@@ -100,7 +105,7 @@ workflow.delay("wait_5s", 5.0)
 
 **Parameters:**
 - `name` (str) — Unique identifier for this delay step
-- `duration` (float | timedelta) — Delay duration in seconds or timedelta
+- `duration` (str | float | timedelta) — Delay duration as string (`"30s"`, `"5m"`, `"1h"`), seconds, or timedelta
 
 **Returns:** Flow instance for chaining
 
@@ -121,7 +126,7 @@ workflow = (
 **Parameters:**
 - `signal_name` (str) — The named signal to wait for
 - `name` (str, optional) — Node ID for this step (defaults to signal_name)
-- `timeout` (float | timedelta | None) — Optional timeout
+- `timeout` (str | float | timedelta | None) — Optional timeout as duration string (`"30s"`), seconds, or timedelta
 
 **Returns:** Flow instance for chaining
 
@@ -143,6 +148,37 @@ workflow = (
 
 **Returns:** ForkBuilder instance
 
+#### .route(key_fn, *, keys)
+
+Start conditional branching based on a routing key. The `keys` parameter declares all valid branch keys upfront — Sayiir validates `.branch()` calls against this set immediately and checks exhaustiveness at `.done()`.
+
+:::tip[Always declare your keys]
+Declaring `keys=` is the recommended approach. It catches typos and missing branches at build time. Only omit it when keys are determined at runtime (e.g., dynamically built workflows).
+:::
+
+```python
+@task
+def classify(ticket: dict) -> str:
+    return "billing" if ticket["type"] == "invoice" else "tech"
+
+workflow = (
+    Flow("router")
+    .route(classify, keys=["billing", "tech"])
+        .branch("billing", handle_billing)
+        .branch("tech", handle_tech)
+        .default_branch(fallback)
+    .done()
+    .then(send_summary)
+    .build()
+)
+```
+
+**Parameters:**
+- `key_fn` — Callable that returns a string routing key.
+- `keys` (list[str], keyword-only) — All valid routing keys. `.branch()` calls validate against this set, and `.done()` checks exhaustiveness.
+
+**Returns:** BranchBuilder instance
+
 #### .build()
 
 Compile the workflow.
@@ -152,6 +188,54 @@ workflow = Flow("example").then(my_task).build()
 ```
 
 **Returns:** Workflow instance
+
+### BranchBuilder
+
+Builder for conditional branches. Created by calling `.route()` on a Flow.
+
+#### .branch(key, *task_funcs, name=None)
+
+Add a named branch with one or more chained tasks. The `key` is validated against the `keys` declared in `.route()` -- a `ValueError` is raised immediately if the key is not in the declared set. The branch runs when the key function returns this key.
+
+```python
+.branch("billing", handle_billing)
+.branch("express", validate, ship_express, notify)
+```
+
+**Parameters:**
+- `key` (str) — The routing key that selects this branch (must be one of the declared keys)
+- `*task_funcs` — One or more task callables
+- `name` (str, optional) — Override the task ID of the first task
+
+**Returns:** BranchBuilder instance for chaining
+
+#### .default_branch(*task_funcs, name=None)
+
+Set the fallback branch for unmatched keys.
+
+```python
+.default_branch(fallback_handler)
+```
+
+**Parameters:**
+- `*task_funcs` — One or more task callables
+- `name` (str, optional) — Override the task ID of the first task
+
+**Returns:** BranchBuilder instance for chaining
+
+#### .done()
+
+Finish the branching and return to the Flow builder. Raises `ValueError` if any declared key is missing a `.branch()` call, or if any `.branch()` key was not in the declared keys (orphan branch). The output type becomes a `BranchEnvelope` dict with `branch` (the matched key) and `result` (the branch output).
+
+```python
+.route(classify, keys=["a", "b"])
+    .branch("a", handle_a)
+    .branch("b", handle_b)
+.done()
+.then(next_step)  # receives {"branch": "a", "result": ...}
+```
+
+**Returns:** Flow instance for further chaining
 
 ### ForkBuilder
 
@@ -221,23 +305,30 @@ print(workflow.definition_hash)   # "abc123..."
 
 ## Execution Functions
 
-### run_workflow(workflow, input_data)
+### run_workflow(workflow, input_data, *, instance_id=None, backend=None)
 
-Run a workflow to completion without persistence. Returns the result directly.
+Run a workflow to completion. Without `instance_id`, runs entirely in-memory with no persistence (fastest path for prototyping). With `instance_id` and `backend`, runs with full checkpointing — but still returns the output directly. If the workflow doesn't complete (e.g., parks on a delay or signal), raises `WorkflowError`.
 
 ```python
-from sayiir import run_workflow
+from sayiir import run_workflow, PostgresBackend
 
-workflow = Flow("test").then(double).build()
+# Prototype — no persistence
 result = run_workflow(workflow, 21)
-print(result)  # 42
+
+# Production — same function, just add params
+backend = PostgresBackend("postgresql://localhost/sayiir")
+result = run_workflow(workflow, 21, instance_id="run-001", backend=backend)
 ```
 
 **Parameters:**
 - `workflow` (Workflow) — The workflow to run
 - `input_data` (Any) — Input to the first task
+- `instance_id` (str, optional) — Unique identifier for durable execution
+- `backend` (InMemoryBackend | PostgresBackend, optional) — Persistence backend (required with `instance_id`)
 
 **Returns:** The workflow result (Any)
+
+**Raises:** `WorkflowError` if durable workflow did not complete. Use `run_durable_workflow()` when you need the full `WorkflowStatus` object.
 
 ### run_durable_workflow(workflow, instance_id, input_data, backend=None)
 

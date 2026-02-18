@@ -45,7 +45,7 @@ def validate_order(order: dict) -> dict:
     return {**order, "validated": True}
 
 @task(
-    timeout_secs=30,
+    timeout="30s",
     retries=RetryPolicy(
         max_retries=3,
         initial_delay_secs=1.0,
@@ -124,13 +124,13 @@ backend = InMemoryBackend()
 
 status = run_durable_workflow(
     workflow=workflow,
-    workflow_id="order-1",
-    initial_input=order_data,
+    instance_id="order-1",
+    input_data=order_data,
     backend=backend
 )
 
 print(status.is_completed())  # True
-print(status.output())  # "Order 1 confirmed (payment: pay_123abc)"
+print(status.output)  # "Order 1 confirmed (payment: pay_123abc)"
 ```
 
 Now if your process crashes:
@@ -174,12 +174,12 @@ workflow = (
 
 status = run_durable_workflow(
     workflow=workflow,
-    workflow_id="order-2",
-    initial_input=order_data,
+    instance_id="order-2",
+    input_data=order_data,
     backend=backend
 )
 
-print(status.output())  # "Order complete: paid=True, stock=True"
+print(status.output)  # "Order complete: paid=True, stock=True"
 ```
 
 The `fork()`/`join()` pattern:
@@ -199,8 +199,8 @@ backend = PostgresBackend("postgresql://localhost/sayiir_orders")
 
 status = run_durable_workflow(
     workflow=workflow,
-    workflow_id="order-3",
-    initial_input=order_data,
+    instance_id="order-3",
+    input_data=order_data,
     backend=backend
 )
 ```
@@ -209,20 +209,6 @@ Now your workflow state survives:
 - Process crashes
 - Server restarts
 - Deployments
-
-You can query workflow status from anywhere:
-
-```python
-from sayiir import get_workflow_status
-
-status = get_workflow_status("order-3", backend)
-if status.is_running():
-    print("Still processing...")
-elif status.is_completed():
-    print(f"Done: {status.output()}")
-elif status.is_failed():
-    print(f"Failed: {status.error()}")
-```
 
 ## Full Code Listing
 
@@ -247,7 +233,7 @@ def validate_order(order: dict) -> dict:
     return {**order, "validated": True}
 
 @task(
-    timeout_secs=30,
+    timeout="30s",
     retries=RetryPolicy(
         max_retries=3,
         initial_delay_secs=1.0,
@@ -293,12 +279,12 @@ if __name__ == "__main__":
 
     status = run_durable_workflow(
         workflow=workflow,
-        workflow_id=f"order-{order['order_id']}",
-        initial_input=order,
+        instance_id=f"order-{order['order_id']}",
+        input_data=order,
         backend=backend
     )
 
-    print(status.output())
+    print(status.output)
 ```
 
 ## Next Steps

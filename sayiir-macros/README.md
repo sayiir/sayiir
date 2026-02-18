@@ -45,12 +45,15 @@ The macro generates a PascalCase struct (e.g., `fn charge` → `struct Charge`) 
 ## `workflow!`
 
 ```rust
-let workflow = workflow!("order-process", JsonCodec, registry,
-    validate(order: Order) { validate_order(order) }
-    => charge
-    => send_email || update_inventory
-    => finalize
-);
+let workflow = workflow! {
+    name: "order-process",
+    steps: [
+        validate(order: Order) { validate_order(order) },
+        charge,
+        (send_email || update_inventory),
+        finalize,
+    ]
+};
 ```
 
 ### Syntax
@@ -59,9 +62,19 @@ let workflow = workflow!("order-process", JsonCodec, registry,
 |---|---|
 | `task_name` | Reference to a `#[task]`-generated struct |
 | `name(param: Type) { expr }` | Inline task |
-| `step \|\| step` | Parallel fork (branches) |
+| `(step \|\| step), join` | Parallel fork |
 | `delay "5s"` | Durable delay |
-| `=>` | Sequential chain (or join after `\|\|`) |
+| `signal "name"` | Wait for external signal |
+| `route key_fn { "k" => [...] }` | Conditional branch |
+
+### Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | Yes | Workflow ID (string literal) |
+| `codec` | No | Codec type path (defaults to `JsonCodec`) |
+| `registry` | No | Task registry expression (defaults to `TaskRegistry::new()`) |
+| `steps` | Yes | Comma-separated step list inside `[...]` |
 
 ## Documentation
 

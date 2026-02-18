@@ -9,6 +9,10 @@ use std::collections::HashMap;
 /// `serde::Deserialize`, so any codec that handles serde types can
 /// encode and decode it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
 pub struct NamedBranchResults(Vec<(String, Bytes)>);
 
 impl NamedBranchResults {

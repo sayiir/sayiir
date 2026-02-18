@@ -158,8 +158,13 @@ fn execution(c: &mut Criterion) {
         let chain = linear_chain(n);
         let input = encode(0);
         group.bench_with_input(BenchmarkId::new("linear", n), &n, |b, _| {
-            b.to_async(rt)
-                .iter(|| sayiir_runtime::execute_continuation_async(&chain, input.clone()));
+            b.to_async(rt).iter(|| {
+                sayiir_runtime::execute_continuation_async(
+                    &chain,
+                    input.clone(),
+                    &sayiir_runtime::serialization::JsonCodec,
+                )
+            });
         });
     }
 
@@ -168,8 +173,13 @@ fn execution(c: &mut Criterion) {
         let fork = fork_join(n);
         let input = encode(1);
         group.bench_with_input(BenchmarkId::new("fork_join", n), &n, |b, _| {
-            b.to_async(rt)
-                .iter(|| sayiir_runtime::execute_continuation_async(&fork, input.clone()));
+            b.to_async(rt).iter(|| {
+                sayiir_runtime::execute_continuation_async(
+                    &fork,
+                    input.clone(),
+                    &sayiir_runtime::serialization::JsonCodec,
+                )
+            });
         });
     }
 
@@ -204,6 +214,7 @@ fn checkpointing(c: &mut Criterion) {
                 &mut snapshot,
                 backend,
                 &callback,
+                &sayiir_runtime::serialization::JsonCodec,
             )
             .await
             .unwrap();

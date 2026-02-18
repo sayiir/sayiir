@@ -24,11 +24,13 @@
 
 ## Why Sayiir?
 
-&#9889;&ensp;**Fast by design.** Rust-native orchestration with zero-copy serialization (rkyv) and no replay overhead — resume from the last checkpoint, not from the beginning of your workflow history.
+&#9889;&ensp;**Fast by design.** Rust-native orchestration with no replay overhead — resume from the last checkpoint, not from the beginning of your workflow history. JSON by default, swap to zero-copy rkyv or any binary format of your choice via the pluggable codec abstraction.
 
 &#128274;&ensp;**No deterministic replay.** Continuation-based execution — Sayiir checkpoints after each task and resumes from the last checkpoint. Your code can call any API, use any library, with zero determinism constraints.
 
 &#128230;&ensp;**A library, not a platform.** Import it, define your task graph, run it. No separate infrastructure to deploy or operate.
+
+&#9997;&ensp;**Minimal learning curve.** Clean, typed, idiomatic APIs in Python, TypeScript, and Rust. No DSL to learn, no YAML to write — just familiar language patterns with sensible defaults that get out of your way.
 
 #### 🐍 Python
 
@@ -44,7 +46,14 @@ def send_email(user: dict) -> str:
     return f"Sent welcome to {user['name']}"
 
 workflow = Flow("welcome").then(fetch_user).then(send_email).build()
+
+# Quick run — no persistence
 result = run_workflow(workflow, 42)
+
+# Or plug in a durable backend for crash recovery
+from sayiir import run_durable_workflow, PostgresBackend
+instance_id = f"welcome-{user_id}"
+status = run_durable_workflow(workflow, instance_id, 42, backend=PostgresBackend("postgresql://localhost/sayiir"))
 ```
 
 <a href="https://gitpod.io/#https://github.com/sayiir/sayiir/tree/main/examples/hello-world-py"><img src="https://img.shields.io/badge/Try_it-Gitpod-FFAE33?logo=gitpod&logoColor=white" alt="Try in Gitpod" height="20"></a>
@@ -65,11 +74,19 @@ async fn send_email(user: User) -> Result<(), BoxError> {
 }
 
 // Compose — workflow! auto-registers all tasks
-let workflow = workflow!("welcome", JsonCodec, TaskRegistry::new(),
-    fetch_user => send_email
-).unwrap();
+let workflow = workflow! {
+    name: "welcome",
+    steps: [fetch_user, send_email]
+}
+.unwrap();
 
-runner.run(workflow.workflow(), "welcome-user-123", user_id).await?;
+// Quick run — no persistence
+workflow.run_once(user_id).await?;
+
+// Or plug in a durable backend for crash recovery
+let runner = CheckpointingRunner::new(PostgresBackend::connect("postgres://...").await?);
+let instance_id = format!("welcome-{user_id}");
+runner.run(&workflow, &instance_id, user_id).await?;
 ```
 
 <a href="https://gitpod.io/#https://github.com/sayiir/sayiir/tree/main/examples/hello-world-rs"><img src="https://img.shields.io/badge/Try_it-Gitpod-FFAE33?logo=gitpod&logoColor=white" alt="Try in Gitpod" height="20"></a>
@@ -91,7 +108,13 @@ const workflow = flow<number>("welcome")
   .then(fetchUser)
   .then(sendEmail)
   .build();
+// Quick run — no persistence
 const result = await runWorkflow(workflow, 42);
+
+// Or plug in a durable backend for crash recovery
+import { runDurableWorkflow, PostgresBackend } from "sayiir";
+const instanceId = `welcome-${42}`;
+const status = runDurableWorkflow(workflow, instanceId, 42, PostgresBackend.connect("postgresql://localhost/sayiir"));
 ```
 
 <a href="https://gitpod.io/#https://github.com/sayiir/sayiir/tree/main/examples/hello-world-node"><img src="https://img.shields.io/badge/Try_it-Gitpod-FFAE33?logo=gitpod&logoColor=white" alt="Try in Gitpod" height="20"></a>

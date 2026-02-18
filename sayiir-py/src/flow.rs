@@ -8,7 +8,7 @@
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-use sayiir_core::task::TaskMetadata;
+use sayiir_core::continuation_builder::BuilderTask;
 use sayiir_core::workflow::WorkflowContinuation;
 
 use crate::task::PyTaskMetadata;
@@ -19,6 +19,7 @@ pub struct PyWorkflow {
     pub(crate) workflow_id: String,
     pub(crate) definition_hash: String,
     pub(crate) continuation: Arc<WorkflowContinuation>,
+    pub(crate) metadata_json: Option<String>,
 }
 
 #[pymethods]
@@ -32,6 +33,11 @@ impl PyWorkflow {
     fn definition_hash(&self) -> &str {
         &self.definition_hash
     }
+
+    #[getter]
+    fn metadata_json(&self) -> Option<&str> {
+        self.metadata_json.as_deref()
+    }
 }
 
 /// Python-exposed workflow builder.
@@ -39,28 +45,7 @@ impl PyWorkflow {
 pub struct PyFlowBuilder {
     workflow_id: String,
     tasks: Vec<BuilderTask>,
-}
-
-enum BuilderTask {
-    Sequential {
-        task_id: String,
-        metadata: TaskMetadata,
-    },
-    Fork {
-        /// Each branch is a chain of (`task_id`, metadata) pairs.
-        branches: Vec<Vec<(String, TaskMetadata)>>,
-        join_id: String,
-        join_metadata: TaskMetadata,
-    },
-    Delay {
-        delay_id: String,
-        duration_secs: f64,
-    },
-    AwaitSignal {
-        signal_id: String,
-        signal_name: String,
-        timeout_secs: Option<f64>,
-    },
+    metadata_json: Option<String>,
 }
 
 #[pymethods]
@@ -70,7 +55,13 @@ impl PyFlowBuilder {
         Self {
             workflow_id: name,
             tasks: Vec::new(),
+            metadata_json: None,
         }
+    }
+
+    /// Set workflow-level metadata as a JSON string.
+    fn set_metadata_json(&mut self, json: String) {
+        self.metadata_json = Some(json);
     }
 
     /// Add a sequential task.
@@ -163,6 +154,56 @@ impl PyFlowBuilder {
         Ok(())
     }
 
+    /// Add a conditional branch node.
+    ///
+    /// `branch_id` is the node ID. The key function is registered in the Python
+    /// registry as `"{branch_id}::key_fn"`.
+    /// `branches` is a list of `(key, [(task_id, metadata), ...])` pairs.
+    /// `default` is an optional chain for unmatched keys.
+    #[pyo3(signature = (branch_id, branches, default=None))]
+    #[allow(clippy::type_complexity)]
+    fn add_branch(
+        &mut self,
+        branch_id: String,
+        branches: Vec<(String, Vec<(String, Option<PyTaskMetadata>)>)>,
+        default: Option<Vec<(String, Option<PyTaskMetadata>)>>,
+    ) -> PyResult<()> {
+        if branches.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "route must have at least one branch",
+            ));
+        }
+        for (key, chain) in &branches {
+            if chain.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Branch '{key}' must have at least one task"
+                )));
+            }
+        }
+        let branches = branches
+            .into_iter()
+            .map(|(key, chain)| {
+                let chain = chain
+                    .into_iter()
+                    .map(|(id, meta)| (id, meta.map(Into::into).unwrap_or_default()))
+                    .collect();
+                (key, chain)
+            })
+            .collect();
+        let default = default.map(|chain| {
+            chain
+                .into_iter()
+                .map(|(id, meta)| (id, meta.map(Into::into).unwrap_or_default()))
+                .collect()
+        });
+        self.tasks.push(BuilderTask::Branch {
+            branch_id,
+            branches,
+            default,
+        });
+        Ok(())
+    }
+
     /// Build the workflow.
     fn build(&self) -> PyResult<PyWorkflow> {
         tracing::debug!(
@@ -184,100 +225,14 @@ impl PyFlowBuilder {
             workflow_id: self.workflow_id.clone(),
             definition_hash,
             continuation: Arc::new(continuation),
+            metadata_json: self.metadata_json.clone(),
         })
     }
 }
 
 impl PyFlowBuilder {
     fn build_continuation(&self) -> PyResult<WorkflowContinuation> {
-        if self.tasks.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Workflow must have at least one task",
-            ));
-        }
-
-        let iter = self.tasks.iter().rev();
-        let mut current: Option<WorkflowContinuation> = None;
-
-        for task in iter {
-            current = Some(match task {
-                BuilderTask::Sequential { task_id, metadata } => WorkflowContinuation::Task {
-                    id: task_id.clone(),
-                    func: None,
-                    timeout: metadata.timeout,
-                    retry_policy: metadata.retries.clone(),
-                    next: current.map(Box::new),
-                },
-                BuilderTask::Delay {
-                    delay_id,
-                    duration_secs,
-                } => WorkflowContinuation::Delay {
-                    id: delay_id.clone(),
-                    duration: std::time::Duration::from_secs_f64(*duration_secs),
-                    next: current.map(Box::new),
-                },
-                BuilderTask::AwaitSignal {
-                    signal_id,
-                    signal_name,
-                    timeout_secs,
-                } => WorkflowContinuation::AwaitSignal {
-                    id: signal_id.clone(),
-                    signal_name: signal_name.clone(),
-                    timeout: timeout_secs.map(std::time::Duration::from_secs_f64),
-                    next: current.map(Box::new),
-                },
-                BuilderTask::Fork {
-                    branches,
-                    join_id,
-                    join_metadata,
-                } => {
-                    let branch_ids: Vec<&str> = branches
-                        .iter()
-                        .filter_map(|chain| chain.first().map(|(id, _)| id.as_str()))
-                        .collect();
-                    let fork_id = WorkflowContinuation::derive_fork_id(&branch_ids);
-
-                    let branch_conts: Vec<Arc<WorkflowContinuation>> = branches
-                        .iter()
-                        .map(|chain| -> PyResult<Arc<WorkflowContinuation>> {
-                            // Build the chain in reverse to link tasks together
-                            let mut branch_current: Option<WorkflowContinuation> = None;
-                            for (id, metadata) in chain.iter().rev() {
-                                branch_current = Some(WorkflowContinuation::Task {
-                                    id: id.clone(),
-                                    func: None,
-                                    timeout: metadata.timeout,
-                                    retry_policy: metadata.retries.clone(),
-                                    next: branch_current.map(Box::new),
-                                });
-                            }
-                            Ok(Arc::new(branch_current.ok_or_else(|| {
-                                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "Each branch must have at least one task",
-                                )
-                            })?))
-                        })
-                        .collect::<PyResult<Vec<_>>>()?;
-
-                    let join_cont = WorkflowContinuation::Task {
-                        id: join_id.clone(),
-                        func: None,
-                        timeout: join_metadata.timeout,
-                        retry_policy: join_metadata.retries.clone(),
-                        next: current.map(Box::new),
-                    };
-
-                    WorkflowContinuation::Fork {
-                        id: fork_id,
-                        branches: branch_conts.into_boxed_slice(),
-                        join: Some(Box::new(join_cont)),
-                    }
-                }
-            });
-        }
-
-        current.ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to build workflow")
-        })
+        sayiir_core::continuation_builder::build_continuation(&self.tasks)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 }

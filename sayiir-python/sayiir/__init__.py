@@ -12,7 +12,7 @@ from ._sayiir import PyRetryPolicy as RetryPolicy
 from ._sayiir import PyTaskMetadata as TaskMetadata
 from ._sayiir import PyWorkflowEngine as WorkflowEngine
 from ._sayiir import PyWorkflowStatus as WorkflowStatus
-from .decorators import task
+from .decorators import parse_duration, task
 from .executor import (
     cancel_workflow,
     pause_workflow,
@@ -22,14 +22,16 @@ from .executor import (
     send_signal,
     unpause_workflow,
 )
-from .flow import Flow, Workflow
+from .flow import BranchBuilder, Flow, ForkBuilder, Workflow
 from .worker import Worker, WorkerHandle
 
 __all__ = [
     "BackendError",
+    "BranchBuilder",
     "DurableEngine",
     "Flow",
     "FlowBuilder",
+    "ForkBuilder",
     "InMemoryBackend",
     "PostgresBackend",
     "RetryPolicy",
@@ -46,6 +48,7 @@ __all__ = [
     "run_workflow",
     "send_signal",
     "unpause_workflow",
+    "parse_duration",
     "task",
     "Worker",
     "WorkerHandle",

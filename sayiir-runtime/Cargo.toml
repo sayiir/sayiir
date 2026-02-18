@@ -10,11 +10,12 @@ homepage.workspace = true
 readme = "README.md"
 categories.workspace = true
 keywords.workspace = true
+documentation = "https://docs.rs/sayiir-runtime"
 
 [features]
 default = ["rkyv", "json", "macros"]
-json = []
-rkyv = ["dep:rkyv", "dep:bytecheck"]
+json = ["dep:serde_json"]
+rkyv = ["dep:rkyv", "dep:bytecheck", "sayiir-core/rkyv"]
 macros = ["dep:sayiir-macros"]
 
 [dependencies]
@@ -29,12 +30,14 @@ thiserror = { workspace = true }
 backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 futures = "0.3"
 chrono = { workspace = true }
-serde_json = { workspace = true }
+hostname = "0.4"
+serde_json = { workspace = true, optional = true }
 rkyv = { workspace = true, optional = true }
 bytecheck = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lib]
 name = "sayiir_runtime"

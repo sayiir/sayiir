@@ -56,6 +56,7 @@
 //! [`WorkflowContext`]: context::WorkflowContext
 //! [`TaskRegistry`]: registry::TaskRegistry
 
+#![deny(missing_docs)]
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 #![deny(
@@ -70,10 +71,12 @@
     clippy::print_stderr
 )]
 
+pub mod branch_key;
 pub mod branch_results;
 pub mod builder;
 pub mod codec;
 pub mod context;
+pub mod continuation_builder;
 pub mod error;
 pub mod prelude;
 pub mod registry;

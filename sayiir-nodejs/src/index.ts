@@ -22,8 +22,15 @@ export { task } from "./task.js";
 export type { TaskFn } from "./task.js";
 
 // Flow
-export { flow, branch, Flow, ForkBuilder, Workflow } from "./flow.js";
-export type { BranchDef, InferBranchOutputs } from "./flow.js";
+export {
+  flow,
+  branch,
+  Flow,
+  ForkBuilder,
+  RouteBuilder,
+  Workflow,
+} from "./flow.js";
+export type { BranchDef, BranchEnvelope, FlowOptions, InferBranchOutputs } from "./flow.js";
 
 // Executor
 export {
@@ -38,7 +45,7 @@ export {
   InMemoryBackend,
   PostgresBackend,
 } from "./executor.js";
-export type { Backend } from "./executor.js";
+export type { Backend, DurableRunOptions } from "./executor.js";
 
 // Duration utility
 export { parseDuration } from "./duration.js";

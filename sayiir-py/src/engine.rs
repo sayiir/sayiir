@@ -237,22 +237,27 @@ impl PyWorkflowEngine {
 
         tracing::info!(workflow_id = %workflow.workflow_id, "starting workflow execution");
 
-        let result = execute_continuation_sync(&continuation, input_bytes, &|task_id, input| {
-            execute_python_task(py, task_id, &input, task_registry).map_err(|e| {
-                let traceback = e
-                    .traceback(py)
-                    .and_then(|tb| tb.format().ok())
-                    .unwrap_or_default();
+        let result = execute_continuation_sync(
+            &continuation,
+            input_bytes,
+            &|task_id, input| {
+                execute_python_task(py, task_id, &input, task_registry).map_err(|e| {
+                    let traceback = e
+                        .traceback(py)
+                        .and_then(|tb| tb.format().ok())
+                        .unwrap_or_default();
 
-                // Preserve the Python traceback through the Rust execution loop.
-                let msg: sayiir_core::error::BoxError = if traceback.is_empty() {
-                    e.to_string().into()
-                } else {
-                    format!("{e}\n\n{traceback}").into()
-                };
-                msg
-            })
-        })
+                    // Preserve the Python traceback through the Rust execution loop.
+                    let msg: sayiir_core::error::BoxError = if traceback.is_empty() {
+                        e.to_string().into()
+                    } else {
+                        format!("{e}\n\n{traceback}").into()
+                    };
+                    msg
+                })
+            },
+            &sayiir_runtime::serialization::JsonCodec,
+        )
         .map_err(|e| PyErr::new::<crate::exceptions::TaskError, _>(e.to_string()))?;
 
         tracing::info!(workflow_id = %workflow.workflow_id, "workflow execution completed");

@@ -1,15 +1,28 @@
+//! Workflow structures, continuation tree, and serializable representations.
+//!
+//! The continuation tree ([`WorkflowContinuation`]) is the in-memory
+//! representation of a workflow's execution graph. Each node is either a
+//! [`Task`](WorkflowContinuation::Task),
+//! [`Fork`](WorkflowContinuation::Fork),
+//! [`Delay`](WorkflowContinuation::Delay),
+//! [`AwaitSignal`](WorkflowContinuation::AwaitSignal), or
+//! [`Branch`](WorkflowContinuation::Branch).
+//!
+//! [`SerializableContinuation`] strips out function pointers so the tree
+//! can be persisted and later rehydrated via a [`TaskRegistry`].
+
 use crate::context::WorkflowContext;
-use crate::error::WorkflowError;
 use crate::task::{RetryPolicy, UntypedCoreTask};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::Arc;
 
 /// Generate a `find_duplicate_id` method for continuation-like enums
 ///
 macro_rules! impl_find_duplicate_id {
-    ($name:ident, task_fields: { $($task_extra:tt)* }, delay_extra: { $($delay_extra:tt)* }, deref_branch: $deref:expr) => {
+    ($name:ident, task_fields: { $($task_extra:tt)* }, delay_extra: { $($delay_extra:tt)* }, deref_branch: $deref:expr, deref_branch_map: $deref_map:expr) => {
         impl $name {
             pub(crate) fn find_duplicate_id(&self) -> Option<String> {
                 fn collect(cont: &$name, seen: &mut HashSet<String>) -> Option<String> {
@@ -30,6 +43,17 @@ macro_rules! impl_find_duplicate_id {
                                 .find_map(|b| collect(deref_fn(b), seen))
                                 .or_else(|| join.as_ref().and_then(|j| collect(j, seen)))
                         }
+                        $name::Branch { id, branches, default, next, .. } => {
+                            if !seen.insert(id.clone()) {
+                                return Some(id.clone());
+                            }
+                            let deref_map_fn: fn(&_) -> &$name = $deref_map;
+                            branches
+                                .values()
+                                .find_map(|b| collect(deref_map_fn(b), seen))
+                                .or_else(|| default.as_ref().and_then(|d| collect(d, seen)))
+                                .or_else(|| next.as_ref().and_then(|n| collect(n, seen)))
+                        }
                         $name::Delay { id, next, $($delay_extra)* }
                         | $name::AwaitSignal { id, next, $($delay_extra)* } => {
                             if !seen.insert(id.clone()) {
@@ -47,7 +71,9 @@ macro_rules! impl_find_duplicate_id {
 
 /// A workflow structure representing the tasks to execute.
 pub enum WorkflowContinuation {
+    /// A sequential task node.
     Task {
+        /// Unique task identifier.
         id: String,
         /// Task implementation. `None` for registry-based execution
         /// where tasks are looked up by `id` at runtime.
@@ -56,26 +82,54 @@ pub enum WorkflowContinuation {
         timeout: Option<std::time::Duration>,
         /// Retry policy for failed task executions.
         retry_policy: Option<RetryPolicy>,
+        /// Next node in the chain.
         next: Option<Box<WorkflowContinuation>>,
     },
+    /// A parallel fork node.
     Fork {
+        /// Fork identifier (derived from branch IDs).
         id: String,
+        /// Parallel branch continuations.
         branches: Box<[Arc<WorkflowContinuation>]>,
+        /// Optional join task after all branches complete.
         join: Option<Box<WorkflowContinuation>>,
     },
     /// A durable delay node. Input passes through unchanged.
     Delay {
+        /// Unique delay identifier.
         id: String,
+        /// How long to wait.
         duration: std::time::Duration,
+        /// Next node in the chain.
         next: Option<Box<WorkflowContinuation>>,
     },
     /// Wait for an external signal (event). Input passes through unchanged
     /// when no signal payload is provided; otherwise the signal payload
     /// becomes the input to the next step.
     AwaitSignal {
+        /// Unique signal-wait identifier.
         id: String,
+        /// Name of the signal to wait for.
         signal_name: String,
+        /// Optional timeout duration.
         timeout: Option<std::time::Duration>,
+        /// Next node in the chain.
+        next: Option<Box<WorkflowContinuation>>,
+    },
+    /// Conditional branching node. A key function extracts a routing key
+    /// from the previous step's output and dispatches to one of the named
+    /// sub-continuations.
+    Branch {
+        /// Unique branch identifier.
+        id: String,
+        /// Key function implementation. `None` for registry-based execution
+        /// where the key function is looked up by [`key_fn_id`] at runtime.
+        key_fn: Option<UntypedCoreTask>,
+        /// Named branch continuations keyed by routing key.
+        branches: HashMap<String, Box<WorkflowContinuation>>,
+        /// Optional default branch if no key matches.
+        default: Option<Box<WorkflowContinuation>>,
+        /// Continuation after the chosen branch completes.
         next: Option<Box<WorkflowContinuation>>,
     },
 }
@@ -84,8 +138,18 @@ impl_find_duplicate_id!(
     WorkflowContinuation,
     task_fields: { .. },
     delay_extra: { .. },
-    deref_branch: |b: &Arc<WorkflowContinuation>| -> &WorkflowContinuation { b }
+    deref_branch: |b: &Arc<WorkflowContinuation>| -> &WorkflowContinuation { b },
+    deref_branch_map: |b: &WorkflowContinuation| -> &WorkflowContinuation { b }
 );
+
+/// Derive the key-function task ID for a Branch node.
+///
+/// By convention the key function is registered under `"{branch_id}::key_fn"`.
+/// This helper centralises that convention so callers don't repeat the suffix.
+#[must_use]
+pub fn key_fn_id(branch_id: &str) -> String {
+    format!("{branch_id}::key_fn")
+}
 
 impl WorkflowContinuation {
     /// Derive a fork ID from a list of branch IDs.
@@ -103,7 +167,8 @@ impl WorkflowContinuation {
             WorkflowContinuation::Task { id, .. }
             | WorkflowContinuation::Fork { id, .. }
             | WorkflowContinuation::Delay { id, .. }
-            | WorkflowContinuation::AwaitSignal { id, .. } => id,
+            | WorkflowContinuation::AwaitSignal { id, .. }
+            | WorkflowContinuation::Branch { id, .. } => id,
         }
     }
 
@@ -116,7 +181,8 @@ impl WorkflowContinuation {
         match self {
             WorkflowContinuation::Task { id, .. }
             | WorkflowContinuation::Delay { id, .. }
-            | WorkflowContinuation::AwaitSignal { id, .. } => id,
+            | WorkflowContinuation::AwaitSignal { id, .. }
+            | WorkflowContinuation::Branch { id, .. } => id,
             WorkflowContinuation::Fork { branches, .. } => {
                 if let Some(first_branch) = branches.first() {
                     first_branch.first_task_id()
@@ -127,128 +193,120 @@ impl WorkflowContinuation {
         }
     }
 
-    /// Set the timeout on a specific task node found by ID.
+    /// Find a task node by ID (immutable).
     ///
-    /// Walks the continuation chain looking for the task with `target_id`
-    /// and updates its timeout. Fork branches are `Arc` and cannot be mutated;
-    /// join continuations are traversed.
-    pub fn set_task_timeout(&mut self, target_id: &str, timeout: Option<std::time::Duration>) {
+    /// Recursively walks the full continuation tree, including through `Arc`
+    /// fork branches, and returns a reference to the matching `Task` node.
+    fn find_task(&self, target_id: &str) -> Option<&Self> {
         match self {
-            WorkflowContinuation::Task {
-                id,
-                timeout: t,
-                next,
-                ..
-            } => {
+            WorkflowContinuation::Task { id, next, .. } => {
                 if id == target_id {
-                    *t = timeout;
-                } else if let Some(next) = next {
-                    next.set_task_timeout(target_id, timeout);
+                    return Some(self);
                 }
+                next.as_ref().and_then(|n| n.find_task(target_id))
             }
             WorkflowContinuation::Delay { next, .. }
             | WorkflowContinuation::AwaitSignal { next, .. } => {
-                if let Some(next) = next {
-                    next.set_task_timeout(target_id, timeout);
-                }
+                next.as_ref().and_then(|n| n.find_task(target_id))
             }
-            WorkflowContinuation::Fork { join, .. } => {
-                if let Some(join) = join {
-                    join.set_task_timeout(target_id, timeout);
+            WorkflowContinuation::Fork { branches, join, .. } => {
+                for branch in branches {
+                    if let Some(found) = branch.find_task(target_id) {
+                        return Some(found);
+                    }
                 }
+                join.as_ref().and_then(|j| j.find_task(target_id))
+            }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for branch in branches.values() {
+                    if let Some(found) = branch.find_task(target_id) {
+                        return Some(found);
+                    }
+                }
+                if let Some(d) = default
+                    && let Some(found) = d.find_task(target_id)
+                {
+                    return Some(found);
+                }
+                next.as_ref().and_then(|n| n.find_task(target_id))
             }
         }
     }
 
-    /// Set the retry policy on a specific task node found by ID.
+    /// Find a task node by ID (mutable).
     ///
-    /// Same traversal pattern as `set_task_timeout`.
-    pub fn set_task_retry_policy(&mut self, target_id: &str, policy: Option<RetryPolicy>) {
+    /// Same traversal as [`find_task`](Self::find_task) but returns a mutable
+    /// reference. Fork branches behind `Arc` are skipped since they cannot be
+    /// mutated; only the join continuation is searched.
+    fn find_task_mut(&mut self, target_id: &str) -> Option<&mut Self> {
         match self {
-            WorkflowContinuation::Task {
-                id,
-                retry_policy,
-                next,
-                ..
-            } => {
-                if id == target_id {
-                    *retry_policy = policy;
-                } else if let Some(next) = next {
-                    next.set_task_retry_policy(target_id, policy);
-                }
+            WorkflowContinuation::Task { id, .. } if id == target_id => Some(self),
+            WorkflowContinuation::Task { next, .. } => {
+                next.as_mut().and_then(|n| n.find_task_mut(target_id))
             }
             WorkflowContinuation::Delay { next, .. }
             | WorkflowContinuation::AwaitSignal { next, .. } => {
-                if let Some(next) = next {
-                    next.set_task_retry_policy(target_id, policy);
-                }
+                next.as_mut().and_then(|n| n.find_task_mut(target_id))
             }
             WorkflowContinuation::Fork { join, .. } => {
-                if let Some(join) = join {
-                    join.set_task_retry_policy(target_id, policy);
-                }
+                join.as_mut().and_then(|j| j.find_task_mut(target_id))
             }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for branch in branches.values_mut() {
+                    if let Some(found) = branch.find_task_mut(target_id) {
+                        return Some(found);
+                    }
+                }
+                if let Some(d) = default
+                    && let Some(found) = d.find_task_mut(target_id)
+                {
+                    return Some(found);
+                }
+                next.as_mut().and_then(|n| n.find_task_mut(target_id))
+            }
+        }
+    }
+
+    /// Set the timeout on a specific task node found by ID.
+    pub fn set_task_timeout(&mut self, target_id: &str, timeout: Option<std::time::Duration>) {
+        if let Some(WorkflowContinuation::Task { timeout: t, .. }) = self.find_task_mut(target_id) {
+            *t = timeout;
+        }
+    }
+
+    /// Set the retry policy on a specific task node found by ID.
+    pub fn set_task_retry_policy(&mut self, target_id: &str, policy: Option<RetryPolicy>) {
+        if let Some(WorkflowContinuation::Task { retry_policy, .. }) = self.find_task_mut(target_id)
+        {
+            *retry_policy = policy;
         }
     }
 
     /// Look up the retry policy configured on a specific task by ID.
     #[must_use]
     pub fn get_task_retry_policy(&self, task_id: &str) -> Option<&RetryPolicy> {
-        match self {
-            WorkflowContinuation::Task {
-                id,
-                retry_policy,
-                next,
-                ..
-            } => {
-                if id == task_id {
-                    return retry_policy.as_ref();
-                }
-                next.as_ref().and_then(|n| n.get_task_retry_policy(task_id))
-            }
-            WorkflowContinuation::Delay { next, .. }
-            | WorkflowContinuation::AwaitSignal { next, .. } => {
-                next.as_ref().and_then(|n| n.get_task_retry_policy(task_id))
-            }
-            WorkflowContinuation::Fork { branches, join, .. } => {
-                for branch in branches {
-                    if let Some(p) = branch.get_task_retry_policy(task_id) {
-                        return Some(p);
-                    }
-                }
-                join.as_ref().and_then(|j| j.get_task_retry_policy(task_id))
-            }
+        match self.find_task(task_id)? {
+            WorkflowContinuation::Task { retry_policy, .. } => retry_policy.as_ref(),
+            _ => None,
         }
     }
 
     /// Look up the timeout configured on a specific task by ID.
-    ///
-    /// Recursively traverses the continuation tree (Task → Delay → Fork branches/join)
-    /// to find the task and return its timeout. Used by the worker to look up a
-    /// timeout from the continuation when setting a deadline.
     #[must_use]
     pub fn get_task_timeout(&self, task_id: &str) -> Option<std::time::Duration> {
-        match self {
-            WorkflowContinuation::Task {
-                id, timeout, next, ..
-            } => {
-                if id == task_id {
-                    return *timeout;
-                }
-                next.as_ref().and_then(|n| n.get_task_timeout(task_id))
-            }
-            WorkflowContinuation::Delay { next, .. }
-            | WorkflowContinuation::AwaitSignal { next, .. } => {
-                next.as_ref().and_then(|n| n.get_task_timeout(task_id))
-            }
-            WorkflowContinuation::Fork { branches, join, .. } => {
-                for branch in branches {
-                    if let Some(t) = branch.get_task_timeout(task_id) {
-                        return Some(t);
-                    }
-                }
-                join.as_ref().and_then(|j| j.get_task_timeout(task_id))
-            }
+        match self.find_task(task_id)? {
+            WorkflowContinuation::Task { timeout, .. } => *timeout,
+            _ => None,
         }
     }
 
@@ -291,6 +349,40 @@ impl WorkflowContinuation {
                 signal_name: signal_name.clone(),
                 timeout_ms: timeout.map(|d| d.as_millis() as u64),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
+            },
+            WorkflowContinuation::Branch {
+                id,
+                branches,
+                default,
+                next,
+                ..
+            } => SerializableContinuation::Branch {
+                id: id.clone(),
+                branches: branches
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Box::new(v.to_serializable())))
+                    .collect(),
+                default: default.as_ref().map(|d| Box::new(d.to_serializable())),
+                next: next.as_ref().map(|n| Box::new(n.to_serializable())),
+            },
+        }
+    }
+
+    /// Append a new node to the end of this continuation chain.
+    ///
+    /// Recursively walks the chain to find the tail and attaches `new_node` there.
+    pub fn append_to_chain(&mut self, new_node: WorkflowContinuation) {
+        match self {
+            WorkflowContinuation::Task { next, .. }
+            | WorkflowContinuation::Delay { next, .. }
+            | WorkflowContinuation::AwaitSignal { next, .. }
+            | WorkflowContinuation::Branch { next, .. } => match next {
+                Some(next_box) => next_box.append_to_chain(new_node),
+                None => *next = Some(Box::new(new_node)),
+            },
+            WorkflowContinuation::Fork { join, .. } => match join {
+                Some(join_box) => join_box.append_to_chain(new_node),
+                None => *join = Some(Box::new(new_node)),
             },
         }
     }
@@ -339,29 +431,59 @@ impl WorkflowContinuation {
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SerializableContinuation {
+    /// A sequential task node.
     Task {
+        /// Unique task identifier.
         id: String,
+        /// Optional timeout in milliseconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
+        /// Optional retry policy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_policy: Option<RetryPolicy>,
+        /// Next node in the chain.
         next: Option<Box<SerializableContinuation>>,
     },
+    /// A parallel fork node.
     Fork {
+        /// Fork identifier (derived from branch IDs).
         id: String,
+        /// Parallel branches.
         branches: Vec<SerializableContinuation>,
+        /// Optional join task after all branches complete.
         join: Option<Box<SerializableContinuation>>,
     },
+    /// A durable delay node.
     Delay {
+        /// Unique delay identifier.
         id: String,
+        /// Duration in milliseconds.
         duration_ms: u64,
+        /// Next node in the chain.
         next: Option<Box<SerializableContinuation>>,
     },
+    /// A signal-wait node.
     AwaitSignal {
+        /// Unique signal-wait identifier.
         id: String,
+        /// Name of the signal to wait for.
         signal_name: String,
+        /// Optional timeout in milliseconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
+        /// Next node in the chain.
+        next: Option<Box<SerializableContinuation>>,
+    },
+    /// A conditional branching node.
+    Branch {
+        /// Unique branch identifier.
+        id: String,
+        /// Named branch continuations keyed by routing key.
+        branches: HashMap<String, Box<SerializableContinuation>>,
+        /// Optional default branch if no key matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Box<SerializableContinuation>>,
+        /// Continuation after the chosen branch completes.
         next: Option<Box<SerializableContinuation>>,
     },
 }
@@ -370,7 +492,8 @@ impl_find_duplicate_id!(
     SerializableContinuation,
     task_fields: { .. },
     delay_extra: { .. },
-    deref_branch: |b: &SerializableContinuation| -> &SerializableContinuation { b }
+    deref_branch: |b: &SerializableContinuation| -> &SerializableContinuation { b },
+    deref_branch_map: |b: &SerializableContinuation| -> &SerializableContinuation { b }
 );
 
 impl SerializableContinuation {
@@ -380,23 +503,24 @@ impl SerializableContinuation {
     ///
     /// # Errors
     ///
-    /// Returns `WorkflowError::TaskNotFound` if any task ID is not in the registry.
+    /// Returns `BuildError::TaskNotFound` if any task ID is not in the registry.
     pub fn to_runnable(
         &self,
         registry: &crate::registry::TaskRegistry,
-    ) -> Result<WorkflowContinuation, WorkflowError> {
+    ) -> Result<WorkflowContinuation, crate::error::BuildError> {
         if let Some(dup) = self.find_duplicate_id() {
-            return Err(WorkflowError::DuplicateTaskId(dup));
+            return Err(crate::error::BuildError::DuplicateTaskId(dup));
         }
 
         self.to_runnable_unchecked(registry)
     }
 
     /// Convert without duplicate check (called after validation).
+    #[allow(clippy::too_many_lines)]
     fn to_runnable_unchecked(
         &self,
         registry: &crate::registry::TaskRegistry,
-    ) -> Result<WorkflowContinuation, WorkflowError> {
+    ) -> Result<WorkflowContinuation, crate::error::BuildError> {
         match self {
             SerializableContinuation::Task {
                 id,
@@ -406,7 +530,7 @@ impl SerializableContinuation {
             } => {
                 let func = registry
                     .get(id)
-                    .ok_or_else(|| WorkflowError::TaskNotFound(id.clone()))?;
+                    .ok_or_else(|| crate::error::BuildError::TaskNotFound(id.clone()))?;
                 let next = next
                     .as_ref()
                     .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
@@ -466,6 +590,39 @@ impl SerializableContinuation {
                     next,
                 })
             }
+            SerializableContinuation::Branch {
+                id,
+                branches,
+                default,
+                next,
+            } => {
+                let kf_id = key_fn_id(id);
+                let key_fn = registry
+                    .get(&kf_id)
+                    .ok_or(crate::error::BuildError::TaskNotFound(kf_id))?;
+                let branches: Result<HashMap<_, _>, _> = branches
+                    .iter()
+                    .map(|(k, v)| {
+                        v.to_runnable_unchecked(registry)
+                            .map(|c| (k.clone(), Box::new(c)))
+                    })
+                    .collect();
+                let default = default
+                    .as_ref()
+                    .map(|d| d.to_runnable_unchecked(registry).map(Box::new))
+                    .transpose()?;
+                let next = next
+                    .as_ref()
+                    .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
+                    .transpose()?;
+                Ok(WorkflowContinuation::Branch {
+                    id: id.clone(),
+                    key_fn: Some(key_fn),
+                    branches: branches?,
+                    default,
+                    next,
+                })
+            }
         }
     }
 
@@ -491,6 +648,23 @@ impl SerializableContinuation {
                         collect(j, ids);
                     }
                 }
+                SerializableContinuation::Branch {
+                    id,
+                    branches,
+                    default,
+                    next,
+                } => {
+                    ids.push(id.as_str());
+                    for b in branches.values() {
+                        collect(b, ids);
+                    }
+                    if let Some(d) = default {
+                        collect(d, ids);
+                    }
+                    if let Some(n) = next {
+                        collect(n, ids);
+                    }
+                }
             }
         }
         let mut ids = Vec::new();
@@ -507,7 +681,9 @@ impl SerializableContinuation {
     /// The hash is computed from the canonical structure of task IDs and their
     /// arrangement.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn compute_definition_hash(&self) -> String {
+        #[allow(clippy::too_many_lines)]
         fn hash_continuation(cont: &SerializableContinuation, hasher: &mut Sha256) {
             match cont {
                 SerializableContinuation::Task {
@@ -576,6 +752,36 @@ impl SerializableContinuation {
                     if let Some(ms) = timeout_ms {
                         hasher.update(b":t:");
                         hasher.update(ms.to_string().as_bytes());
+                    }
+                    hasher.update(b";");
+                    if let Some(n) = next {
+                        hash_continuation(n, hasher);
+                    }
+                }
+                SerializableContinuation::Branch {
+                    id,
+                    branches,
+                    default,
+                    next,
+                } => {
+                    hasher.update(b"B:");
+                    hasher.update(id.as_bytes());
+                    hasher.update(b"{");
+                    // Sort keys for deterministic hashing
+                    let mut keys: Vec<&String> = branches.keys().collect();
+                    keys.sort();
+                    for key in keys {
+                        hasher.update(key.as_bytes());
+                        hasher.update(b"=>");
+                        if let Some(branch) = branches.get(key) {
+                            hash_continuation(branch, hasher);
+                        }
+                        hasher.update(b",");
+                    }
+                    hasher.update(b"}");
+                    if let Some(d) = default {
+                        hasher.update(b"_=>");
+                        hash_continuation(d, hasher);
                     }
                     hasher.update(b";");
                     if let Some(n) = next {
@@ -653,7 +859,7 @@ pub enum WorkflowStatus {
 // Re-export builder types for backwards compatibility.
 pub use crate::builder::{
     BranchCollector, ContinuationState, ForkBuilder, NoContinuation, NoRegistry, RegistryBehavior,
-    WorkflowBuilder,
+    RouteBuilder, SubBuilder, WorkflowBuilder,
 };
 
 use crate::registry::TaskRegistry;
@@ -827,22 +1033,30 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     ///
     /// # Errors
     ///
-    /// Returns `WorkflowError::DefinitionMismatch` if the definition hash doesn't
+    /// Returns `BuildError::DefinitionMismatch` if the definition hash doesn't
     /// match this workflow's hash, indicating the serialized state was created with
     /// a different workflow definition.
     ///
-    /// Returns `WorkflowError::TaskNotFound` if any task ID is not in the registry.
+    /// Returns `BuildError::TaskNotFound` if any task ID is not in the registry.
     pub fn to_runnable(
         &self,
         state: &SerializedWorkflowState,
-    ) -> Result<WorkflowContinuation, WorkflowError> {
+    ) -> Result<WorkflowContinuation, crate::error::BuildError> {
         if state.definition_hash != self.inner.definition_hash {
-            return Err(WorkflowError::DefinitionMismatch {
+            return Err(crate::error::BuildError::DefinitionMismatch {
                 expected: self.inner.definition_hash.clone(),
                 found: state.definition_hash.clone(),
             });
         }
         state.continuation.to_runnable(&self.registry)
+    }
+}
+
+impl<C, Input, M> Deref for SerializableWorkflow<C, Input, M> {
+    type Target = Workflow<C, Input, M>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -983,7 +1197,7 @@ mod tests {
     #[test]
     fn test_duplicate_branch_id_returns_error() {
         use crate::context::WorkflowContext;
-        use crate::error::WorkflowError;
+        use crate::error::BuildError;
         use std::sync::Arc;
 
         let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
@@ -998,14 +1212,14 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(WorkflowError::DuplicateTaskId(id)) if id == "count"
+            Err(BuildError::DuplicateTaskId(id)) if id == "count"
         ));
     }
 
     #[test]
     fn test_serializable_continuation() {
         use crate::context::WorkflowContext;
-        use crate::error::WorkflowError;
+        use crate::error::BuildError;
         use crate::registry::TaskRegistry;
         use std::sync::Arc;
 
@@ -1028,7 +1242,7 @@ mod tests {
         // Hydration fails without registry
         let empty_registry = TaskRegistry::new();
         let result = serializable.to_runnable(&empty_registry);
-        assert!(matches!(result, Err(WorkflowError::TaskNotFound(id)) if id == "step1"));
+        assert!(matches!(result, Err(BuildError::TaskNotFound(id)) if id == "step1"));
 
         // Hydration succeeds with proper registry
         let mut registry = TaskRegistry::new();
@@ -1227,7 +1441,7 @@ mod tests {
     #[test]
     fn test_definition_mismatch_error() {
         use crate::context::WorkflowContext;
-        use crate::error::WorkflowError;
+        use crate::error::BuildError;
         use std::sync::Arc;
 
         let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
@@ -1243,15 +1457,12 @@ mod tests {
 
         // to_runnable should fail with DefinitionMismatch
         let result = workflow.to_runnable(&state);
-        assert!(matches!(
-            result,
-            Err(WorkflowError::DefinitionMismatch { .. })
-        ));
+        assert!(matches!(result, Err(BuildError::DefinitionMismatch { .. })));
     }
 
     #[test]
     fn test_duplicate_id_tampering_detection() {
-        use crate::error::WorkflowError;
+        use crate::error::BuildError;
         use crate::registry::TaskRegistry;
         use crate::workflow::SerializableContinuation;
         use std::sync::Arc;
@@ -1280,7 +1491,7 @@ mod tests {
         let result = tampered.to_runnable(&registry);
         assert!(matches!(
             result,
-            Err(WorkflowError::DuplicateTaskId(id)) if id == "step1"
+            Err(BuildError::DuplicateTaskId(id)) if id == "step1"
         ));
     }
 
@@ -1398,7 +1609,7 @@ mod tests {
     #[test]
     fn test_delay_duplicate_id_detection() {
         use crate::context::WorkflowContext;
-        use crate::error::WorkflowError;
+        use crate::error::BuildError;
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -1410,7 +1621,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(WorkflowError::DuplicateTaskId(id)) if id == "dup"
+            Err(BuildError::DuplicateTaskId(id)) if id == "dup"
         ));
     }
 
@@ -1718,6 +1929,25 @@ mod proptests {
                         next,
                     }
                 }),
+            // Branch with named branches, optional default and next
+            (
+                arb_id(),
+                prop::collection::hash_map(
+                    arb_id(),
+                    arb_continuation(depth - 1).prop_map(Box::new),
+                    0..3
+                ),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, branches, default, next)| {
+                    SerializableContinuation::Branch {
+                        id,
+                        branches,
+                        default,
+                        next,
+                    }
+                }),
         ]
         .boxed()
     }
@@ -1802,7 +2032,7 @@ mod proptests {
             },
             // AwaitSignal with optional next
             {
-                let id_s = id;
+                let id_s = id.clone();
                 let prefix_s = prefix.to_string();
                 (
                     arb_id(),
@@ -1820,6 +2050,34 @@ mod proptests {
                             next,
                         }
                     })
+            },
+            // Branch with two named branches, optional default and next
+            {
+                let id_b = id;
+                let prefix_b = prefix.to_string();
+                let b0 = arb_unique_continuation(depth - 1, &format!("{prefix_b}br0_"))
+                    .prop_map(Box::new);
+                let b1 = arb_unique_continuation(depth - 1, &format!("{prefix_b}br1_"))
+                    .prop_map(Box::new);
+                let default = prop::option::of(
+                    arb_unique_continuation(depth - 1, &format!("{prefix_b}bd_"))
+                        .prop_map(Box::new),
+                );
+                let next = prop::option::of(
+                    arb_unique_continuation(depth - 1, &format!("{prefix_b}bn_"))
+                        .prop_map(Box::new),
+                );
+                (b0, b1, default, next).prop_map(move |(branch0, branch1, default, next)| {
+                    let mut branches = std::collections::HashMap::new();
+                    branches.insert("k0".to_string(), branch0);
+                    branches.insert("k1".to_string(), branch1);
+                    SerializableContinuation::Branch {
+                        id: id_b.clone(),
+                        branches,
+                        default,
+                        next,
+                    }
+                })
             },
         ]
         .boxed()
@@ -1845,6 +2103,23 @@ mod proptests {
                     }
                     if let Some(j) = join {
                         walk(j, out);
+                    }
+                }
+                SerializableContinuation::Branch {
+                    id,
+                    branches,
+                    default,
+                    next,
+                } => {
+                    out.push(id.clone());
+                    for b in branches.values() {
+                        walk(b, out);
+                    }
+                    if let Some(d) = default {
+                        walk(d, out);
+                    }
+                    if let Some(n) = next {
+                        walk(n, out);
                     }
                 }
             }
@@ -1890,6 +2165,17 @@ mod proptests {
                 id: dup_id.to_string(),
                 signal_name: signal_name.clone(),
                 timeout_ms: *timeout_ms,
+                next: next.clone(),
+            },
+            SerializableContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => SerializableContinuation::Branch {
+                id: dup_id.to_string(),
+                branches: branches.clone(),
+                default: default.clone(),
                 next: next.clone(),
             },
         }

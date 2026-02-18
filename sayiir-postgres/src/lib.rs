@@ -47,6 +47,7 @@
 //! # }
 //! ```
 
+#![deny(missing_docs)]
 #![deny(clippy::pedantic)]
 #![deny(
     clippy::unwrap_used,

@@ -119,10 +119,10 @@ async fn step_2(data: String) -> Result<String, BoxError> {
     Ok(data.to_uppercase())
 }
 
-let workflow = workflow!(
-    "my-pipeline", JsonCodec, TaskRegistry::new(),
-    step_1 => step_2
-)?;
+let workflow = workflow! {
+    name: "my-pipeline",
+    steps: [step_1, step_2]
+}?;
 
 // Build workflow registry
 let workflows: WorkflowRegistry<_, _, _> = vec![
@@ -131,8 +131,15 @@ let workflows: WorkflowRegistry<_, _, _> = vec![
 
 // Create backend and worker
 let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+
+// Option A: explicit worker ID
 let worker = PooledWorker::new("worker-1", backend, TaskRegistry::new())
     .with_claim_ttl(Some(Duration::from_secs(300)));
+
+// Option B: auto-generated ID from hostname + PID (e.g. "myhost-12345")
+// let worker = PooledWorker::builder(backend, TaskRegistry::new())
+//     .claim_ttl(Some(Duration::from_secs(300)))
+//     .build();
 
 // Spawn worker thread
 let handle = worker.spawn(Duration::from_secs(1), workflows);
@@ -187,7 +194,7 @@ const status = runDurableWorkflow(workflow, "order-42", 123, backend);
 ```rust
 let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
 let runner = CheckpointingRunner::new(backend);
-runner.run(&workflow, "order-42", "hello".to_string()).await?;
+runner.run(&workflow, "order-42", input).await?;
 ```
 
 </TabItem>

@@ -1,11 +1,11 @@
 ---
 title: Roadmap
-description: What's planned for Sayiir — conditional branching, workflow context, loops, observability, child workflows, edge runtimes, and more
+description: What's planned for Sayiir — workflow context, loops, observability, child workflows, edge runtimes, and more
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, retries, signals, and crash recovery — all with zero infrastructure.
+Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, conditional branching, retries, signals, and crash recovery — all with zero infrastructure.
 
 This page is about what's missing and what we're building next. We're honest about gaps because that's how you decide if Sayiir is right for your use case today, or if you should wait.
 
@@ -24,6 +24,9 @@ These features are stable and production-ready across Rust, Python, and Node.js:
   </Card>
   <Card title="Retries & timeouts" icon="approve-check-circle">
     Exponential backoff, per-task timeouts, durable retry state.
+  </Card>
+  <Card title="Conditional branching" icon="approve-check-circle">
+    Route work based on data with `route`. Key-based routing with optional defaults.
   </Card>
   <Card title="Signals & events" icon="approve-check-circle">
     Wait for external events with optional timeouts. Signals are durably buffered.
@@ -45,36 +48,6 @@ These features are stable and production-ready across Rust, Python, and Node.js:
 ---
 
 ## What's coming
-
-### Conditional Branching
-
-**Status:** Planned — highest priority
-
-Today, Sayiir workflows are static DAGs: the graph is fixed at build time. You can't route to different tasks based on a previous task's output. This is the single biggest gap for AI agent and business process use cases.
-
-**What it enables:**
-- Route to different sub-agents based on LLM classification
-- Handle success/failure paths differently
-- Skip expensive steps when results are already cached
-
-**Proposed API:**
-
-```python
-workflow = (
-    Flow("support-agent")
-    .then(classify_intent)
-    .branch_on(
-        lambda result: result["intent"],
-        {
-            "billing": billing_flow,
-            "technical": tech_support_flow,
-            "general": general_response,
-        },
-    )
-    .then(send_response)
-    .build()
-)
-```
 
 ### Workflow Context (Shared State)
 
@@ -233,4 +206,4 @@ The roadmap is shaped by real use cases. If you're hitting one of these gaps, or
 
 - [Open an issue](https://github.com/sayiir/sayiir/issues) with your use case
 - [Join the Discord](https://discord.gg/MWSzsHeg) to discuss design decisions
-- PRs welcome — especially for observability and conditional branching
+- PRs welcome — especially for observability and workflow context

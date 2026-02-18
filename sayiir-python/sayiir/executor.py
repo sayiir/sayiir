@@ -8,25 +8,59 @@ from typing import Any
 from .flow import Workflow
 
 
-def run_workflow(workflow: Workflow, input_data: Any) -> Any:
-    """Run a workflow to completion (no persistence).
+def run_workflow(
+    workflow: Workflow,
+    input_data: Any,
+    *,
+    instance_id: str | None = None,
+    backend: Any = None,
+) -> Any:
+    """Run a workflow to completion and return its output.
+
+    When called without ``instance_id`` / ``backend``, runs entirely in
+    memory with no persistence (fastest path for prototyping).
+
+    When called **with** ``instance_id`` and ``backend``, runs with full
+    checkpointing and durability — but still returns the output directly
+    instead of a :class:`WorkflowStatus` object.  If the workflow does not
+    complete (e.g. it parks on a delay or signal), a :class:`WorkflowError`
+    is raised.  Use :func:`run_durable_workflow` when you need the full
+    status object.
 
     Args:
-        workflow: The workflow to run (produced by Flow.build())
+        workflow: The workflow to run (produced by ``Flow.build()``)
         input_data: Input to the first task
+        instance_id: Unique execution instance ID (enables durability)
+        backend: Persistence backend (``InMemoryBackend`` or
+            ``PostgresBackend``).  Required when ``instance_id`` is given.
 
     Returns:
-        The workflow result
+        The workflow output.
 
-    Example:
-        @task
-        def double(x: int) -> int:
-            return x * 2
+    Raises:
+        WorkflowError: If the durable workflow did not complete.
 
-        workflow = Flow("test").then(double).build()
+    Example::
+
+        # Prototype — no persistence
         result = run_workflow(workflow, 21)
-        print(result)  # 42
+
+        # Production — same function, just add params
+        result = run_workflow(workflow, 21, instance_id="run-1", backend=pg)
     """
+    if instance_id is not None:
+        status = run_durable_workflow(
+            workflow, instance_id, input_data, backend=backend
+        )
+        if not status.is_completed():
+            from ._sayiir import WorkflowError
+
+            raise WorkflowError(
+                f"Workflow did not complete (status={status.status}). "
+                f"Use run_durable_workflow() to inspect the full status."
+            )
+        return status.output
+
     from ._sayiir import PyWorkflowEngine
 
     engine = PyWorkflowEngine()

@@ -378,6 +378,34 @@ impl ResumeParkedPosition {
     }
 }
 
+// ── Branch helpers ──────────────────────────────────────────────────────
+
+/// Decode the routing key and look up the matching branch continuation.
+///
+/// Combines `EnvelopeCodec::decode_string` with the `HashMap` lookup and
+/// `BranchKeyNotFound` error, eliminating the 7-line pattern repeated in
+/// every executor.
+pub(crate) fn resolve_branch<'a, E: sayiir_core::codec::EnvelopeCodec>(
+    branch_id: &str,
+    key_bytes: &[u8],
+    branches: &'a std::collections::HashMap<String, Box<WorkflowContinuation>>,
+    default: Option<&'a WorkflowContinuation>,
+    envelope_codec: &E,
+) -> Result<(String, &'a WorkflowContinuation), RuntimeError> {
+    let key: String = envelope_codec
+        .decode_string(key_bytes)
+        .map_err(RuntimeError::from)?;
+    let chosen = branches
+        .get(&key)
+        .map(AsRef::as_ref)
+        .or(default)
+        .ok_or_else(|| WorkflowError::BranchKeyNotFound {
+            branch_id: branch_id.to_string(),
+            key: key.clone(),
+        })?;
+    Ok((key, chosen))
+}
+
 // ── Retry ───────────────────────────────────────────────────────────────
 
 /// Convert a `RetryPolicy` into a `backon::ExponentialBuilder` for in-process retries.

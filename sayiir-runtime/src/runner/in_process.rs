@@ -1,7 +1,7 @@
 use super::WorkflowRunner;
 use crate::execution::execute_continuation_async;
-use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
+use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::context::with_context;
 use sayiir_core::workflow::{Workflow, WorkflowStatus};
 
@@ -37,7 +37,7 @@ impl WorkflowRunner for InProcessRunner {
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::EncodeValue<Input>,
+        C: Codec + EnvelopeCodec + sealed::EncodeValue<Input>,
     {
         let context = workflow.context().clone();
         let continuation = workflow.continuation();
@@ -45,7 +45,7 @@ impl WorkflowRunner for InProcessRunner {
         async move {
             with_context(context, || async move {
                 let input_bytes = codec.encode(&input)?;
-                match execute_continuation_async(continuation, input_bytes).await {
+                match execute_continuation_async(continuation, input_bytes, &codec).await {
                     Ok(_) => Ok(WorkflowStatus::Completed),
                     Err(e) => Ok(WorkflowStatus::Failed(e.to_string())),
                 }

@@ -56,12 +56,17 @@ impl NapiWorkflowEngine {
 
         tracing::info!(workflow_id = %workflow.workflow_id, "starting workflow execution");
 
-        let result = execute_continuation_sync(&continuation, input_bytes, &|task_id, input| {
-            execute_js_task(env, task_id, &input, &task_registry).map_err(|e| {
-                let msg: sayiir_core::error::BoxError = e.to_string().into();
-                msg
-            })
-        })
+        let result = execute_continuation_sync(
+            &continuation,
+            input_bytes,
+            &|task_id, input| {
+                execute_js_task(env, task_id, &input, &task_registry).map_err(|e| {
+                    let msg: sayiir_core::error::BoxError = e.to_string().into();
+                    msg
+                })
+            },
+            &sayiir_runtime::serialization::JsonCodec,
+        )
         .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         tracing::info!(workflow_id = %workflow.workflow_id, "workflow execution completed");
@@ -284,6 +289,15 @@ impl NapiContinuationStepper {
                     Status::GenericFailure,
                     format!(
                         "AwaitSignal '{id}' not supported in the simple executor. \
+                         Use the durable engine instead."
+                    ),
+                ));
+            }
+            WorkflowContinuation::Branch { id, .. } => {
+                return Err(Error::new(
+                    Status::GenericFailure,
+                    format!(
+                        "Branch '{id}' not supported in the simple executor. \
                          Use the durable engine instead."
                     ),
                 ));

@@ -31,23 +31,27 @@ use sayiir_runtime::prelude::*;
 use sayiir_core::error::BoxError;
 use std::sync::Arc;
 
-#[task(timeout = "30s", retries = 3, backoff = "100ms")]
+#[task(id = "charge_card", timeout = "30s", retries = 3, backoff = "100ms")]
 async fn charge(order: Order, #[inject] stripe: Arc<Stripe>) -> Result<Receipt, BoxError> {
     stripe.charge(&order).await
 }
 
-// Generated: struct Charge with new(stripe), task_id(), metadata(),
-// register(), CoreTask impl.
+// Generated: struct ChargeTask with new(stripe), task_id() → "charge_card",
+// metadata(), register(), CoreTask impl.
 // The original `charge` function is preserved for direct use/testing.
 ```
 
-The `#[task]` macro generates a struct (PascalCase of the function name) that implements `CoreTask`. The struct has `new()` (accepting injected deps), `task_id()`, `metadata()`, and `register()` methods. Your original function is kept intact so you can call it directly in tests.
+The `#[task]` macro generates a struct named `{PascalCase}Task` (e.g., `fn charge` → `ChargeTask`) that implements `CoreTask`. The struct has `new()` (accepting injected deps), `task_id()`, `metadata()`, and `register()` methods. Your original function is kept intact so you can call it directly in tests.
+
+:::tip[Set an explicit `id`]
+Always use `id = "stable_name"` in production. Without it, the task ID defaults to the function name — renaming the function breaks in-flight workflows on resume.
+:::
 
 ### Attribute options
 
 | Option | Example | Description |
 |--------|---------|-------------|
-| `id` | `id = "custom_name"` | Override task ID (default: fn name) |
+| `id` | `id = "charge_card"` | **Recommended.** Explicit task ID (default: fn name) |
 | `timeout` | `timeout = "30s"` | Task timeout (`ms`, `s`, `m`, `h`) |
 | `retries` | `retries = 3` | Max retry count |
 | `backoff` | `backoff = "100ms"` | Initial retry delay |
@@ -66,9 +70,10 @@ async fn charge(order: Order) -> Result<Receipt, BoxError> { Ok(Receipt { id: or
 #[task]
 async fn send_email(receipt: Receipt) -> Result<(), BoxError> { Ok(()) }
 
-let workflow = workflow!("order-process", JsonCodec, TaskRegistry::new(),
-    validate => charge => send_email
-).unwrap();
+let workflow = workflow! {
+    name: "order-process",
+    steps: [validate, charge, send_email]
+}.unwrap();
 ```
 
 ### Pipeline syntax
@@ -80,23 +85,21 @@ let workflow = workflow!("order-process", JsonCodec, TaskRegistry::new(),
 | `a \|\| b` | Parallel fork (branches) |
 | `delay "5s"` | Durable delay |
 | `signal "name"` | Wait for external signal |
-| `=>` | Sequential chain (or join after `\|\|`) |
+| `,` | Sequential separator between steps |
+
+## Quick run with `run_once`
+
+For scripts, tests, or quick experiments — run a workflow in one line with no backend or instance ID:
+
+```rust
+let status = workflow.run_once(input).await?;
+```
+
+This uses `InProcessRunner` internally. No durability, no persistence — just run and get the result. The `run_once` method is available on any `Workflow` via the `WorkflowRunExt` trait (included in the prelude).
 
 ## Run durably with CheckpointingRunner
 
-```rust
-let backend = InMemoryBackend::new();
-let runner = CheckpointingRunner::new(backend);
-
-let status = runner.run(workflow.workflow(), "instance-001", input).await?;
-
-// After a crash: pick up where it left off
-let status = runner.resume(workflow.workflow(), "instance-001").await?;
-```
-
-### With PostgreSQL
-
-Swap the backend — the workflow code is unchanged:
+For crash recovery and persistence, pair `CheckpointingRunner` with a durable backend:
 
 ```rust
 use sayiir_postgres::PostgresBackend;
@@ -105,7 +108,21 @@ use sayiir_postgres::PostgresBackend;
 let backend = PostgresBackend::<JsonCodec>::connect("postgresql://localhost/sayiir").await?;
 let runner = CheckpointingRunner::new(backend);
 
-let status = runner.run(workflow.workflow(), "instance-001", input).await?;
+let status = runner.run(&workflow, "instance-001", input).await?;
+
+// After a crash: pick up where it left off
+let status = runner.resume(&workflow, "instance-001").await?;
+```
+
+### With InMemoryBackend
+
+For local development or tests that need checkpointing without a database:
+
+```rust
+let backend = InMemoryBackend::new();
+let runner = CheckpointingRunner::new(backend);
+
+let status = runner.run(&workflow, "instance-001", input).await?;
 ```
 
 ## Next steps

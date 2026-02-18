@@ -93,7 +93,7 @@ result = run_workflow(workflow, 5)
 ```python
 from sayiir import task, Flow, run_durable_workflow
 
-@task(timeout_secs=30)
+@task(timeout="30s")
 def process_order(order_id: int) -> dict:
     return {"order_id": order_id, "status": "processed"}
 
@@ -130,8 +130,14 @@ status = run_durable_workflow(workflow, "run-001", 21, backend=backend)
 ```python
 from sayiir import task, RetryPolicy
 
-@task(retries=RetryPolicy(max_retries=3, initial_delay_secs=0.5, backoff_multiplier=2.0))
+# Int shorthand (1s initial delay, 2x backoff)
+@task(retries=3)
 def flaky_call(url: str) -> dict:
+    return requests.get(url).json()
+
+# Full control
+@task(retries=RetryPolicy(max_retries=3, initial_delay_secs=0.5, backoff_multiplier=2.0))
+def precise_retry(url: str) -> dict:
     return requests.get(url).json()
 ```
 
@@ -199,12 +205,49 @@ result = run_workflow(workflow, {"order_id": 1, "amount": 99.99})
 # Automatic validation on input, serialization on output
 ```
 
+### Conditional branching
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def classify(ticket: dict) -> str:
+    return "billing" if ticket["type"] == "invoice" else "tech"
+
+@task
+def handle_billing(ticket: dict) -> str:
+    return f"Billing handled: {ticket['id']}"
+
+@task
+def handle_tech(ticket: dict) -> str:
+    return f"Tech resolved: {ticket['id']}"
+
+@task
+def fallback(ticket: dict) -> str:
+    return f"Routed to general: {ticket['id']}"
+
+workflow = (
+    Flow("support-router")
+    .route(classify, keys=["billing", "tech"])
+        .branch("billing", handle_billing)
+        .branch("tech", handle_tech)
+        .default_branch(fallback)
+    .done()
+    .build()
+)
+result = run_workflow(workflow, {"id": 1, "type": "invoice"})
+# {"branch": "billing", "result": "Billing handled: 1"}
+```
+
+The key function returns a string routing key. The matching branch runs; if no match and no default, the workflow fails. The output is a `BranchEnvelope` with `branch` (the key) and `result` (the branch output).
+
 ### Task metadata
 
 ```python
 @task(
-    name="Process Payment",
-    timeout_secs=60,
+    "Process Payment",
+    timeout="60s",
+    retries=3,
     tags=["payments", "critical"],
     description="Charges the customer's payment method",
 )
@@ -216,7 +259,7 @@ def process_payment(order: dict) -> dict:
 
 ### Decorators
 
-- **`@task`** — Mark a function as a workflow task. Optional params: `name`, `timeout_secs`, `retries`, `tags`, `description`.
+- **`@task`** — Mark a function as a workflow task. Accepts a positional name string: `@task("name")`. Optional params: `name`, `timeout` (duration string or seconds), `retries` (int shorthand or `RetryPolicy`), `tags`, `description`.
 
 ### Flow Builder
 
@@ -225,11 +268,15 @@ def process_payment(order: dict) -> dict:
 - **`.fork()`** — Start parallel branches. Returns a `ForkBuilder`.
 - **`.branch(task_fn, ...)`** — Add a branch (one or more chained tasks).
 - **`.join(task_fn)`** — Merge parallel branches. Join function receives `dict[str, value]`.
+- **`.route(key_fn, *, keys=["a", "b"])`** — Start conditional branching. Returns a `BranchBuilder`.
+- **`BranchBuilder.branch(key, *tasks)`** — Add a named branch for a routing key.
+- **`BranchBuilder.default_branch(*tasks)`** — Set the fallback branch for unmatched keys.
+- **`BranchBuilder.done()`** — Finish branching and return to the `Flow` builder.
 - **`.build()`** — Finalize and return a `Workflow`.
 
 ### Execution
 
-- **`run_workflow(workflow, input)`** — Execute a workflow in-memory. Returns the final output.
+- **`run_workflow(workflow, input, *, instance_id=None, backend=None)`** — Execute a workflow. Without `instance_id`, runs in-memory. With `instance_id` and `backend`, runs with full checkpointing (raises `WorkflowError` if the workflow doesn't complete). Returns the final output.
 - **`run_durable_workflow(workflow, instance_id, input, backend=None)`** — Execute with checkpointing. Returns a `WorkflowStatus`.
 - **`resume_workflow(workflow, instance_id, backend)`** — Resume a workflow from its last checkpoint.
 - **`cancel_workflow(instance_id, backend, reason=None, cancelled_by=None)`** — Cancel a running workflow.
@@ -261,7 +308,7 @@ Your Python code          Sayiir (Rust)              Storage
 │  @task       │───>│  Orchestration      │───>│  Checkpoint  │
 │  functions   │    │  Checkpointing      │    │  after each  │
 │              │<───│  Crash recovery     │<───│  task        │
-└──────────────┘    │  Fork/join          │    └──────────────┘
+└──────────────┘    │  Fork/join/branch   │    └──────────────┘
                     │  Serialization      │
                     └─────────────────────┘
 ```
