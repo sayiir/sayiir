@@ -67,7 +67,9 @@
     "seti",
     "rusqlite",
     "Ollama",
-    "fieldless"
+    "fieldless",
+    "myhost",
+    "resumability"
   ],
   "flagWords": [],
   "dictionaries": ["softwareTerms", "typescript", "python", "rust", "node"]

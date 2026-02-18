@@ -86,7 +86,7 @@ def task(
 
 @overload
 def task(
-    name: str,
+    func: str,
     *,
     timeout: "str | float | None" = None,
     timeout_secs: float | None = None,
