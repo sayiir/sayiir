@@ -98,6 +98,7 @@ uvx pyright --project sayiir-python/
 
 ```bash
 cd sayiir-nodejs
+pnpm lint        # ESLint (typescript-eslint)
 pnpm typecheck   # TypeScript type checking (tsc --noEmit)
 ```
 
@@ -117,6 +118,7 @@ Every pull request runs the following checks automatically:
 | `ruff format --check` | Python formatting |
 | `pyright` | Python type checking |
 | `pytest` (Python 3.10–3.13) | Python tests across all supported versions |
+| `eslint` | TypeScript linting (typescript-eslint) |
 | `tsc --noEmit` | TypeScript type checking |
 | `vitest run` (Node 18/20/22) | Node.js tests across all supported versions |
 

@@ -40,3 +40,12 @@ class ResearchReport(BaseModel):
     report_markdown: str
     sources: list[SourceResult]
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class QualityAssessment(BaseModel):
+    """LLM self-assessment of report quality."""
+
+    verdict: Literal["publish", "revise", "insufficient"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+    report: ResearchReport

@@ -1,422 +1,76 @@
 ---
-title: "Tutorial: Background Jobs (Rust)"
-description: Build a background email pipeline with retries, timeouts, and distributed workers
+title: "Tutorial: Video Processing Pipeline (Rust)"
+description: Build a fault-tolerant video processing pipeline with real ffmpeg transcoding, content moderation, and conditional delivery
 ---
 
-Learn how to build a production-ready background job system with Sayiir's Rust runtime. We'll create an email campaign pipeline that handles retries, timeouts, and scales to distributed workers.
+import { LinkCard } from '@astrojs/starlight/components';
 
-## What We're Building
+## The problem
 
-An email campaign system that:
-- Fetches recipient lists from a database
-- Renders email templates with personalization
-- Sends emails via an external service (with retries)
-- Scales to distributed worker processes
+You run a video platform. When a user uploads a video, your pipeline needs to download it, transcode to multiple resolutions in parallel, generate thumbnails, run content moderation, upload approved assets to CDN, and notify the user. Simple enough on paper.
 
-This tutorial demonstrates Sayiir's Rust API, which gives you maximum performance and type safety.
+Here's what happens in production:
 
-## Cargo Setup
+- **The 4K transcode OOMs at minute 28.** Your retry logic restarts *all three* transcodes — burning 45 minutes of completed 720p and 1080p work.
+- **The moderation API returns a 503.** Your pipeline gives up. The video is stuck in "processing" forever. The user files a support ticket.
+- **Moderation rejects a video**, but the transcoded files are already on CDN. Nobody cleans them up. You're paying for storage on content that should never have been published.
+- **You deploy mid-pipeline.** All in-flight state is gone. Dozens of videos need to be manually re-queued.
 
-Create a new Rust project and add Sayiir dependencies:
+These aren't hypothetical — they're production incidents that cost real companies real money.
 
-```bash
-cargo new email-pipeline
-cd email-pipeline
-```
+## How Sayiir solves each one
 
-Add to `Cargo.toml`:
-
-```toml
-[dependencies]
-sayiir-runtime = "0.1"
-sayiir-persistence = "0.1"
-sayiir-postgres = "0.1"
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-```
-
-## Define Tasks with #[task]
-
-Create `src/tasks.rs` with your task definitions:
+Each step in a Sayiir workflow persists its result. When a step fails, only *that step* retries. Completed work is never lost.
 
 ```rust
-use sayiir_runtime::prelude::*;
-use sayiir_core::error::BoxError;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Campaign {
-    pub id: String,
-    pub template: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Recipients {
-    pub emails: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RenderedEmail {
-    pub subject: String,
-    pub body: String,
-    pub recipients: Vec<String>,
-}
-
-/// Fetch recipient list for campaign
-#[task(timeout = "10s")]
-pub async fn fetch_recipients(campaign: Campaign) -> Result<Recipients, BoxError> {
-    // In production: query your database
-    // let rows = sqlx::query!("SELECT email FROM subscribers WHERE active = true")
-    //     .fetch_all(&pool)
-    //     .await?;
-
-    println!("Fetching recipients for campaign: {}", campaign.id);
-
-    Ok(Recipients {
-        emails: vec![
-            "alice@example.com".into(),
-            "bob@example.com".into(),
-            "carol@example.com".into(),
-        ],
-    })
-}
-
-/// Render email template with campaign data
-#[task(timeout = "5s")]
-pub async fn render_template(input: (Campaign, Recipients)) -> Result<RenderedEmail, BoxError> {
-    let (campaign, recipients) = input;
-
-    // In production: use a template engine like Handlebars or Tera
-    let subject = format!("Campaign: {}", campaign.id);
-    let body = campaign.template.replace("{{campaign_id}}", &campaign.id);
-
-    println!("Rendered template for {} recipients", recipients.emails.len());
-
-    Ok(RenderedEmail {
-        subject,
-        body,
-        recipients: recipients.emails,
-    })
-}
-
-/// Send emails via external service with automatic retries
-#[task(
-    timeout = "30s",
-    retries = 3,
-    backoff = "1s"
-)]
-pub async fn send_emails(email: RenderedEmail) -> Result<String, BoxError> {
-    // In production: integrate with SendGrid, Postmark, AWS SES, etc.
-    // let response = reqwest::Client::new()
-    //     .post("https://api.sendgrid.com/v3/mail/send")
-    //     .json(&payload)
-    //     .send()
-    //     .await?;
-
-    println!(
-        "Sending email '{}' to {} recipients",
-        email.subject,
-        email.recipients.len()
-    );
-
-    // Simulate occasional failure for retry demonstration
-    // if rand::random::<f32>() < 0.2 {
-    //     return Err("Transient API error".into());
-    // }
-
-    Ok(format!("Sent to {} recipients", email.recipients.len()))
+workflow! {
+    name: "video-pipeline",
+    codec: JsonCodec,
+    steps: [
+        download_video,
+        validate_upload,
+        (transcode_720p || transcode_1080p || transcode_4k || generate_thumbnails || moderate_content),
+        merge_results,
+        route check_moderation -> Verdict {
+            Approved => [upload_to_cdn, update_database, notify_user],
+            Rejected => [cleanup_artifacts, notify_rejection],
+        }
+    ]
 }
 ```
 
-The `#[task]` macro configures:
-- **timeout**: Maximum execution time before task fails
-- **retries**: Number of retry attempts on failure
-- **backoff**: Initial delay between retries (grows exponentially)
+The `||` operator runs five tasks in parallel — three ffmpeg transcodes, thumbnail extraction, and content moderation — each with its own retry policy tuned for its failure mode. The 4K transcode gets 3 retries with 10s exponential backoff. The moderation API gets 3 retries with 2s backoff for transient 503s.
 
-## Compose with workflow!
+The `merge_results` task is a smart fan-in gate: it requires 720p and 1080p but treats 4K as best-effort. If 4K fails, the pipeline continues with two resolutions instead of crashing.
 
-Create `src/main.rs` to compose tasks into a workflow:
+The `route` sends approved videos to CDN upload and rejected videos to a cleanup branch that deletes the transcoded artifacts — no orphaned files on CDN.
 
-```rust
-mod tasks;
+And if you deploy mid-pipeline? Sayiir resumes from exactly where it left off.
 
-use sayiir_runtime::prelude::*;
-use sayiir_persistence::InMemoryBackend;
-use tasks::{Campaign, fetch_recipients, render_template, send_emails};
+| Production nightmare | Sayiir feature |
+|---|---|
+| 4K OOM restarts all transcodes | **Step-level retries** — only the failed branch retries |
+| Moderation API 503 → stuck forever | **Per-task backoff** — retries with exponential delay |
+| 4K failure blocks the whole pipeline | **Best-effort tasks** — return `None`, merge handles it |
+| Rejected video, assets left on CDN | **Conditional routing** — rejected branch cleans up |
+| Deploy mid-pipeline, state lost | **Durable execution** — each step result is persisted |
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Build workflow using the workflow! macro
-    let workflow = workflow! {
-        name: "email-pipeline",
-        steps: [fetch_recipients, render_template, send_emails]
-    }?;
+## Try it yourself
 
-    // Create backend and runner
-    let backend = InMemoryBackend::new();
-    let runner = CheckpointingRunner::new(backend);
-
-    // Execute campaign
-    let campaign = Campaign {
-        id: "summer-sale-2026".into(),
-        template: "Check out our summer sale! Campaign: {{campaign_id}}".into(),
-    };
-
-    let status = runner
-        .run(
-            &workflow,
-            "campaign-001",
-            campaign
-        )
-        .await?;
-
-    match status {
-        WorkflowStatus::Completed(output) => {
-            println!("Campaign completed: {}", output);
-        }
-        WorkflowStatus::Failed(error) => {
-            eprintln!("Campaign failed: {}", error);
-        }
-        _ => {
-            println!("Campaign status: {:?}", status);
-        }
-    }
-
-    Ok(())
-}
-```
-
-Run it:
+The full example uses real `ffmpeg` for transcoding and thumbnail extraction — no mocks. It downloads a 30 MB test video from the Blender Foundation, transcodes to 720p and 1080p in parallel, and produces real output files you can inspect.
 
 ```bash
 cargo run
 ```
 
-Output:
-```
-Fetching recipients for campaign: summer-sale-2026
-Rendered template for 3 recipients
-Sending email 'Campaign: summer-sale-2026' to 3 recipients
-Campaign completed: Sent to 3 recipients
-```
+<LinkCard
+  title="Full example: Video Pipeline (Rust)"
+  description="Complete Cargo project with real ffmpeg transcoding, 14 tasks, typed routing, and structured logging."
+  href="https://github.com/sayiir/sayiir/tree/main/examples/video-pipeline-rs"
+/>
 
-## Run with CheckpointingRunner
+## Next steps
 
-The `CheckpointingRunner` provides automatic crash recovery. Let's see it in action:
-
-```rust
-use sayiir_persistence::InMemoryBackend;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let backend = InMemoryBackend::new();
-    let runner = CheckpointingRunner::new(backend);
-
-    let workflow_id = "campaign-001";
-    let campaign = Campaign {
-        id: "summer-sale".into(),
-        template: "Sale alert: {{campaign_id}}".into(),
-    };
-
-    // First run - completes successfully
-    let status = runner.run(&workflow, workflow_id, campaign.clone()).await?;
-    println!("First run: {:?}", status);
-
-    // Second run with same ID - returns cached result immediately
-    let status = runner.run(&workflow, workflow_id, campaign).await?;
-    println!("Second run (cached): {:?}", status);
-
-    Ok(())
-}
-```
-
-Key benefits:
-- Tasks are checkpointed after completion
-- Crashed workflows resume from last checkpoint
-- Completed workflows return cached results
-- No duplicate work or side effects
-
-## Scale with Distributed Workers
-
-For production, scale to multiple worker processes pulling from a shared queue:
-
-### Step 1: Register Workflow
-
-Since our tasks use the `#[task]` macro, the `workflow!` macro registers them automatically — no manual `TaskRegistry` setup needed:
-
-```rust
-use sayiir_runtime::prelude::*;
-use sayiir_runtime::WorkflowRegistry;
-
-pub fn build_workflow_registry() -> WorkflowRegistry {
-    let mut registry = WorkflowRegistry::new();
-
-    // workflow! auto-registers #[task]-annotated functions
-    let workflow = workflow! {
-        name: "email-pipeline",
-        steps: [fetch_recipients, render_template, send_emails]
-    }.unwrap();
-
-    registry.register("email-pipeline", workflow);
-    registry
-}
-```
-
-### Step 3: Launch Worker Pool
-
-```rust
-use sayiir_postgres::PostgresBackend;
-use sayiir_runtime::PooledWorker;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Shared backend across all workers
-    let backend = PostgresBackend::connect("postgresql://localhost/sayiir_jobs").await?;
-
-    // Registry of available workflows
-    let workflow_registry = Arc::new(build_workflow_registry());
-
-    // Spawn worker pool (4 workers)
-    let workers: Vec<_> = (0..4)
-        .map(|id| {
-            let backend = backend.clone();
-            let registry = workflow_registry.clone();
-
-            tokio::spawn(async move {
-                let worker = PooledWorker::new(
-                    format!("worker-{}", id),
-                    backend,
-                    registry
-                );
-
-                println!("Worker {} started", id);
-                worker.run().await
-            })
-        })
-        .collect();
-
-    // Wait for all workers
-    for worker in workers {
-        worker.await??;
-    }
-
-    Ok(())
-}
-```
-
-### Step 4: Submit Jobs
-
-From anywhere in your application:
-
-```rust
-use sayiir_persistence::PostgresBackend;
-
-async fn submit_campaign(campaign_id: &str) -> anyhow::Result<()> {
-    let backend = PostgresBackend::connect("postgresql://localhost/sayiir_jobs").await?;
-
-    let campaign = Campaign {
-        id: campaign_id.into(),
-        template: "Newsletter: {{campaign_id}}".into(),
-    };
-
-    // Submit workflow - workers will pick it up automatically
-    let workflow_id = format!("campaign-{}", campaign_id);
-    backend.enqueue_workflow("email-pipeline", &workflow_id, campaign).await?;
-
-    println!("Campaign {} queued", workflow_id);
-    Ok(())
-}
-```
-
-Workers automatically:
-- Poll the backend for pending workflows
-- Execute tasks with proper checkpointing
-- Retry failed tasks with exponential backoff
-- Handle crashes and resume interrupted workflows
-
-## Full Code Listing
-
-Complete `src/main.rs` with all features:
-
-```rust
-mod tasks;
-
-use sayiir_runtime::prelude::*;
-use sayiir_postgres::PostgresBackend;
-use std::sync::Arc;
-use tasks::{Campaign, fetch_recipients, render_template, send_emails};
-
-fn build_workflow_registry() -> WorkflowRegistry {
-    let mut registry = WorkflowRegistry::new();
-
-    // workflow! auto-registers #[task]-annotated functions
-    let workflow = workflow! {
-        name: "email-pipeline",
-        steps: [fetch_recipients, render_template, send_emails]
-    }.unwrap();
-
-    registry.register("email-pipeline", workflow);
-    registry
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // For development: use InMemoryBackend
-    // let backend = InMemoryBackend::new();
-
-    // For production: use PostgresBackend
-    let backend = PostgresBackend::connect("postgresql://localhost/sayiir_jobs").await?;
-
-    let workflow_registry = Arc::new(build_workflow_registry());
-
-    // Launch worker pool
-    let workers: Vec<_> = (0..4)
-        .map(|id| {
-            let backend = backend.clone();
-            let registry = workflow_registry.clone();
-
-            tokio::spawn(async move {
-                let worker = PooledWorker::new(
-                    format!("worker-{}", id),
-                    backend,
-                    registry
-                );
-                worker.run().await
-            })
-        })
-        .collect();
-
-    // Submit a test campaign
-    let campaign = Campaign {
-        id: "spring-2026".into(),
-        template: "Spring collection: {{campaign_id}}".into(),
-    };
-
-    backend.enqueue_workflow("email-pipeline", "campaign-spring", campaign).await?;
-
-    println!("Campaign queued - workers processing...");
-
-    // Wait for workers (in production, run workers as separate processes)
-    for worker in workers {
-        worker.await??;
-    }
-
-    Ok(())
-}
-```
-
-## Next Steps
-
-You now have a production-ready background job system. Explore more:
-
-- **[Distributed Workers Guide](/guides/distributed-workers/)** — Best practices for worker pools
-- **[Postgres Production Guide](/guides/postgres-production/)** — Connection pooling, migrations, monitoring
-- **[Error Handling](/guides/retries-and-timeouts/)** — Custom retry policies and dead-letter queues
-
-Try extending the pipeline:
-- Add parallel branches for SMS and push notifications
-- Implement rate limiting with task delays
-- Add A/B testing by splitting recipients
-- Send delivery reports via signals
+- **[Distributed Workers](/guides/distributed-workers/)** — Scale the pipeline across multiple machines
+- **[PostgreSQL in Production](/guides/postgres-production/)** — Persist pipeline state with `PostgresBackend`
+- **[Retries & Timeouts](/guides/retries-and-timeouts/)** — Custom retry policies and circuit breakers

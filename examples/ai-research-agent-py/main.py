@@ -1,8 +1,8 @@
 """AI Research Agent — durable workflow that searches, synthesizes, and saves.
 
-Demonstrates: fork/join, retries, timeouts, signals, Pydantic models,
-and durable checkpointing. If the process crashes at any point, resume
-picks up from the last completed step.
+Demonstrates: fork/join, conditional branching, retries, timeouts, signals,
+Pydantic models, and durable checkpointing. If the process crashes at any
+point, resume picks up from the last completed step.
 
 Usage:
     python main.py "What are the latest advances in battery technology?"
@@ -29,8 +29,14 @@ from sayiir import (
 )
 
 from tasks import (
+    assess_quality,
+    extract_verdict,
+    flag_insufficient,
     merge_sources,
     parse_query,
+    pass_through,
+    revise_report,
+    save_draft,
     save_report,
     search_arxiv,
     search_web,
@@ -45,12 +51,24 @@ from tasks import (
 workflow = (
     Flow("ai-research-agent")
     .then(parse_query)
+    # Search three sources in parallel
     .fork()
-    .branch(search_web)
-    .branch(search_wikipedia)
-    .branch(search_arxiv)
+        .branch(search_web)
+        .branch(search_wikipedia)
+        .branch(search_arxiv)
     .join(merge_sources)
+    # Synthesize findings into a report
     .then(synthesize)
+    # Quality gate — LLM self-assesses the report
+    .then(assess_quality)
+    .route(extract_verdict, keys=["publish", "revise", "insufficient"])
+        .branch("publish", pass_through)          # Ready as-is
+        .branch("revise", revise_report)           # LLM improves the report
+        .branch("insufficient", flag_insufficient) # Flag with warning header
+    .done()
+    # Save draft for human review (extracts report from BranchEnvelope)
+    .then(save_draft)
+    # Human approval before saving
     .wait_for_signal("human_approval", timeout=timedelta(hours=48))
     .then(save_report)
     .build()
@@ -108,14 +126,14 @@ def main() -> None:
         print(f"Depth: {args.depth}, Max sources per provider: {args.max_sources}")
         print()
 
-        # Run the workflow — it will park at wait_for_signal after synthesize
+        # Run the workflow — it will park at wait_for_signal after quality routing
         status = run_durable_workflow(workflow, instance_id, query, backend=backend)
 
     if status.is_awaiting_signal():
         print("Workflow is waiting for human approval.")
         print()
 
-        # Read the draft that synthesize saved
+        # Read the draft that save_draft saved
         draft_path = _find_draft(args.topic)
         if draft_path is None:
             print("ERROR: Could not find draft file. Workflow state may be corrupted.")

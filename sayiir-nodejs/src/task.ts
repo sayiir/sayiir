@@ -6,7 +6,7 @@
  * reads these properties when constructing workflows.
  */
 
-import type { Duration, RetryPolicy, TaskOptions, ZodLike } from "./types.js";
+import type { RetryPolicy, TaskOptions, ZodLike } from "./types.js";
 import { parseDuration } from "./duration.js";
 import type { NapiRetryPolicy, NapiTaskMetadata } from "./native.js";
 

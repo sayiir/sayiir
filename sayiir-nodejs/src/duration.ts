@@ -11,7 +11,6 @@ let _ms: ((val: string) => number | undefined) | undefined;
 
 function getMs(): (val: string) => number | undefined {
   if (!_ms) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     _ms = require("ms") as (val: string) => number | undefined;
   }
   return _ms;

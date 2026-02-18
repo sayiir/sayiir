@@ -30,6 +30,7 @@ import { getNative } from "./native.js";
 const KEY_FN_SUFFIX = "::key_fn";
 
 /** A compiled workflow ready for execution. */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export class Workflow<TIn, TOut> {
   /** @internal */
   readonly _inner: NapiWorkflow;

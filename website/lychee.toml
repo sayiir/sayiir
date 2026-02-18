@@ -8,10 +8,6 @@ scheme = ["https", "http"]
 
 # Exclude patterns
 exclude = [
-  # Edit links point to GitHub source (may not exist yet)
-  "https://github.com/sayiir/sayiir/edit/",
-  # Example folders that may not exist on main yet
-  "https://github.com/sayiir/sayiir/tree/main/examples/",
   # Own docs site — internal links already validated by starlight-links-validator at build time
   "https://docs.sayiir.dev/",
   # Localhost URLs in code examples
@@ -19,6 +15,8 @@ exclude = [
   "http://127.0.0.1",
   # Placeholder URLs
   "https://example.com",
+  # Example links — not yet on main (remove after merge)
+  "https://github.com/sayiir/sayiir/tree/main/examples/",
 ]
 
 # Accept these status codes

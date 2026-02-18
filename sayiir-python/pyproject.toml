@@ -4,12 +4,12 @@ build-backend = "maturin"
 
 [project]
 name = "sayiir"
-version = "0.1.0-alpha.14"
+version = "0.1.0"
 description = "Durable workflow engine with Rust core and Python bindings — checkpointing, fork/join, distributed workers"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Yacine Bouraoui <ybsoft2011@live.com>" }]
+authors = [{ name = "Yacine Bouraoui", email = "ybsoft2011@live.com" }]
 keywords = ["workflow", "orchestration", "durable", "rust", "distributed"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -29,9 +29,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/sayiir/sayiir"
+Homepage = "https://docs.sayiir.dev"
+Documentation = "https://docs.sayiir.dev"
 Repository = "https://github.com/sayiir/sayiir"
 Issues = "https://github.com/sayiir/sayiir/issues"
+Changelog = "https://github.com/sayiir/sayiir/releases"
 Discord = "https://discord.gg/MWSzsHeg"
 
 [project.optional-dependencies]
