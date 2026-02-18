@@ -132,7 +132,7 @@ For durable workflows, use the durable execution function inside the task step. 
 ```python
 from sayiir import task, Flow, run_durable_workflow, PostgresBackend
 
-backend = PostgresBackend.connect("postgresql://localhost/sayiir")
+backend = PostgresBackend("postgresql://localhost/sayiir")
 
 @task
 def run_billing(order: dict) -> dict:
@@ -143,9 +143,9 @@ def run_billing(order: dict) -> dict:
         order,
         backend,
     )
-    if status["status"] == "completed":
-        return status["output"]
-    raise RuntimeError(f"Billing failed: {status}")
+    if status.is_completed():
+        return status.output
+    raise RuntimeError(f"Billing failed: {status.status}")
 
 order_workflow = (
     Flow("order-pipeline")

@@ -273,7 +273,7 @@ pub async fn transcode_1080p(video: VideoFile) -> Result<Bytes, BoxError> {
     backoff_multiplier = 2.0
 )]
 pub async fn transcode_4k(video: VideoFile) -> Result<Bytes, BoxError> {
-    if video.height < 2160 && video.width < 3840 {
+    if video.height < 2160 || video.width < 3840 {
         warn!(
             source = format!("{}x{}", video.width, video.height),
             "4K transcode skipped — source resolution too low"

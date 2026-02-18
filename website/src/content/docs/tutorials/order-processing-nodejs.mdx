@@ -10,6 +10,16 @@ Build an order processing pipeline that validates orders, charges payment and ch
 ```typescript
 import { task, flow, branch, runDurableWorkflow, sendSignal, resumeWorkflow } from "sayiir";
 
+interface Order {
+  orderId: string;
+  amount: number;
+}
+
+interface ShipmentEvent {
+  trackingNumber: string;
+  carrier: string;
+}
+
 const validateOrder = task("validate-order", (order: Order) => {
   if (order.amount <= 0) throw new Error("Invalid amount");
   return { ...order, validated: true as const };

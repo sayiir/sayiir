@@ -39,7 +39,7 @@ graph TB
 ```
 
 :::tip[Full Feature Parity]
-All language bindings — Rust, Python, and Node.js — expose the exact same feature set. Sequential and parallel workflows, retries, timeouts, delays, signals, conditional branching, distributed workers, pluggable backends — everything is available in every language. The only variation is in serialization: Rust offers a choice of codecs (JSON, rkyv, or custom), while Python and Node.js use JSON by default. Even this is extensible by design through the pluggable `Codec` trait.
+All language bindings — Rust, Python, and Node.js — expose the same workflow feature set. Sequential and parallel workflows, retries, timeouts, delays, signals, conditional branching, distributed workers, pluggable backends — everything is available in every language. The only variation is in serialization: Rust offers a choice of codecs (JSON, rkyv, or custom via the `Codec` trait), while Python and Node.js use JSON.
 :::
 
 ## Core Concepts
