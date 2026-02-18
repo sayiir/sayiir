@@ -10,9 +10,7 @@ from ._sayiir import PyRetryPolicy, PyTaskMetadata
 T = TypeVar("T")
 
 # Regex for human-readable durations: "30s", "5m", "2h", "100ms"
-_DURATION_RE = re.compile(
-    r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)\s*$", re.IGNORECASE
-)
+_DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h)\s*$", re.IGNORECASE)
 
 _DURATION_MULTIPLIERS = {
     "ms": 0.001,

@@ -315,8 +315,7 @@ class BranchBuilder:
         default: list[tuple[str, PyTaskMetadata | None]] | None = None
         if self._default is not None:
             default = [
-                (tid, getattr(func, "_metadata", None))
-                for tid, func in self._default
+                (tid, getattr(func, "_metadata", None)) for tid, func in self._default
             ]
 
         self._flow._builder.add_branch(self._branch_id, branches, default)
