@@ -38,6 +38,7 @@ done
 # --- Python ---
 perl -pi -e "s/^(version\s*=\s*)\"[^\"]+\"/\1\"$VERSION\"/" "$ROOT/sayiir-python/pyproject.toml"
 perl -pi -e "s/^(__version__\s*=\s*)\"[^\"]+\"/\1\"$VERSION\"/" "$ROOT/sayiir-python/sayiir/__init__.py"
+uv lock --directory "$ROOT/sayiir-python"
 
 # --- Node.js ---
 yq -i -oj -I2 ".version = \"$VERSION\"" "$ROOT/sayiir-nodejs/package.json"
