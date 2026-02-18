@@ -10,7 +10,7 @@ members = [
     "tests/integration",
 ]
 resolver = "2"
-exclude = ["examples/hello-world-rs", "examples/background-jobs-rs"]
+exclude = ["examples/hello-world-rs", "examples/video-pipeline-rs"]
 
 [workspace.package]
 version = "0.1.0"

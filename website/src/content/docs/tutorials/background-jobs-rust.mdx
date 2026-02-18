@@ -1,53 +1,76 @@
 ---
-title: "Tutorial: Background Jobs (Rust)"
-description: Build a background email pipeline with retries, timeouts, and distributed workers
+title: "Tutorial: Video Processing Pipeline (Rust)"
+description: Build a fault-tolerant video processing pipeline with real ffmpeg transcoding, content moderation, and conditional delivery
 ---
 
 import { LinkCard } from '@astrojs/starlight/components';
 
-Build a background email pipeline with the Rust API. Tasks use the `#[task]` macro for retries and timeouts, and the `workflow!` macro composes them into a pipeline.
+## The problem
+
+You run a video platform. When a user uploads a video, your pipeline needs to download it, transcode to multiple resolutions in parallel, generate thumbnails, run content moderation, upload approved assets to CDN, and notify the user. Simple enough on paper.
+
+Here's what happens in production:
+
+- **The 4K transcode OOMs at minute 28.** Your retry logic restarts *all three* transcodes — burning 45 minutes of completed 720p and 1080p work.
+- **The moderation API returns a 503.** Your pipeline gives up. The video is stuck in "processing" forever. The user files a support ticket.
+- **Moderation rejects a video**, but the transcoded files are already on CDN. Nobody cleans them up. You're paying for storage on content that should never have been published.
+- **You deploy mid-pipeline.** All in-flight state is gone. Dozens of videos need to be manually re-queued.
+
+These aren't hypothetical — they're production incidents that cost real companies real money.
+
+## How Sayiir solves each one
+
+Each step in a Sayiir workflow persists its result. When a step fails, only *that step* retries. Completed work is never lost.
 
 ```rust
-use sayiir_runtime::prelude::*;
-use sayiir_core::error::BoxError;
-
-#[task(timeout = "10s")]
-async fn fetch_recipients(campaign_id: String) -> Result<Vec<String>, BoxError> {
-    // In production: query database
-    Ok(vec!["alice@example.com".into(), "bob@example.com".into()])
-}
-
-#[task(timeout = "30s", retries = 3, backoff = "1s")]
-async fn send_emails(recipients: Vec<String>) -> Result<String, BoxError> {
-    // In production: call email service
-    Ok(format!("Sent to {} recipients", recipients.len()))
-}
-
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
-    let workflow = workflow! {
-        name: "email-pipeline",
-        steps: [fetch_recipients, send_emails]
-    }.unwrap();
-
-    let status = workflow.run_once("summer-sale".to_string()).await?;
-    println!("{:?}", status);
-    Ok(())
+workflow! {
+    name: "video-pipeline",
+    codec: JsonCodec,
+    steps: [
+        download_video,
+        validate_upload,
+        (transcode_720p || transcode_1080p || transcode_4k || generate_thumbnails || moderate_content),
+        merge_results,
+        route check_moderation -> Verdict {
+            Approved => [upload_to_cdn, update_database, notify_user],
+            Rejected => [cleanup_artifacts, notify_rejection],
+        }
+    ]
 }
 ```
 
-The `#[task]` macro configures timeout, retries, and exponential backoff. The `workflow!` macro auto-registers tasks and composes them sequentially. Use `||` for parallel branches: `steps: [validate || check_inventory, finalize]`.
+The `||` operator runs five tasks in parallel — three ffmpeg transcodes, thumbnail extraction, and content moderation — each with its own retry policy tuned for its failure mode. The 4K transcode gets 3 retries with 10s exponential backoff. The moderation API gets 3 retries with 2s backoff for transient 503s.
 
-For production, swap to `PostgresBackend` and scale with distributed workers polling a shared queue — see the full example for the worker pool setup.
+The `merge_results` task is a smart fan-in gate: it requires 720p and 1080p but treats 4K as best-effort. If 4K fails, the pipeline continues with two resolutions instead of crashing.
+
+The `route` sends approved videos to CDN upload and rejected videos to a cleanup branch that deletes the transcoded artifacts — no orphaned files on CDN.
+
+And if you deploy mid-pipeline? Sayiir resumes from exactly where it left off.
+
+| Production nightmare | Sayiir feature |
+|---|---|
+| 4K OOM restarts all transcodes | **Step-level retries** — only the failed branch retries |
+| Moderation API 503 → stuck forever | **Per-task backoff** — retries with exponential delay |
+| 4K failure blocks the whole pipeline | **Best-effort tasks** — return `None`, merge handles it |
+| Rejected video, assets left on CDN | **Conditional routing** — rejected branch cleans up |
+| Deploy mid-pipeline, state lost | **Durable execution** — each step result is persisted |
+
+## Try it yourself
+
+The full example uses real `ffmpeg` for transcoding and thumbnail extraction — no mocks. It downloads a 30 MB test video from the Blender Foundation, transcodes to 720p and 1080p in parallel, and produces real output files you can inspect.
+
+```bash
+cargo run
+```
 
 <LinkCard
-  title="Full example: Background Jobs (Rust)"
-  description="Complete Cargo project with distributed worker setup."
-  href="https://github.com/sayiir/sayiir/tree/main/examples/background-jobs-rs"
+  title="Full example: Video Pipeline (Rust)"
+  description="Complete Cargo project with real ffmpeg transcoding, 14 tasks, typed routing, and structured logging."
+  href="https://github.com/sayiir/sayiir/tree/main/examples/video-pipeline-rs"
 />
 
-## Next Steps
+## Next steps
 
-- **[Distributed Workers](/guides/distributed-workers/)** — Best practices for worker pools
-- **[PostgreSQL in Production](/guides/postgres-production/)** — Connection pooling, migrations, monitoring
-- **[Retries & Timeouts](/guides/retries-and-timeouts/)** — Custom retry policies
+- **[Distributed Workers](/guides/distributed-workers/)** — Scale the pipeline across multiple machines
+- **[PostgreSQL in Production](/guides/postgres-production/)** — Persist pipeline state with `PostgresBackend`
+- **[Retries & Timeouts](/guides/retries-and-timeouts/)** — Custom retry policies and circuit breakers
