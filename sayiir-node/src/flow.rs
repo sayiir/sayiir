@@ -9,7 +9,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use sayiir_core::task::TaskMetadata;
+use sayiir_core::continuation_builder::BuilderTask;
 use sayiir_core::workflow::WorkflowContinuation;
 
 use crate::task::NapiTaskMetadata;
@@ -20,6 +20,7 @@ pub struct NapiWorkflow {
     pub(crate) workflow_id: String,
     pub(crate) definition_hash: String,
     pub(crate) continuation: Arc<WorkflowContinuation>,
+    pub(crate) metadata_json: Option<String>,
 }
 
 #[napi]
@@ -33,27 +34,11 @@ impl NapiWorkflow {
     pub fn definition_hash(&self) -> &str {
         &self.definition_hash
     }
-}
 
-enum BuilderTask {
-    Sequential {
-        task_id: String,
-        metadata: TaskMetadata,
-    },
-    Fork {
-        branches: Vec<Vec<(String, TaskMetadata)>>,
-        join_id: String,
-        join_metadata: TaskMetadata,
-    },
-    Delay {
-        delay_id: String,
-        duration_secs: f64,
-    },
-    AwaitSignal {
-        signal_id: String,
-        signal_name: String,
-        timeout_secs: Option<f64>,
-    },
+    #[napi(getter)]
+    pub fn metadata_json(&self) -> Option<&str> {
+        self.metadata_json.as_deref()
+    }
 }
 
 /// Workflow builder for constructing task pipelines.
@@ -61,6 +46,7 @@ enum BuilderTask {
 pub struct NapiFlowBuilder {
     workflow_id: String,
     tasks: Vec<BuilderTask>,
+    metadata_json: Option<String>,
 }
 
 #[napi]
@@ -70,7 +56,14 @@ impl NapiFlowBuilder {
         Self {
             workflow_id: name,
             tasks: Vec::new(),
+            metadata_json: None,
         }
+    }
+
+    /// Set workflow-level metadata as a JSON string.
+    #[napi]
+    pub fn set_metadata_json(&mut self, json: String) {
+        self.metadata_json = Some(json);
     }
 
     /// Add a sequential task.
@@ -168,6 +161,57 @@ impl NapiFlowBuilder {
         Ok(())
     }
 
+    /// Add a conditional branch node.
+    ///
+    /// `branch_id` is the node ID. The key function must be registered in the
+    /// JS task registry as `"{branch_id}::key_fn"`.
+    /// `branches` is `[{ key, tasks: [{ taskId, metadata }] }]`.
+    #[napi]
+    pub fn add_branch(
+        &mut self,
+        branch_id: String,
+        branches: Vec<NapiBranchEntry>,
+        default_branch: Option<Vec<NapiBranchTask>>,
+    ) -> Result<()> {
+        if branches.is_empty() {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "route must have at least one branch",
+            ));
+        }
+        for entry in &branches {
+            if entry.tasks.is_empty() {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("Branch '{}' must have at least one task", entry.key),
+                ));
+            }
+        }
+        let branches = branches
+            .into_iter()
+            .map(|entry| {
+                let chain = entry
+                    .tasks
+                    .into_iter()
+                    .map(|t| (t.task_id, t.metadata.map(Into::into).unwrap_or_default()))
+                    .collect();
+                (entry.key, chain)
+            })
+            .collect();
+        let default = default_branch.map(|chain| {
+            chain
+                .into_iter()
+                .map(|t| (t.task_id, t.metadata.map(Into::into).unwrap_or_default()))
+                .collect()
+        });
+        self.tasks.push(BuilderTask::Branch {
+            branch_id,
+            branches,
+            default,
+        });
+        Ok(())
+    }
+
     /// Build the workflow.
     #[napi]
     pub fn build(&self) -> Result<NapiWorkflow> {
@@ -190,6 +234,7 @@ impl NapiFlowBuilder {
             workflow_id: self.workflow_id.clone(),
             definition_hash,
             continuation: Arc::new(continuation),
+            metadata_json: self.metadata_json.clone(),
         })
     }
 }
@@ -201,95 +246,16 @@ pub struct NapiBranchTask {
     pub metadata: Option<NapiTaskMetadata>,
 }
 
+/// A named branch entry for the `add_branch` API.
+#[napi(object)]
+pub struct NapiBranchEntry {
+    pub key: String,
+    pub tasks: Vec<NapiBranchTask>,
+}
+
 impl NapiFlowBuilder {
     fn build_continuation(&self) -> Result<WorkflowContinuation> {
-        if self.tasks.is_empty() {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "Workflow must have at least one task",
-            ));
-        }
-
-        let iter = self.tasks.iter().rev();
-        let mut current: Option<WorkflowContinuation> = None;
-
-        for task in iter {
-            current = Some(match task {
-                BuilderTask::Sequential { task_id, metadata } => WorkflowContinuation::Task {
-                    id: task_id.clone(),
-                    func: None,
-                    timeout: metadata.timeout,
-                    retry_policy: metadata.retries.clone(),
-                    next: current.map(Box::new),
-                },
-                BuilderTask::Delay {
-                    delay_id,
-                    duration_secs,
-                } => WorkflowContinuation::Delay {
-                    id: delay_id.clone(),
-                    duration: std::time::Duration::from_secs_f64(*duration_secs),
-                    next: current.map(Box::new),
-                },
-                BuilderTask::AwaitSignal {
-                    signal_id,
-                    signal_name,
-                    timeout_secs,
-                } => WorkflowContinuation::AwaitSignal {
-                    id: signal_id.clone(),
-                    signal_name: signal_name.clone(),
-                    timeout: timeout_secs.map(std::time::Duration::from_secs_f64),
-                    next: current.map(Box::new),
-                },
-                BuilderTask::Fork {
-                    branches,
-                    join_id,
-                    join_metadata,
-                } => {
-                    let branch_ids: Vec<&str> = branches
-                        .iter()
-                        .filter_map(|chain| chain.first().map(|(id, _)| id.as_str()))
-                        .collect();
-                    let fork_id = WorkflowContinuation::derive_fork_id(&branch_ids);
-
-                    let branch_conts: Vec<Arc<WorkflowContinuation>> = branches
-                        .iter()
-                        .map(|chain| -> Result<Arc<WorkflowContinuation>> {
-                            let mut branch_current: Option<WorkflowContinuation> = None;
-                            for (id, metadata) in chain.iter().rev() {
-                                branch_current = Some(WorkflowContinuation::Task {
-                                    id: id.clone(),
-                                    func: None,
-                                    timeout: metadata.timeout,
-                                    retry_policy: metadata.retries.clone(),
-                                    next: branch_current.map(Box::new),
-                                });
-                            }
-                            Ok(Arc::new(branch_current.ok_or_else(|| {
-                                Error::new(
-                                    Status::InvalidArg,
-                                    "Each branch must have at least one task",
-                                )
-                            })?))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-
-                    let join_cont = WorkflowContinuation::Task {
-                        id: join_id.clone(),
-                        func: None,
-                        timeout: join_metadata.timeout,
-                        retry_policy: join_metadata.retries.clone(),
-                        next: current.map(Box::new),
-                    };
-
-                    WorkflowContinuation::Fork {
-                        id: fork_id,
-                        branches: branch_conts.into_boxed_slice(),
-                        join: Some(Box::new(join_cont)),
-                    }
-                }
-            });
-        }
-
-        current.ok_or_else(|| Error::new(Status::InvalidArg, "Failed to build workflow"))
+        sayiir_core::continuation_builder::build_continuation(&self.tasks)
+            .map_err(|e| Error::new(Status::InvalidArg, e))
     }
 }

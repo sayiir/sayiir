@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Persistence layer for workflow execution state.
 //!
 //! This crate provides traits and implementations for persisting workflow

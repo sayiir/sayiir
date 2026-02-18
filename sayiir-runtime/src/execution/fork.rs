@@ -1,6 +1,7 @@
 //! Fork/join/branch execution.
 
 use bytes::Bytes;
+use sayiir_core::codec::EnvelopeCodec;
 use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::snapshot::{ExecutionPosition, TaskResult, WorkflowSnapshot};
 use sayiir_core::workflow::WorkflowContinuation;
@@ -11,7 +12,9 @@ use std::sync::Arc;
 
 use crate::error::RuntimeError;
 
-use super::helpers::{branch_execute_or_skip_task, check_guards, retry_with_checkpoint};
+use super::helpers::{
+    branch_execute_or_skip_task, check_guards, resolve_branch, retry_with_checkpoint,
+};
 
 // ── Branch helpers ──────────────────────────────────────────────────────
 
@@ -197,17 +200,19 @@ pub(crate) struct ForkBranchOutcome {
 }
 
 /// Execute fork branches sequentially, collecting results and tracking delays.
-pub(crate) async fn execute_fork_branches_sequential<F, Fut, B>(
+pub(crate) async fn execute_fork_branches_sequential<F, Fut, B, E>(
     branches: &[Arc<WorkflowContinuation>],
     input: &Bytes,
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
     execute_task: &F,
+    envelope_codec: &E,
 ) -> Result<ForkBranchOutcome, RuntimeError>
 where
     B: SnapshotStore,
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
+    E: EnvelopeCodec,
 {
     let mut branch_results = Vec::with_capacity(branches.len());
     let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -227,6 +232,7 @@ where
             &instance_id,
             backend,
             execute_task,
+            envelope_codec,
         )
         .await
         {
@@ -291,12 +297,13 @@ pub(crate) enum JoinResolution<'a> {
 /// Serializes branch results for the join task, or returns the last branch
 /// result when there is no join. Returns an error if there are no branch
 /// results and no join (A1: empty branches guard).
-pub(crate) fn resolve_join<'a>(
+pub(crate) fn resolve_join<'a, E: EnvelopeCodec>(
     join: Option<&'a WorkflowContinuation>,
     branch_results: &[(String, Bytes)],
+    codec: &E,
 ) -> Result<JoinResolution<'a>, RuntimeError> {
     if let Some(join_cont) = join {
-        let input = serialize_branch_results(branch_results)?;
+        let input = serialize_branch_results(branch_results, codec)?;
         Ok(JoinResolution::Continue {
             next: join_cont,
             input,
@@ -312,18 +319,16 @@ pub(crate) fn resolve_join<'a>(
 
 /// Serialize named branch results into a format that can be passed to the join task.
 ///
-/// Uses `serde_json` to serialize [`NamedBranchResults`](sayiir_core::branch_results::NamedBranchResults).
+/// Uses the provided [`EnvelopeCodec`] to serialize the results.
 ///
 /// # Errors
 ///
 /// Returns an error if serialization fails.
-pub fn serialize_branch_results(branch_results: &[(String, Bytes)]) -> Result<Bytes, RuntimeError> {
-    use sayiir_core::branch_results::NamedBranchResults;
-
-    let nbr = NamedBranchResults::new(branch_results.to_vec());
-    Ok(Bytes::from(
-        serde_json::to_vec(&nbr).map_err(BoxError::from)?,
-    ))
+pub fn serialize_branch_results<E: EnvelopeCodec>(
+    branch_results: &[(String, Bytes)],
+    codec: &E,
+) -> Result<Bytes, RuntimeError> {
+    Ok(codec.encode_named_results(branch_results)?)
 }
 
 // ── Branch checkpointing ────────────────────────────────────────────────
@@ -332,17 +337,19 @@ pub fn serialize_branch_results(branch_results: &[(String, Bytes)]) -> Result<By
 ///
 /// Each branch is executed via [`execute_branch_with_checkpointing`] (boxed-pinned
 /// to support recursion) and its output collected into a `(branch_id, output)` vec.
-async fn execute_nested_branches<F, Fut, B>(
+async fn execute_nested_branches<F, Fut, B, E>(
     branches: &[Arc<WorkflowContinuation>],
     input: Bytes,
     instance_id: &str,
     backend: &B,
     execute_task: &F,
+    envelope_codec: &E,
 ) -> Result<Vec<(String, Bytes)>, RuntimeError>
 where
     B: SnapshotStore,
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
+    E: EnvelopeCodec,
 {
     let mut results = Vec::with_capacity(branches.len());
     for branch in branches {
@@ -353,6 +360,7 @@ where
             instance_id,
             backend,
             execute_task,
+            envelope_codec,
         ))
         .await?;
         results.push((branch_id, output));
@@ -369,17 +377,19 @@ where
 /// the previous execution. This function loads the snapshot to skip cached tasks
 /// and parks at delays instead of sleeping through them.
 #[allow(clippy::too_many_lines)]
-pub(super) async fn execute_branch_with_checkpointing<F, Fut, B>(
+pub(super) async fn execute_branch_with_checkpointing<F, Fut, B, E>(
     continuation: &WorkflowContinuation,
     input: Bytes,
     instance_id: &str,
     backend: &B,
     execute_task: &F,
+    envelope_codec: &E,
 ) -> Result<Bytes, RuntimeError>
 where
     B: SnapshotStore,
     F: Fn(&str, Bytes) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
+    E: EnvelopeCodec,
 {
     // Load snapshot for checking cached results (populated on resume after AtFork)
     let mut snapshot = backend.load_snapshot(instance_id).await?;
@@ -484,15 +494,71 @@ where
                     instance_id,
                     backend,
                     execute_task,
+                    envelope_codec,
                 )
                 .await?;
 
-                match resolve_join(join.as_deref(), &branch_results)? {
+                match resolve_join(join.as_deref(), &branch_results, envelope_codec)? {
                     JoinResolution::Continue { next, input } => {
                         current = next;
                         current_input = input;
                     }
                     JoinResolution::Done(output) => return Ok(output),
+                }
+            }
+            WorkflowContinuation::Branch {
+                id,
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                // Check if already cached (resume case)
+                if let Some(result) = snapshot.get_task_result(id) {
+                    match next {
+                        Some(n) => {
+                            current = n;
+                            current_input = result.output.clone();
+                            continue;
+                        }
+                        None => return Ok(result.output.clone()),
+                    }
+                }
+
+                let key_bytes =
+                    execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())
+                        .await
+                        .map_err(RuntimeError::from)?;
+                let (key, chosen) =
+                    resolve_branch(id, &key_bytes, branches, default.as_deref(), envelope_codec)?;
+
+                // Execute chosen sub-continuation (recursive)
+                let branch_output = Box::pin(execute_branch_with_checkpointing(
+                    chosen,
+                    current_input.clone(),
+                    instance_id,
+                    backend,
+                    execute_task,
+                    envelope_codec,
+                ))
+                .await?;
+
+                // Wrap in discriminated envelope
+                let envelope_bytes = envelope_codec
+                    .encode_branch_envelope(&key, &branch_output)
+                    .map_err(RuntimeError::from)?;
+
+                // Save result
+                backend
+                    .save_task_result(instance_id, id, envelope_bytes.clone())
+                    .await?;
+
+                match next {
+                    Some(next_cont) => {
+                        current = next_cont;
+                        current_input = envelope_bytes;
+                    }
+                    None => return Ok(envelope_bytes),
                 }
             }
         }

@@ -23,13 +23,13 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <CardGrid>
   <Card title="Zero Learning Curve" icon="rocket">
-    No new DSL. No replay constraints. Define your task graph with normal async code — Sayiir makes it durable automatically via continuation-based execution.
+    Clean, typed, idiomatic APIs in Python, TypeScript, and Rust. No DSL to learn, no YAML to write — just familiar language patterns with sensible defaults that get out of your way.
   </Card>
   <Card title="Simple — Library Not Platform" icon="puzzle">
     `pip install sayiir`, `pnpm add sayiir`, or add a Cargo dependency. No orchestrator to deploy, no infrastructure to manage.
   </Card>
   <Card title="Fast — Native Rust Performance" icon="star">
-    Rust core with zero-copy serialization (rkyv). Sub-millisecond checkpointing, hundreds of thousands of concurrent activities.
+    Rust core with no replay overhead. JSON by default, swap to zero-copy rkyv or any binary format via the pluggable codec abstraction.
   </Card>
   <Card title="Pluggable & Lightweight" icon="setting">
     Swap backends, codecs, and runners. InMemory for tests, Postgres for production. Minimal footprint.
@@ -89,9 +89,10 @@ async fn send_email(user: User) -> Result<(), BoxError> {
     email_service.send_welcome(&user).await
 }
 
-let workflow = workflow!("welcome", JsonCodec, registry,
-    fetch_user => send_email
-).unwrap();
+let workflow = workflow! {
+    name: "welcome",
+    steps: [fetch_user, send_email]
+}.unwrap();
 ```
 
 ---

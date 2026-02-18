@@ -15,7 +15,16 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
     let id = &def.id;
     let codec = &def.codec;
-    let registry = &def.registry;
+
+    let registry_expr = match &def.registry {
+        Some(expr) => quote::quote! { #expr },
+        None => quote::quote! { ::sayiir_core::registry::TaskRegistry::new() },
+    };
+
+    let metadata_expr = match &def.metadata {
+        Some(expr) => quote::quote! { ::std::sync::Arc::new(#expr) },
+        None => quote::quote! { ::std::sync::Arc::new(()) },
+    };
 
     let step_chain = codegen::gen_step_chain(&def.steps)?;
 
@@ -27,15 +36,33 @@ fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
         }
     });
 
+    // Register route key function aliases (e.g. "route::key_fn").
+    let aliases = codegen::collect_route_aliases(&def.steps);
+    let alias_stmts = aliases.iter().map(|(name, alias_id)| {
+        quote::quote! {
+            __registry.register_with_metadata(
+                #alias_id,
+                __codec.clone(),
+                #name::new(),
+                #name::metadata(),
+            );
+        }
+    });
+
+    // Compile-time exhaustiveness checks for typed route nodes.
+    let exhaustiveness_checks = codegen::collect_exhaustiveness_checks(&def.steps);
+
     Ok(quote::quote! {
-        (|| -> ::std::result::Result<_, ::sayiir_core::error::WorkflowError> {
+        (|| -> ::std::result::Result<_, ::sayiir_core::error::BuildError> {
+            #(#exhaustiveness_checks)*
             let __codec = ::std::sync::Arc::new(#codec);
-            let mut __registry = #registry;
+            let mut __registry = #registry_expr;
             #(#register_stmts)*
+            #(#alias_stmts)*
             let __ctx = ::sayiir_core::context::WorkflowContext::new(
                 #id,
                 __codec.clone(),
-                ::std::sync::Arc::new(()),
+                #metadata_expr,
             );
             let __wf = ::sayiir_core::builder::WorkflowBuilder::new(__ctx)
                 .with_existing_registry(__registry)

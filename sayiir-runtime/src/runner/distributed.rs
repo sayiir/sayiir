@@ -11,8 +11,8 @@
 //! horizontal scaling with multiple workers collaborating on tasks.
 
 use bytes::Bytes;
-use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
+use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::context::{WorkflowContext, with_context};
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
@@ -174,7 +174,11 @@ where
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::EncodeValue<Input> + sealed::DecodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::EncodeValue<Input>
+            + sealed::DecodeValue<Input>
+            + 'static,
     {
         let instance_id = instance_id.into();
         let definition_hash = workflow.definition_hash().to_string();
@@ -237,7 +241,11 @@ where
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
     {
         // Load snapshot
         let mut snapshot = self.backend.load_snapshot(instance_id).await?;
@@ -301,7 +309,7 @@ where
     ) -> Result<Bytes, RuntimeError>
     where
         B: 'static,
-        C: Codec + 'static,
+        C: Codec + EnvelopeCodec + 'static,
         M: Send + Sync + 'static,
     {
         let mut current = continuation;
@@ -447,13 +455,88 @@ where
                             .await?
                         };
 
-                    match resolve_join(join.as_deref(), &branch_results)? {
+                    match resolve_join(join.as_deref(), &branch_results, context.codec.as_ref())? {
                         JoinResolution::Continue { next, input } => {
                             current = next;
                             current_input = input;
                         }
                         JoinResolution::Done(output) => return Ok(output),
                     }
+                }
+                WorkflowContinuation::Branch {
+                    id,
+                    key_fn: Some(key_fn),
+                    branches,
+                    default,
+                    next,
+                } => {
+                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+
+                    // Check if already cached (resume case)
+                    if let Some(result) = snapshot.get_task_result(id) {
+                        match next {
+                            Some(n) => {
+                                current = n;
+                                current_input = result.output.clone();
+                                continue;
+                            }
+                            None => return Ok(result.output.clone()),
+                        }
+                    }
+
+                    // Execute key function
+                    let key_bytes = key_fn
+                        .run(current_input.clone())
+                        .await
+                        .map_err(RuntimeError::from)?;
+                    let key: String = context
+                        .codec
+                        .decode_string(&key_bytes)
+                        .map_err(RuntimeError::from)?;
+
+                    // Resolve branch
+                    let chosen = branches.get(&key).or(default.as_ref()).ok_or_else(|| {
+                        WorkflowError::BranchKeyNotFound {
+                            branch_id: id.clone(),
+                            key: key.clone(),
+                        }
+                    })?;
+
+                    // Execute chosen sub-continuation recursively
+                    let branch_output = Self::execute_branch_with_checkpoint(
+                        chosen,
+                        current_input.clone(),
+                        Arc::clone(&backend),
+                        snapshot.instance_id.clone(),
+                        context.clone(),
+                    )
+                    .await?;
+
+                    // Wrap in discriminated envelope
+                    let envelope_bytes = context
+                        .codec
+                        .encode_branch_envelope(&key, &branch_output)
+                        .map_err(RuntimeError::from)?;
+
+                    // Checkpoint
+                    snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
+                    backend.save_snapshot(snapshot).await?;
+
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = envelope_bytes;
+                        }
+                        None => return Ok(envelope_bytes),
+                    }
+                }
+                WorkflowContinuation::Branch {
+                    key_fn: None, id, ..
+                } => {
+                    return Err(WorkflowError::TaskNotImplemented(
+                        sayiir_core::workflow::key_fn_id(id),
+                    )
+                    .into());
                 }
             }
         }
@@ -469,7 +552,7 @@ where
     ) -> Result<ForkBranchOutcome, RuntimeError>
     where
         B: 'static,
-        C: Codec + 'static,
+        C: Codec + EnvelopeCodec + 'static,
         M: Send + Sync + 'static,
     {
         let mut branch_results = Vec::with_capacity(branches.len());
@@ -539,7 +622,7 @@ where
     ) -> Result<Vec<(String, Bytes)>, RuntimeError>
     where
         B: 'static,
-        C: Codec + 'static,
+        C: Codec + EnvelopeCodec + 'static,
         M: Send + Sync + 'static,
     {
         let mut set: tokio::task::JoinSet<Result<(String, Bytes), RuntimeError>> =
@@ -590,7 +673,7 @@ where
     ) -> impl std::future::Future<Output = Result<Bytes, RuntimeError>> + Send + '_
     where
         B: 'static,
-        C: Codec + 'static,
+        C: Codec + EnvelopeCodec + 'static,
         M: Send + Sync + 'static,
     {
         async move {
@@ -725,13 +808,90 @@ where
                         )
                         .await?;
 
-                        match resolve_join(join.as_deref(), &branch_results)? {
+                        match resolve_join(
+                            join.as_deref(),
+                            &branch_results,
+                            context.codec.as_ref(),
+                        )? {
                             JoinResolution::Continue { next, input } => {
                                 current = next;
                                 current_input = input;
                             }
                             JoinResolution::Done(output) => return Ok(output),
                         }
+                    }
+                    WorkflowContinuation::Branch {
+                        id,
+                        key_fn: Some(key_fn),
+                        branches,
+                        default,
+                        next,
+                    } => {
+                        // Check if already cached (resume case)
+                        if let Some(result) = snapshot.get_task_result(id) {
+                            match next {
+                                Some(n) => {
+                                    current = n;
+                                    current_input = result.output.clone();
+                                    continue;
+                                }
+                                None => return Ok(result.output.clone()),
+                            }
+                        }
+
+                        // Execute key function
+                        let key_bytes = key_fn
+                            .run(current_input.clone())
+                            .await
+                            .map_err(RuntimeError::from)?;
+                        let key: String = context
+                            .codec
+                            .decode_string(&key_bytes)
+                            .map_err(RuntimeError::from)?;
+
+                        // Resolve branch
+                        let chosen = branches.get(&key).or(default.as_ref()).ok_or_else(|| {
+                            WorkflowError::BranchKeyNotFound {
+                                branch_id: id.clone(),
+                                key: key.clone(),
+                            }
+                        })?;
+
+                        // Execute chosen sub-continuation recursively (boxed for async recursion)
+                        let branch_output = Box::pin(Self::execute_branch_with_checkpoint(
+                            chosen,
+                            current_input.clone(),
+                            Arc::clone(&backend),
+                            instance_id.clone(),
+                            context.clone(),
+                        ))
+                        .await?;
+
+                        // Wrap in discriminated envelope
+                        let envelope_bytes = context
+                            .codec
+                            .encode_branch_envelope(&key, &branch_output)
+                            .map_err(RuntimeError::from)?;
+
+                        // Checkpoint
+                        snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
+                        backend.save_snapshot(&snapshot).await?;
+
+                        match next {
+                            Some(next_cont) => {
+                                current = next_cont;
+                                current_input = envelope_bytes;
+                            }
+                            None => return Ok(envelope_bytes),
+                        }
+                    }
+                    WorkflowContinuation::Branch {
+                        key_fn: None, id, ..
+                    } => {
+                        return Err(WorkflowError::TaskNotImplemented(
+                            sayiir_core::workflow::key_fn_id(id),
+                        )
+                        .into());
                     }
                 }
             }
@@ -756,8 +916,21 @@ mod tests {
     use sayiir_core::snapshot::WorkflowSnapshotState;
     use sayiir_core::task::BranchOutputs;
     use sayiir_core::workflow::WorkflowBuilder;
+    use sayiir_macros::BranchKey;
     use sayiir_persistence::InMemoryBackend;
     use sayiir_persistence::{SignalStore, SnapshotStore};
+
+    #[derive(BranchKey)]
+    enum RouteKey {
+        Billing,
+        Tech,
+    }
+
+    #[derive(BranchKey)]
+    enum AbKey {
+        A,
+        B,
+    }
 
     fn ctx() -> WorkflowContext<JsonCodec, ()> {
         WorkflowContext::new("test-workflow", Arc::new(JsonCodec), Arc::new(()))
@@ -1369,5 +1542,188 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(status, WorkflowStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn test_route_selects_correct_branch() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend.clone());
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .then("classify", |input: String| async move {
+                Ok(serde_json::json!({ "intent": input }))
+            })
+            .route::<u32, RouteKey, _, _>(|data: serde_json::Value| async move {
+                match data["intent"].as_str().unwrap_or("unknown") {
+                    "billing" => Ok(RouteKey::Billing),
+                    "tech" => Ok(RouteKey::Tech),
+                    other => Err(format!("unknown intent: {other}").into()),
+                }
+            })
+            .branch(RouteKey::Billing, |sub| {
+                sub.then("handle_billing", |_data: serde_json::Value| async move {
+                    Ok(100u32)
+                })
+            })
+            .unwrap()
+            .branch(RouteKey::Tech, |sub| {
+                sub.then("handle_tech", |_data: serde_json::Value| async move {
+                    Ok(200u32)
+                })
+            })
+            .unwrap()
+            .done()
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Route to "billing"
+        let status = runner
+            .run(&workflow, "inst-branch-1", "billing".to_string())
+            .await
+            .unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        let snapshot = backend.load_snapshot("inst-branch-1").await.unwrap();
+        // Workflow completed — check the final output (which is the branch envelope
+        // since route is the last step)
+        match &snapshot.state {
+            WorkflowSnapshotState::Completed { final_output } => {
+                let envelope: serde_json::Value = serde_json::from_slice(final_output).unwrap();
+                assert_eq!(envelope["branch"], "billing");
+                assert_eq!(envelope["result"], 100);
+            }
+            other => panic!("Expected Completed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_route_with_default() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend.clone());
+
+        // With typed keys the default branch catches enum variants that
+        // don't have an explicit `.branch()` call.  Route "b" has no
+        // branch, so the default fires.
+        let workflow = WorkflowBuilder::new(ctx())
+            .route::<String, AbKey, _, _>(|input: String| async move {
+                match input.as_str() {
+                    "a" => Ok(AbKey::A),
+                    "b" => Ok(AbKey::B),
+                    other => Err(format!("unknown: {other}").into()),
+                }
+            })
+            .branch(AbKey::A, |sub| {
+                sub.then("handle_a", |_data: String| async move {
+                    Ok("matched".to_string())
+                })
+            })
+            .unwrap()
+            .default_branch(|sub| {
+                sub.then("handle_fallback", |_data: String| async move {
+                    Ok("fallback".to_string())
+                })
+            })
+            .unwrap()
+            .done()
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Send "b" — not explicitly branched, so the default fires
+        let status = runner
+            .run(&workflow, "inst-branch-default", "b".to_string())
+            .await
+            .unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        let snapshot = backend.load_snapshot("inst-branch-default").await.unwrap();
+        match &snapshot.state {
+            WorkflowSnapshotState::Completed { final_output } => {
+                let envelope: serde_json::Value = serde_json::from_slice(final_output).unwrap();
+                assert_eq!(envelope["branch"], "b");
+                assert_eq!(envelope["result"], "fallback");
+            }
+            other => panic!("Expected Completed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_route_missing_branches_detected() {
+        // With typed keys, missing branches are caught at build time.
+        // RouteKey has {billing, tech} but we only branch on billing → MissingBranches.
+        let result = WorkflowBuilder::new(ctx())
+            .route::<String, RouteKey, _, _>(|input: String| async move {
+                match input.as_str() {
+                    "billing" => Ok(RouteKey::Billing),
+                    _ => Ok(RouteKey::Tech),
+                }
+            })
+            .branch(RouteKey::Billing, |sub| {
+                sub.then("handle_billing", |_data: String| async move {
+                    Ok("ok".to_string())
+                })
+            })
+            .unwrap()
+            .done();
+
+        match result {
+            Err(sayiir_core::error::BuildError::MissingBranches {
+                branch_id,
+                missing_keys,
+            }) => {
+                assert_eq!(branch_id, "branch_1");
+                assert!(missing_keys.contains(&"tech".to_string()));
+            }
+            Err(other) => panic!("Expected MissingBranches, got: {other}"),
+            Ok(_) => panic!("Expected MissingBranches error, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_route_then_next_step() {
+        let backend = InMemoryBackend::new();
+        let runner = CheckpointingRunner::new(backend.clone());
+
+        use sayiir_core::task::BranchEnvelope;
+
+        let workflow = WorkflowBuilder::new(ctx())
+            .route::<u32, AbKey, _, _>(|input: String| async move {
+                match input.as_str() {
+                    "a" => Ok(AbKey::A),
+                    "b" => Ok(AbKey::B),
+                    other => Err(format!("unknown: {other}").into()),
+                }
+            })
+            .branch(AbKey::A, |sub| {
+                sub.then("handle_a", |_data: String| async move { Ok(10u32) })
+            })
+            .unwrap()
+            .branch(AbKey::B, |sub| {
+                sub.then("handle_b", |_data: String| async move { Ok(20u32) })
+            })
+            .unwrap()
+            .done()
+            .unwrap()
+            .then("finalize", |env: BranchEnvelope<u32>| async move {
+                Ok(env.result + 1)
+            })
+            .build()
+            .unwrap();
+
+        let status = runner
+            .run(&workflow, "inst-branch-next", "a".to_string())
+            .await
+            .unwrap();
+        assert!(matches!(status, WorkflowStatus::Completed));
+
+        let snapshot = backend.load_snapshot("inst-branch-next").await.unwrap();
+        match &snapshot.state {
+            WorkflowSnapshotState::Completed { final_output } => {
+                let val: u32 = serde_json::from_slice(final_output).unwrap();
+                assert_eq!(val, 11); // branch "a" returned 10, finalize adds 1
+            }
+            other => panic!("Expected Completed, got: {other:?}"),
+        }
     }
 }

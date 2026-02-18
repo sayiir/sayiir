@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
 #![deny(
@@ -59,6 +60,11 @@
 //! For the full README with architecture diagrams and detailed configuration,
 //! see the [crate README](https://crates.io/crates/sayiir-runtime).
 
+#[cfg(not(any(feature = "json", feature = "rkyv")))]
+compile_error!(
+    "at least one serialization codec must be enabled: enable the `json` or `rkyv` feature"
+);
+
 pub mod error;
 pub mod execution;
 pub mod prelude;
@@ -73,15 +79,17 @@ pub use execution::{
     execute_continuation_with_checkpointing, finalize_execution, prepare_resume, prepare_run,
     serialize_branch_results,
 };
+pub use runner::WorkflowRunExt;
 pub use runner::WorkflowRunner;
 pub use runner::distributed::CheckpointingRunner;
 pub use runner::in_process::InProcessRunner;
 pub use worker::{
-    ExternalTaskExecutor, ExternalWorkflow, PooledWorker, WorkerHandle, WorkflowIndex,
-    WorkflowRegistry,
+    ExternalTaskExecutor, ExternalWorkflow, PooledWorker, PooledWorkerBuilder, WorkerHandle,
+    WorkflowIndex, WorkflowRegistry,
 };
 
+pub use sayiir_core::branch_key::BranchKey;
 pub use sayiir_core::sayiir_ctx;
 #[cfg(feature = "macros")]
-pub use sayiir_macros::{task, workflow};
+pub use sayiir_macros::{BranchKey, task, workflow};
 pub use sayiir_persistence as persistence;

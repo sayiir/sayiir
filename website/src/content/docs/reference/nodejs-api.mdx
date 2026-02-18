@@ -203,6 +203,84 @@ const workflow = flow<number>("approval")
 
 **Returns:** `Flow<TInput, TSignal>` — Output type becomes the signal payload type.
 
+### .route(keyFn, keys)
+
+Start conditional branching based on a routing key. The key function receives the current output and returns one of the declared keys. The `keys` array declares all valid branch keys upfront — TypeScript narrows the key type so `.branch()` only accepts declared values, and `.done()` checks exhaustiveness.
+
+:::tip[Use `as const` for type safety]
+Always pass the keys array `as const` to get compile-time type narrowing. This is the recommended approach — it catches typos and missing branches at build time. Only use plain string arrays when keys are determined at runtime (e.g., dynamically built workflows).
+:::
+
+```typescript
+const workflow = flow<Ticket>("router")
+  .route(
+    (ticket) => ticket.type === "invoice" ? "billing" : "tech",
+    ["billing", "tech"] as const
+  )
+    .branch("billing", handleBilling)
+    .branch("tech", handleTech)
+    .defaultBranch("fallback", fallbackHandler)
+  .done()
+  .then("summarize", (envelope) => `Handled via ${envelope.branch}`)
+  .build();
+```
+
+**Parameters:**
+- `keyFn` (TaskFn\<TLast, Keys[number]\> | (input: TLast) => Keys[number] | Promise\<Keys[number]\>) — Function that returns one of the declared keys.
+- `keys` (readonly string[]) — All valid branch keys. Use `as const` for type-level key constraint.
+
+**Returns:** `RouteBuilder<TInput, TLast, Keys>`
+
+### RouteBuilder
+
+Builder for conditional branches. Created by calling `.route()` on a Flow.
+
+#### .branch(key, fn) / .branch(key, id, fn)
+
+Add a named branch. The `key` parameter is type-constrained to the keys declared in `.route()`. The branch runs when the key function returns this key.
+
+```typescript
+.branch("billing", handleBilling)
+.branch("express", "express-handler", expressHandler)
+```
+
+**Parameters (overload 1):**
+- `key` (Keys[number]) — The routing key that selects this branch (must be one of the declared keys)
+- `fn` (TaskFn | Function) — Branch task function
+
+**Parameters (overload 2):**
+- `key` (Keys[number]) — The routing key that selects this branch (must be one of the declared keys)
+- `id` (string) — Custom task ID
+- `fn` (Function) — Branch task function
+
+**Returns:** `RouteBuilder` for chaining
+
+#### .defaultBranch(fn) / .defaultBranch(id, fn)
+
+Set the fallback branch for unmatched keys.
+
+```typescript
+.defaultBranch("fallback", (input) => ({ status: "unmatched" }))
+```
+
+**Returns:** `RouteBuilder` for chaining
+
+#### .done()
+
+Finish the branching and return to the Flow builder. Throws an error if any declared key is missing a `.branch()` call, or if any `.branch()` key was not in the declared keys array (orphan branch). The output type becomes `BranchEnvelope<T>` with `branch` (the matched key) and `result` (the branch output).
+
+```typescript
+.route(keyFn, ["a", "b"] as const)
+  .branch("a", handleA)
+  .branch("b", handleB)
+.done()
+.then("next", (envelope) => {
+  // envelope: { branch: "a", result: ... }
+})
+```
+
+**Returns:** `Flow<TInput, BranchEnvelope<TBranchOut>>`
+
 ### .build()
 
 Compile the workflow definition.
@@ -226,22 +304,32 @@ Compiled workflow with task registry. Produced by `Flow.build()`.
 
 ## Execution Functions
 
-### runWorkflow(workflow, input)
+### runWorkflow(workflow, input, opts?)
 
-Run a workflow to completion without persistence. Supports both sync and async task functions.
+Run a workflow to completion. Without options, runs entirely in-memory with no persistence (fastest path for prototyping). With `opts`, runs with full checkpointing — but still returns the output directly. If the workflow doesn't complete (e.g., parks on a delay or signal), throws `WorkflowError`.
 
 ```typescript
-import { runWorkflow } from "sayiir";
+import { runWorkflow, PostgresBackend } from "sayiir";
 
+// Prototype — no persistence
 const result = await runWorkflow(workflow, 42);
-console.log(result); // The final output
+
+// Production — same function, just add options
+const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
+const result = await runWorkflow(workflow, 42, {
+  instanceId: "run-001",
+  backend,
+});
 ```
 
 **Parameters:**
 - `workflow` (Workflow\<TIn, TOut\>) — The workflow to run
 - `input` (TIn) — Input to the first task
+- `opts` (DurableRunOptions, optional) — `{ instanceId: string, backend: Backend }` for durable execution
 
 **Returns:** Promise\<TOut\> — The workflow result
+
+**Throws:** `WorkflowError` if durable workflow did not complete. Use `runDurableWorkflow()` when you need the full `WorkflowStatus` object.
 
 ### runWorkflowSync(workflow, input)
 

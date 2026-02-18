@@ -149,14 +149,10 @@ use tasks::{Campaign, fetch_recipients, render_template, send_emails};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Build workflow using the workflow! macro
-    let registry = TaskRegistry::new();
-
-    let workflow = workflow!(
-        "email-pipeline",
-        JsonCodec,
-        registry,
-        fetch_recipients => render_template => send_emails
-    )?;
+    let workflow = workflow! {
+        name: "email-pipeline",
+        steps: [fetch_recipients, render_template, send_emails]
+    }?;
 
     // Create backend and runner
     let backend = InMemoryBackend::new();
@@ -170,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
 
     let status = runner
         .run(
-            workflow.workflow(),
+            &workflow,
             "campaign-001",
             campaign
         )
@@ -258,12 +254,10 @@ pub fn build_workflow_registry() -> WorkflowRegistry {
     let mut registry = WorkflowRegistry::new();
 
     // workflow! auto-registers #[task]-annotated functions
-    let workflow = workflow!(
-        "email-pipeline",
-        JsonCodec,
-        TaskRegistry::new(),
-        fetch_recipients => render_template => send_emails
-    ).unwrap();
+    let workflow = workflow! {
+        name: "email-pipeline",
+        steps: [fetch_recipients, render_template, send_emails]
+    }.unwrap();
 
     registry.register("email-pipeline", workflow);
     registry
@@ -358,12 +352,10 @@ fn build_workflow_registry() -> WorkflowRegistry {
     let mut registry = WorkflowRegistry::new();
 
     // workflow! auto-registers #[task]-annotated functions
-    let workflow = workflow!(
-        "email-pipeline",
-        JsonCodec,
-        TaskRegistry::new(),
-        fetch_recipients => render_template => send_emails
-    ).unwrap();
+    let workflow = workflow! {
+        name: "email-pipeline",
+        steps: [fetch_recipients, render_template, send_emails]
+    }.unwrap();
 
     registry.register("email-pipeline", workflow);
     registry

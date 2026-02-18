@@ -6,36 +6,17 @@ use syn::{Expr, Ident, LitStr, Token, Type, braced, parenthesized};
 use crate::task::duration::DurationLit;
 use crate::util::{err, snake_to_pascal};
 
-use super::ast::{WorkflowDef, WorkflowStep};
+use super::ast::{BranchArmKey, WorkflowDef, WorkflowStep};
 
-impl Parse for WorkflowDef {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        // 1. Workflow ID (string literal)
-        let id: LitStr = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        // 2. Codec type path
-        let codec: syn::Path = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        // 3. Registry expression
-        let registry: Expr = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        // 4. Pipeline steps separated by =>
-        let steps = parse_pipeline(input)?;
-
-        Ok(WorkflowDef {
-            id,
-            codec,
-            registry,
-            steps,
-        })
-    }
+/// Parse a `[step, step, ...]` bracketed pipeline used inside `route` arms.
+fn parse_bracketed_pipeline(input: ParseStream) -> syn::Result<Vec<WorkflowStep>> {
+    let content;
+    syn::bracketed!(content in input);
+    parse_comma_separated_steps(&content)
 }
 
-/// Parse a pipeline: `step => step => step`
-fn parse_pipeline(input: ParseStream) -> syn::Result<Vec<WorkflowStep>> {
+/// Parse comma-separated steps inside `[...]`.
+fn parse_comma_separated_steps(input: ParseStream) -> syn::Result<Vec<WorkflowStep>> {
     let mut steps = Vec::new();
 
     if input.is_empty() {
@@ -44,12 +25,102 @@ fn parse_pipeline(input: ParseStream) -> syn::Result<Vec<WorkflowStep>> {
 
     steps.push(parse_step_or_parallel(input)?);
 
-    while input.peek(Token![=>]) {
-        input.parse::<Token![=>]>()?;
-        steps.push(parse_step_or_parallel(input)?);
+    while !input.is_empty() {
+        // Require a comma between steps (trailing comma OK)
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break; // trailing comma
+            }
+            steps.push(parse_step_or_parallel(input)?);
+        } else {
+            break;
+        }
     }
 
     Ok(steps)
+}
+
+impl Parse for WorkflowDef {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut id: Option<LitStr> = None;
+        let mut codec: Option<syn::Path> = None;
+        let mut registry: Option<Expr> = None;
+        let mut metadata: Option<Expr> = None;
+        let mut steps: Option<Vec<WorkflowStep>> = None;
+
+        // Parse named fields in any order: name: ..., codec: ..., [registry: ...,] steps: [...]
+        while !input.is_empty() {
+            let field: Ident = input.parse()?;
+            input.parse::<Token![:]>()?;
+
+            match field.to_string().as_str() {
+                "name" => {
+                    if id.is_some() {
+                        return Err(err(field.span(), "duplicate `name` field"));
+                    }
+                    id = Some(input.parse()?);
+                }
+                "codec" => {
+                    if codec.is_some() {
+                        return Err(err(field.span(), "duplicate `codec` field"));
+                    }
+                    codec = Some(input.parse()?);
+                }
+                "registry" => {
+                    if registry.is_some() {
+                        return Err(err(field.span(), "duplicate `registry` field"));
+                    }
+                    registry = Some(input.parse()?);
+                }
+                "metadata" => {
+                    if metadata.is_some() {
+                        return Err(err(field.span(), "duplicate `metadata` field"));
+                    }
+                    metadata = Some(input.parse()?);
+                }
+                "steps" => {
+                    if steps.is_some() {
+                        return Err(err(field.span(), "duplicate `steps` field"));
+                    }
+                    let content;
+                    syn::bracketed!(content in input);
+                    let mut parsed = parse_comma_separated_steps(&content)?;
+                    super::ast::renumber_branches(&mut parsed);
+                    steps = Some(parsed);
+                }
+                other => {
+                    return Err(err(
+                        field.span(),
+                        format!(
+                            "unknown field `{other}`; expected `name`, `steps`, `codec`, `registry`, or `metadata`"
+                        ),
+                    ));
+                }
+            }
+
+            // Optional trailing comma between fields
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        let id = id.ok_or_else(|| input.error("missing required field `name`"))?;
+        // Default codec to JsonCodec when omitted.
+        let codec = codec.unwrap_or_else(|| {
+            syn::parse_str("::sayiir_runtime::serialization::JsonCodec")
+                .expect("hardcoded path is valid")
+        });
+        let steps = steps.ok_or_else(|| input.error("missing required field `steps`"))?;
+
+        Ok(WorkflowDef {
+            id,
+            codec,
+            registry,
+            metadata,
+            steps,
+        })
+    }
 }
 
 /// Parse a step that might be parallel: `a || b || c`
@@ -88,6 +159,17 @@ fn parse_step_or_parallel(input: ParseStream) -> syn::Result<WorkflowStep> {
 
 /// Parse a single step (not parallel).
 fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
+    // route classify { ... }  (Ident Ident Brace — check via fork)
+    if input.peek(Ident) {
+        let fork = input.fork();
+        let ident: Ident = fork.parse()?;
+        if ident == "route" {
+            // Consume from real stream
+            let _: Ident = input.parse()?;
+            return parse_route(input, ident.span());
+        }
+    }
+
     // delay "5s"  OR  delay "my_id" "5s"
     // signal "approval"  OR  signal "my_id" "approval"  OR  signal "approval" timeout "30s"
     if input.peek(Ident) && input.peek2(LitStr) {
@@ -136,11 +218,11 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
                 span: ident.span(),
             });
         }
-        // Not "delay" or "signal", fall through — but we consumed the ident, so we need to handle it
+        // Not "delay" or "signal" — but we consumed the ident
         return Err(err(
             ident.span(),
             format!(
-                "unexpected identifier `{ident}` followed by string literal; did you mean `delay` or `signal`?"
+                "unexpected identifier `{ident}` followed by string literal; did you mean `delay`, `signal`, or `route`?"
             ),
         ));
     }
@@ -170,7 +252,7 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
     // bare task ref: identifier
     if input.peek(Ident) {
         let ident: Ident = input.parse()?;
-        let pascal = snake_to_pascal(&ident.to_string());
+        let pascal = format!("{}Task", snake_to_pascal(&ident.to_string()));
         let struct_name = Ident::new(&pascal, ident.span());
         return Ok(WorkflowStep::TaskRef {
             span: ident.span(),
@@ -178,7 +260,7 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         });
     }
 
-    Err(input.error("expected a task name, inline task, `delay`, `signal`, or `(`"))
+    Err(input.error("expected a task name, inline task, `delay`, `signal`, `route`, or `(`"))
 }
 
 /// Parse an optional `timeout "30s"` suffix.
@@ -197,6 +279,91 @@ fn parse_optional_timeout(input: ParseStream) -> syn::Result<Option<DurationLit>
     Ok(None)
 }
 
+/// Parse `route key_fn { "key" => [pipeline], ... }` (string keys)
+/// or    `route key_fn -> Type { Variant => [pipeline], ... }` (typed keys).
+///
+/// The `route` keyword has already been consumed.
+fn parse_route(input: ParseStream, span: Span) -> syn::Result<WorkflowStep> {
+    // Key function identifier (e.g. `classify`)
+    let key_fn_ident: Ident = input.parse().map_err(|_| {
+        err(
+            span,
+            "expected a key function name after `route`, e.g. route classify { ... }",
+        )
+    })?;
+    // ID is a placeholder; renumber_branches() assigns the final positional ID.
+    let id = String::new();
+    let key_fn = Ident::new(
+        &format!("{}Task", snake_to_pascal(&key_fn_ident.to_string())),
+        key_fn_ident.span(),
+    );
+
+    // Optional type annotation: `-> Type`
+    let key_type: Option<syn::Path> = if input.peek(Token![->]) {
+        input.parse::<Token![->]>()?;
+        Some(input.parse()?)
+    } else {
+        None
+    };
+
+    // Braced body: { key => [steps], _ => [steps] }
+    let brace_content;
+    braced!(brace_content in input);
+
+    let mut branches: Vec<(BranchArmKey, Vec<WorkflowStep>)> = Vec::new();
+    let mut default: Option<Vec<WorkflowStep>> = None;
+
+    while !brace_content.is_empty() {
+        if brace_content.peek(Token![_]) {
+            // Default arm: _ => [pipeline]
+            brace_content.parse::<Token![_]>()?;
+            brace_content.parse::<Token![=>]>()?;
+            let steps = parse_bracketed_pipeline(&brace_content)?;
+            if default.is_some() {
+                return Err(err(span, "duplicate default branch `_`"));
+            }
+            default = Some(steps);
+        } else if key_type.is_some() && brace_content.peek(Ident) {
+            // Typed variant arm: Variant => [pipeline]
+            let variant: Ident = brace_content.parse()?;
+            brace_content.parse::<Token![=>]>()?;
+            let steps = parse_bracketed_pipeline(&brace_content)?;
+            branches.push((BranchArmKey::Variant(variant), steps));
+        } else if brace_content.peek(LitStr) {
+            // String literal arm: "key" => [pipeline]
+            let key: LitStr = brace_content.parse()?;
+            brace_content.parse::<Token![=>]>()?;
+            let steps = parse_bracketed_pipeline(&brace_content)?;
+            branches.push((BranchArmKey::Literal(key), steps));
+        } else {
+            let msg = if key_type.is_some() {
+                "expected a variant name, string literal, or `_` for default branch"
+            } else {
+                "expected a string literal key or `_` for default branch"
+            };
+            return Err(brace_content.error(msg));
+        }
+
+        // Optional trailing comma
+        if brace_content.peek(Token![,]) {
+            brace_content.parse::<Token![,]>()?;
+        }
+    }
+
+    if branches.is_empty() {
+        return Err(err(span, "route must have at least one named branch"));
+    }
+
+    Ok(WorkflowStep::Route {
+        id,
+        key_fn,
+        key_type,
+        branches,
+        default,
+        span,
+    })
+}
+
 impl WorkflowStep {
     pub fn span(&self) -> Span {
         match self {
@@ -204,7 +371,8 @@ impl WorkflowStep {
             | Self::InlineTask { span, .. }
             | Self::Parallel { span, .. }
             | Self::Delay { span, .. }
-            | Self::AwaitSignal { span, .. } => *span,
+            | Self::AwaitSignal { span, .. }
+            | Self::Route { span, .. } => *span,
         }
     }
 }

@@ -13,45 +13,54 @@ This means that if your process crashes during a backoff period, the retry will 
 
 ## Configuring retries
 
-You can configure retry behavior per task using `RetryPolicy`. The policy specifies:
+You can configure retry behavior per task. The simplest approach is passing an integer for the retry count (uses sensible defaults: 1s initial delay, 2× backoff). For full control, use `RetryPolicy`.
+
+`RetryPolicy` parameters:
 
 - `max_retries`: Maximum number of retry attempts
-- `initial_delay`: First backoff duration
+- `initial_delay_secs`: First backoff duration in seconds
 - `backoff_multiplier`: Multiplier for exponential backoff (e.g., 2.0 doubles the delay each retry)
-- `max_delay` *(optional)*: Cap on the backoff duration to prevent unbounded growth
 
 <Tabs>
 <TabItem label="Python">
 
-### Using the decorator
+### Int shorthand
+
+When the defaults (1s initial delay, 2× backoff) are fine, pass an integer:
 
 ```python
-from sayiir import task, Flow, RetryPolicy, run_durable_workflow
-import requests
+from sayiir import task, Flow, run_durable_workflow
 
-@task(
-    timeout_secs=10,
-    retries=RetryPolicy(
-        max_retries=2,
-        initial_delay_secs=1.0,
-        backoff_multiplier=2.0
-    )
-)
+@task(timeout="10s", retries=2)
 def call_api(url: str) -> dict:
     return requests.get(url).json()
-
-@task
-def process(data: dict) -> str:
-    return f"processed {len(data)} items"
-
-workflow = Flow("resilient").then(call_api).then(process).build()
-status = run_durable_workflow(workflow, "job-1", "https://api.example.com/data")
 ```
 
 With this configuration:
 - First failure: retry after 1 second
 - Second failure: retry after 2 seconds (1.0 × 2.0)
-- Third failure: workflow fails (max_retries=2)
+- Third failure: workflow fails (retries exhausted)
+
+### Full RetryPolicy
+
+When you need custom backoff timing, use `RetryPolicy`:
+
+```python
+from sayiir import task, RetryPolicy
+
+@task(
+    timeout="10s",
+    retries=RetryPolicy(max_retries=3, initial_delay_secs=0.5, backoff_multiplier=3.0),
+)
+def call_flaky_api(url: str) -> dict:
+    return requests.get(url).json()
+```
+
+With this configuration:
+- First failure: retry after 0.5 seconds
+- Second failure: retry after 1.5 seconds (0.5 × 3.0)
+- Third failure: retry after 4.5 seconds (1.5 × 3.0)
+- Fourth failure: workflow fails (retries exhausted)
 
 </TabItem>
 <TabItem label="Node.js">
@@ -135,13 +144,13 @@ async fn process(data: serde_json::Value) -> Result<String, BoxError> {
 
 // Register macro-decorated tasks into the registry
 let mut registry = TaskRegistry::new();
-CallApi::register(&mut registry, codec.clone(), CallApi::new());
-Process::register(&mut registry, codec.clone(), Process::new());
+CallApiTask::register(&mut registry, codec.clone(), CallApiTask::new());
+ProcessTask::register(&mut registry, codec.clone(), ProcessTask::new());
 
 let workflow = WorkflowBuilder::new(ctx)
     .with_existing_registry(registry)
-    .then_registered::<serde_json::Value>(CallApi::task_id())?
-    .then_registered::<String>(Process::task_id())?
+    .then_registered::<serde_json::Value>(CallApiTask::task_id())?
+    .then_registered::<String>(ProcessTask::task_id())?
     .build()?;
 ```
 
@@ -156,7 +165,7 @@ When a task exceeds its configured timeout, Sayiir treats it as a failure and ap
 <TabItem label="Python">
 
 ```python
-@task(timeout_secs=5, retries=RetryPolicy(max_retries=3, initial_delay_secs=2.0))
+@task(timeout="5s", retries=3)
 def slow_operation(data: str) -> str:
     # If this takes >5 seconds, it will be retried
     time.sleep(10)

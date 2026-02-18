@@ -38,6 +38,7 @@ Core domain types and traits. Runtime-agnostic — no persistence, no execution 
 **Key Traits:**
 - `CoreTask` — Task execution trait (input → output)
 - `Codec` — Pluggable serialization (JSON, rkyv, etc.)
+- `BranchKey` — Typed routing key for conditional branching
 
 ### sayiir-persistence
 
@@ -67,6 +68,7 @@ Execution engines and worker orchestration.
 - `CheckpointingRunner` — Single-process, durable execution
 - `InProcessRunner` — Simple in-memory execution (no durability)
 - `PooledWorker` — Distributed, multi-machine execution
+- `PooledWorkerBuilder` — Builder for `PooledWorker` with auto-generated worker IDs
 - `WorkerHandle` — Handle to a spawned worker
 - `JsonCodec` — JSON serialization codec (feature: `json`)
 - `RkyvCodec` — Binary serialization codec (feature: `rkyv`)
@@ -74,6 +76,7 @@ Execution engines and worker orchestration.
 
 **Key Traits:**
 - `WorkflowRunner` — Trait for execution engines
+- `WorkflowRunExt` — Convenience `run_once` method on `Workflow`
 
 ### sayiir-macros
 
@@ -81,6 +84,7 @@ Procedural macros that eliminate boilerplate.
 
 **Macros:**
 - `#[task]` — Transform an async function into a `CoreTask` implementation
+- `#[derive(BranchKey)]` — Derive `BranchKey` for fieldless enums
 - `workflow!` — Build workflows with a concise DSL
 
 ## Prelude
@@ -94,11 +98,12 @@ use sayiir_runtime::prelude::*;
 **Re-exports:**
 - `WorkflowBuilder`, `Workflow`, `WorkflowStatus`, `WorkflowContext`
 - `TaskRegistry`
-- `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `WorkerHandle`
+- `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `PooledWorkerBuilder`, `WorkerHandle`, `WorkflowRunExt`
 - `InMemoryBackend`, `PersistentBackend`
 - `JsonCodec` (if `json` feature enabled)
 - `RkyvCodec` (if `rkyv` feature enabled)
-- `task`, `workflow` (if `macros` feature enabled)
+- `BranchKey` trait
+- `task`, `workflow`, `BranchKey` derive (if `macros` feature enabled)
 - `RuntimeError`
 
 ## #[task] Macro
@@ -111,17 +116,21 @@ Transform an async function into a `CoreTask` implementation with automatic regi
 use sayiir_runtime::prelude::*;
 use sayiir_core::error::BoxError;
 
-#[task]
+#[task(id = "greet")]
 async fn greet(name: String) -> Result<String, BoxError> {
     Ok(format!("Hello, {}!", name))
 }
+
+// Generated: GreetTask struct
+let task = GreetTask::new();
+assert_eq!(GreetTask::task_id(), "greet");
 ```
 
 ### With Metadata
 
 ```rust
 #[task(
-    id = "custom_name",
+    id = "charge_card",
     timeout = "30s",
     retries = 3,
     backoff = "100ms",
@@ -133,6 +142,7 @@ async fn charge(order: Order) -> Result<Receipt, BoxError> {
     // Implementation
     Ok(Receipt { /* ... */ })
 }
+// Generated: ChargeTask struct, task_id() → "charge_card"
 ```
 
 ### With Dependency Injection
@@ -140,7 +150,7 @@ async fn charge(order: Order) -> Result<Receipt, BoxError> {
 ```rust
 use std::sync::Arc;
 
-#[task]
+#[task(id = "charge_card")]
 async fn charge(
     order: Order,
     #[inject] stripe: Arc<StripeClient>
@@ -150,14 +160,14 @@ async fn charge(
 
 // Usage
 let stripe = Arc::new(StripeClient::new("sk_test_..."));
-let charge_task = Charge::new(stripe);
+let charge_task = ChargeTask::new(stripe);
 ```
 
 ### Attribute Options
 
 | Option | Type | Example | Description |
 |--------|------|---------|-------------|
-| `id` | String | `id = "custom_name"` | Override task ID (default: function name) |
+| `id` | String | `id = "charge_card"` | **Recommended.** Explicit task ID (default: function name) |
 | `timeout` | Duration | `timeout = "30s"` | Task timeout (supports `ms`, `s`, `m`, `h`) |
 | `retries` | Integer | `retries = 3` | Maximum retry count |
 | `backoff` | Duration | `backoff = "100ms"` | Initial retry delay |
@@ -165,6 +175,10 @@ let charge_task = Charge::new(stripe);
 | `tags` | String | `tags = "io"` | Categorization tag (repeatable) |
 | `display_name` | String | `display_name = "Charge Card"` | Human-readable name |
 | `description` | String | `description = "..."` | Task description |
+
+:::caution[Always set an explicit `id` in production]
+By default, the task ID is the function name. Renaming the function silently changes the ID, which breaks in-flight workflows on resume — the engine can't find the task in the checkpoint. Always use `id = "stable_name"` for any workflow that may be running when you deploy.
+:::
 
 ### Parameters
 
@@ -178,83 +192,145 @@ let charge_task = Charge::new(stripe);
 
 ### Generated Code
 
-The macro generates:
-- A PascalCase struct (e.g., `fn charge` → `struct Charge`)
+The macro generates a PascalCase struct with a `Task` suffix from the function name:
+
+| Function | Generated struct |
+|----------|-----------------|
+| `fn charge(...)` | `ChargeTask` |
+| `fn send_email(...)` | `SendEmailTask` |
+| `fn process_order(...)` | `ProcessOrderTask` |
+
+The struct includes:
 - `new()` constructor with positional args for injected dependencies
-- `task_id()` and `metadata()` helper methods
+- `task_id()` — returns the task ID (`id` attribute or function name)
+- `metadata()` — returns `TaskMetadata` from attributes
 - `register()` method for `TaskRegistry` integration
 - `CoreTask` trait implementation
-- The original function is preserved for direct use/testing
+
+The original function is preserved for direct use/testing.
 
 ## workflow! Macro
 
-Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions into the provided `TaskRegistry` — no manual `registry.register(...)` calls needed. Pass `TaskRegistry::new()` and the macro populates it:
+Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions — no manual `registry.register(...)` calls needed. Uses named fields: `name` and `steps` (with optional `codec` and `registry`):
 
 ### Basic Syntax
 
 ```rust
-let workflow = workflow!("workflow-id", JsonCodec, TaskRegistry::new(),
-    task_a => task_b => task_c
-).unwrap();
+let workflow = workflow! {
+    name: "workflow-id",
+    steps: [task_a, task_b, task_c]
+}.unwrap();
 ```
 
 ### Step Types
 
 | Syntax | Description | Example |
 |--------|-------------|---------|
-| `task_name` | Reference to a `#[task]`-generated struct | `validate => charge` |
+| `task_name` | Reference to a `#[task]`-generated struct | `validate, charge` |
 | `name(param: Type) { expr }` | Inline task | `double(x: i32) { Ok(x * 2) }` |
-| `a \|\| b` | Parallel fork | `email \|\| inventory => finalize` |
+| `a \|\| b` | Parallel fork | `email \|\| inventory, finalize` |
+| `route key_fn { ... }` | Conditional branch | See below |
 | `delay "5s"` | Durable delay (auto ID) | `delay "5s"` |
 | `delay "wait_24h" "5s"` | Durable delay (custom ID) | `delay "wait_24h" "24h"` |
 | `signal "name"` | Wait for external signal | `signal "approval"` |
-| `=>` | Sequential chain or join | `a => b => c` |
+| `,` | Sequential separator | `a, b, c` |
 
 ### Examples
 
 Sequential pipeline:
 
 ```rust
-let workflow = workflow!("order", JsonCodec, registry,
-    validate => charge => send_email
-).unwrap();
+let workflow = workflow! {
+    name: "order",
+    registry: registry,
+    steps: [validate, charge, send_email]
+}.unwrap();
 ```
 
 Parallel execution:
 
 ```rust
-let workflow = workflow!("parallel", JsonCodec, registry,
-    prepare => (send_email || update_inventory) => finalize
-).unwrap();
+let workflow = workflow! {
+    name: "parallel",
+    registry: registry,
+    steps: [prepare, (send_email || update_inventory), finalize]
+}.unwrap();
 ```
 
 Inline tasks:
 
 ```rust
-let workflow = workflow!("inline", JsonCodec, registry,
-    double(x: i32) { Ok(x * 2) } => triple(x: i32) { Ok(x * 3) }
-).unwrap();
+let workflow = workflow! {
+    name: "inline",
+    registry: registry,
+    steps: [double(x: i32) { Ok(x * 2) }, triple(x: i32) { Ok(x * 3) }]
+}.unwrap();
 ```
 
 Durable delay:
 
 ```rust
-let workflow = workflow!("delayed", JsonCodec, registry,
-    send_email => delay "24h" => send_reminder
-).unwrap();
+let workflow = workflow! {
+    name: "delayed",
+    registry: registry,
+    steps: [send_email, delay "24h", send_reminder]
+}.unwrap();
 ```
 
 Wait for signal:
 
 ```rust
-let workflow = workflow!("approval", JsonCodec, registry,
-    submit => signal "manager_approval" => process
-).unwrap();
+let workflow = workflow! {
+    name: "approval",
+    registry: registry,
+    steps: [submit, signal "manager_approval", process]
+}.unwrap();
 ```
+
+Conditional branching with typed keys (`-> EnumType` triggers compile-time exhaustiveness checking):
+
+```rust
+#[derive(BranchKey)]
+enum Intent { Billing, Tech }
+
+let workflow = workflow! {
+    name: "support",
+    registry: registry,
+    steps: [
+        classify_ticket,
+        route extract_intent -> Intent {
+            Billing => [handle_billing],
+            Tech    => [run_diagnostics, escalate],
+            _ => [fallback_handler],
+        },
+        send_summary
+    ]
+}.unwrap();
+```
+
+String-based keys still work (without `-> Type`):
+
+```rust
+let workflow = workflow! {
+    name: "support",
+    registry: registry,
+    steps: [
+        classify_ticket,
+        route extract_intent {
+            "billing" => [handle_billing],
+            "tech"    => [run_diagnostics, escalate],
+            _ => [fallback_handler],
+        },
+        send_summary
+    ]
+}.unwrap();
+```
+
+Each branch arm uses `[task, task]` syntax for task chains. The `_` arm is the optional default.
 
 ### Returns
 
-A `Result<SerializableWorkflow<C, Input, ()>, WorkflowError>` expression.
+A `Result<SerializableWorkflow<C, Input, ()>, BuildError>` expression.
 
 ## WorkflowBuilder
 
@@ -289,28 +365,66 @@ Use a task from the registry.
 .then_registered::<Validate>("validate")
 ```
 
-#### `fork(|fork| { ... })`
+#### branches(closure) / fork()
 
 Start parallel branches.
 
 ```rust
-.fork(|fork| {
-    fork.branch("email", send_email_task);
-    fork.branch("inventory", update_inventory_task);
-})?
-.join("finalize", finalize_task)
+.branches(|b| {
+    b.add("email", |input: Order| async move { Ok(send_email(input).await?) });
+    b.add("inventory", |input: Order| async move { Ok(update_inventory(input).await?) });
+})
+.join("finalize", |outputs: BranchOutputs<_>| async move {
+    let email: EmailResult = outputs.get("email")?;
+    let inv: InventoryResult = outputs.get("inventory")?;
+    Ok(Summary { email, inv })
+})
 ```
 
 #### join(name, closure)
 
-Join parallel branches with a combining task.
+Join parallel branches with a combining task. Uses `BranchOutputs` for type-safe named access to each branch result.
 
 ```rust
-.join("combine", |results: BranchResults| async move {
-    // Combine branch outputs
-    Ok(combined)
+.join("combine", |outputs: BranchOutputs<_>| async move {
+    let count: u32 = outputs.get("count")?;
+    let name: String = outputs.get("name")?;
+    Ok(format!("{}: {}", name, count))
 })
 ```
+
+#### route(key_fn)
+
+Start conditional branching with **static type checking**. The key function returns a `BranchKey` enum variant — the compiler ensures every variant has a matching `.branch()` call and that no orphan branches exist. Typos and missing cases are caught at compile time, not at runtime. The branch node ID is derived automatically from the enum type name.
+
+:::tip[Prefer typed keys]
+`#[derive(BranchKey)]` enums are the recommended approach — they give you compile-time exhaustiveness checking. Use string-based keys only when routing keys are determined at runtime or when building workflows dynamically.
+:::
+
+```rust
+#[derive(BranchKey)]
+enum Route {
+    Billing,
+    Tech,
+}
+
+let wf = WorkflowBuilder::new(ctx)
+    .then("classify", classify_fn)
+    .route::<_, Route, _, _>( |input: ClassifyOutput| async move {
+        Ok(if input.intent == "billing" { Route::Billing } else { Route::Tech })
+    })
+        .branch(Route::Billing, |sub| sub.then("handle_billing", billing_fn))?
+        .branch(Route::Tech, |sub| sub.then("handle_tech", tech_fn))?
+        .default_branch(|sub| sub.then("fallback", fallback_fn))?
+    .done()?  // Returns Err(BuildError::MissingBranches) if a Route variant is unhandled
+    .build()?;
+```
+
+After `.done()`, the output type is `BranchEnvelope<BranchOut>` containing `branch` (the key) and `result`.
+
+:::note
+The `workflow!` macro also supports typed keys via `route key_fn -> EnumType { Variant => [...] }`. It generates compile-time match exhaustiveness checks using the `BranchKey` enum. String-based keys (`"key" => [...]`) remain supported for simpler cases.
+:::
 
 #### delay(name, duration)
 
@@ -399,7 +513,7 @@ let backend = PostgresBackend::new("postgresql://...").await?;
 let registry = TaskRegistry::new();
 
 let worker = PooledWorker::new("worker-1", backend, registry)
-    .with_claim_ttl(Duration::from_secs(60));
+    .with_claim_ttl(Some(Duration::from_secs(60)));
 
 let handle = worker.spawn(
     Duration::from_secs(5),  // Poll interval
@@ -407,12 +521,29 @@ let handle = worker.spawn(
 );
 
 // Later: stop the worker
-handle.stop().await?;
+handle.shutdown();
+handle.join().await?;
+```
+
+Or use the builder for auto-generated worker IDs:
+
+```rust
+// Auto-generated worker ID from hostname + PID
+let worker = PooledWorker::builder(backend, registry).build();
+
+// Or override with explicit ID and custom settings
+let worker = PooledWorker::builder(backend, registry)
+    .worker_id("custom-worker-1")
+    .claim_ttl(Some(Duration::from_secs(600)))
+    .batch_size(NonZeroUsize::new(4).unwrap())
+    .build();
 ```
 
 **Methods:**
-- `new(worker_id, backend, registry)` — Create worker
-- `with_claim_ttl(duration)` — Set claim timeout
+- `new(worker_id, backend, registry)` — Create worker with explicit ID
+- `builder(backend, registry)` → `PooledWorkerBuilder` — Create builder with auto-generated ID
+- `with_claim_ttl(Option<Duration>)` — Set claim timeout
+- `with_batch_size(NonZeroUsize)` — Set tasks per poll (default: 1)
 - `spawn(poll_interval, workflows)` → `WorkerHandle` — Start polling
 
 ### InProcessRunner
@@ -427,6 +558,18 @@ let result = runner.run(workflow, input_data).await?;
 ```
 
 No persistence, no resume. Useful for testing or short-lived workflows.
+
+### WorkflowRunExt (run_once)
+
+Extension trait that adds a `run_once` convenience method directly on `Workflow`. Uses `InProcessRunner` internally — no backend setup, no instance ID.
+
+```rust
+use sayiir_runtime::prelude::*;
+
+let status = workflow.run_once(input).await?;
+```
+
+Ideal for scripts, tests, and quick experiments. Included in the prelude.
 
 ## Key Traits
 
@@ -480,6 +623,34 @@ pub trait CoreTask: Send + Sync + 'static {
 
 Usually implemented via the `#[task]` macro, but can be implemented manually if needed.
 
+### BranchKey
+
+Typed routing key for conditional branching. Instead of passing raw strings as branch keys (which are only validated at runtime), `BranchKey` enums give you **static type checking** — the compiler rejects typos, missing branches, and orphan keys at build time.
+
+```rust
+pub trait BranchKey: Send + Sync + 'static {
+    fn as_key(&self) -> &str;
+    fn all_keys() -> &'static [&'static str];
+    fn from_key(key: &str) -> Option<Self> where Self: Sized;
+}
+```
+
+Use `#[derive(BranchKey)]` on a fieldless enum to auto-implement the trait. Variant names are converted to `snake_case` keys by default, with `#[branch_key("custom")]` for overrides:
+
+```rust
+use sayiir_runtime::prelude::*;
+
+#[derive(BranchKey)]
+enum TicketRoute {
+    Billing,                    // key: "billing"
+    TechSupport,                // key: "tech_support"
+    #[branch_key("other")]
+    Fallback,                   // key: "other"
+}
+```
+
+The key function returns a `BranchKey` variant, and `.branch()` accepts variants — not strings. The compiler ensures every variant is handled, eliminating an entire class of runtime routing errors. The derive macro is re-exported in the prelude when the `macros` feature is enabled.
+
 ## Configuration Types
 
 ### RetryPolicy
@@ -529,20 +700,51 @@ let ctx = WorkflowContext::new(
 
 ## Error Types
 
+Sayiir separates errors into two domains:
+
+### BuildError
+
+Errors from workflow construction and hydration (build-time).
+
+```rust
+use sayiir_core::error::BuildError;
+
+match builder.build() {
+    Err(BuildError::DuplicateTaskId(id)) => eprintln!("Duplicate: {id}"),
+    Err(BuildError::TaskNotFound(id)) => eprintln!("Missing task: {id}"),
+    Err(BuildError::EmptyBranch) => eprintln!("Branch needs at least one step"),
+    Err(BuildError::EmptyFork) => eprintln!("Fork has no branches"),
+    Err(BuildError::MissingBranches { branch_id, missing_keys }) => {
+        eprintln!("Branch '{branch_id}' is missing handlers for: {missing_keys:?}");
+    }
+    Err(BuildError::OrphanBranches { branch_id, orphan_keys }) => {
+        eprintln!("Branch '{branch_id}' has handlers for unknown keys: {orphan_keys:?}");
+    }
+    Err(BuildError::DefinitionMismatch { expected, found }) => {
+        eprintln!("Hash mismatch: expected {expected}, got {found}");
+    }
+    Ok(workflow) => { /* ... */ }
+}
+```
+
+### WorkflowError
+
+Errors from workflow execution (runtime).
+
+Variants include `TaskNotFound`, `TaskNotImplemented`, `DefinitionMismatch`, `Cancelled`, `Paused`, `TaskPanicked`, `TaskTimedOut`, `BranchKeyNotFound`, `Waiting`, `AwaitingSignal`, and others.
+
 ### RuntimeError
 
-Errors from the runtime layer.
+Top-level error from the runtime layer, wrapping all error domains.
 
 ```rust
 use sayiir_runtime::RuntimeError;
 
 match result {
-    Err(RuntimeError::TaskFailed { task_id, message, .. }) => {
-        eprintln!("Task {} failed: {}", task_id, message);
-    }
-    Err(RuntimeError::BackendError(e)) => {
-        eprintln!("Storage error: {}", e);
-    }
+    Err(RuntimeError::Workflow(e)) => eprintln!("Workflow error: {e}"),
+    Err(RuntimeError::Build(e)) => eprintln!("Build error: {e}"),
+    Err(RuntimeError::Backend(e)) => eprintln!("Storage error: {e}"),
+    Err(RuntimeError::Task(e)) => eprintln!("Task error: {e}"),
     _ => {}
 }
 ```

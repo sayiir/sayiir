@@ -196,6 +196,7 @@ impl NapiDurableEngine {
                         &mut snapshot,
                         backend.as_ref(),
                         &executor,
+                        &JsonCodec,
                     )
                     .await;
 
@@ -263,6 +264,7 @@ impl NapiDurableEngine {
                             &mut snapshot,
                             backend.as_ref(),
                             &executor,
+                            &JsonCodec,
                         )
                         .await;
 

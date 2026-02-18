@@ -1,6 +1,7 @@
 """Flow builder for constructing workflows."""
 
 import functools
+import json as _json
 from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -9,6 +10,10 @@ from ._sayiir import PyFlowBuilder, PyTaskMetadata
 
 if TYPE_CHECKING:
     from ._sayiir import PyWorkflow
+
+# Suffix convention for branch key-function task IDs.
+# Must match ``sayiir_core::workflow::key_fn_id``.
+_KEY_FN_SUFFIX = "::key_fn"
 
 
 def _maybe_wrap_pydantic(task_func: Callable[..., Any]) -> Callable[..., Any]:
@@ -111,6 +116,12 @@ class Workflow:
     def definition_hash(self) -> str:
         return self._inner.definition_hash
 
+    @property
+    def metadata(self) -> dict[str, Any] | None:
+        """Workflow-level metadata, or ``None`` if none was provided."""
+        raw = self._inner.metadata_json
+        return _json.loads(raw) if raw is not None else None
+
 
 class ForkBuilder:
     """Builder for parallel workflow branches."""
@@ -184,6 +195,133 @@ class ForkBuilder:
         return self._flow
 
 
+class BranchBuilder:
+    """Builder for conditional branching.
+
+    The ``keys`` parameter declares all valid routing keys up front.
+    ``.branch()`` validates that the key is in the declared set, and
+    ``.done()`` checks exhaustiveness: every declared key must have a
+    corresponding branch or a default branch must be provided.
+    """
+
+    def __init__(
+        self,
+        flow: "Flow",
+        branch_id: str,
+        key_fn: Callable[..., Any],
+        *,
+        keys: list[str],
+    ):
+        self._flow = flow
+        self._branch_id = branch_id
+        self._key_fn = key_fn
+        self._declared_keys = keys
+        self._branches: list[tuple[str, list[tuple[str, Callable[..., Any]]]]] = []
+        self._default: list[tuple[str, Callable[..., Any]]] | None = None
+
+    def branch(
+        self, key: str, *task_funcs: Callable[..., Any], name: str | None = None
+    ) -> "BranchBuilder":
+        """Add a named branch with one or more chained tasks.
+
+        Args:
+            key: The routing key that selects this branch. Must be one of
+                the keys declared in ``route(keys=...)``.
+            *task_funcs: One or more task callables forming the branch pipeline.
+            name: Override the task ID of the first task in the branch.
+
+        Raises:
+            ValueError: If the key is not in the declared set.
+        """
+        if not task_funcs:
+            raise ValueError("branch() requires at least one task function")
+        if key not in self._declared_keys:
+            raise ValueError(
+                f"Branch key '{key}' is not in the declared keys: {self._declared_keys}"
+            )
+        chain: list[tuple[str, Callable[..., Any]]] = []
+        for i, func in enumerate(task_funcs):
+            task_name = name if i == 0 else None
+            task_id, _, self._flow._lambda_counter = _register_task(
+                func,
+                self._flow._task_registry,
+                name=task_name,
+                lambda_counter=self._flow._lambda_counter,
+            )
+            chain.append((task_id, func))
+        self._branches.append((key, chain))
+        return self
+
+    def default_branch(
+        self, *task_funcs: Callable[..., Any], name: str | None = None
+    ) -> "BranchBuilder":
+        """Add a default branch for unmatched keys.
+
+        Args:
+            *task_funcs: One or more task callables forming the default pipeline.
+            name: Override the task ID of the first task.
+        """
+        if not task_funcs:
+            raise ValueError("default_branch() requires at least one task function")
+        chain: list[tuple[str, Callable[..., Any]]] = []
+        for i, func in enumerate(task_funcs):
+            task_name = name if i == 0 else None
+            task_id, _, self._flow._lambda_counter = _register_task(
+                func,
+                self._flow._task_registry,
+                name=task_name,
+                lambda_counter=self._flow._lambda_counter,
+            )
+            chain.append((task_id, func))
+        self._default = chain
+        return self
+
+    def done(self) -> "Flow":
+        """Finish the route and return to the Flow builder.
+
+        Raises:
+            ValueError: If declared keys are missing branches and no default
+                is provided, or if orphan branches reference undeclared keys.
+        """
+        branched_keys = {key for key, _ in self._branches}
+        declared_set = set(self._declared_keys)
+
+        # Check for orphan branches
+        orphans = branched_keys - declared_set
+        if orphans:
+            raise ValueError(
+                f"Branch node '{self._branch_id}': orphan branches for keys: "
+                f"{', '.join(sorted(orphans))}"
+            )
+
+        # Check for missing branches (when no default)
+        if self._default is None:
+            missing = declared_set - branched_keys
+            if missing:
+                raise ValueError(
+                    f"Branch node '{self._branch_id}': missing branches for keys: "
+                    f"{', '.join(sorted(missing))}"
+                )
+
+        # Register the key function
+        key_fn_id = f"{self._branch_id}{_KEY_FN_SUFFIX}"
+        self._flow._task_registry[key_fn_id] = _maybe_wrap_pydantic(self._key_fn)
+
+        # Build branch data for the Rust builder
+        branches: list[tuple[str, list[tuple[str, PyTaskMetadata | None]]]] = [
+            (key, [(tid, getattr(func, "_metadata", None)) for tid, func in chain])
+            for key, chain in self._branches
+        ]
+        default: list[tuple[str, PyTaskMetadata | None]] | None = None
+        if self._default is not None:
+            default = [
+                (tid, getattr(func, "_metadata", None)) for tid, func in self._default
+            ]
+
+        self._flow._builder.add_branch(self._branch_id, branches, default)
+        return self._flow
+
+
 class Flow:
     """Workflow builder with fluent API.
 
@@ -199,11 +337,19 @@ class Flow:
         result = run_workflow(workflow, 21)
     """
 
-    def __init__(self, name: str = "workflow"):
+    def __init__(
+        self,
+        name: str = "workflow",
+        *,
+        metadata: dict[str, Any] | None = None,
+    ):
         self._name = name
         self._builder = PyFlowBuilder(name)
         self._task_registry: dict[str, Callable[..., Any]] = {}
         self._lambda_counter: int = 0
+        self._branch_counter: int = 0
+        if metadata is not None:
+            self._builder.set_metadata_json(_json.dumps(metadata))
 
     def then(self, task_func: Callable[..., Any], *, name: str | None = None) -> "Flow":
         """Add a sequential task to the workflow pipeline.
@@ -244,10 +390,20 @@ class Flow:
         self._builder.then(task_id, metadata)
         return self
 
-    def delay(self, name: str, duration: "float | timedelta") -> "Flow":
-        """Add a durable delay. No workers held during the delay."""
+    def delay(self, name: str, duration: "str | float | timedelta") -> "Flow":
+        """Add a durable delay. No workers held during the delay.
+
+        Args:
+            name: Step identifier.
+            duration: Delay length as seconds (number), a ``timedelta``,
+                or a human-readable string (``"30s"``, ``"5m"``, ``"1h"``).
+        """
         if isinstance(duration, timedelta):
             duration = duration.total_seconds()
+        elif isinstance(duration, str):
+            from .decorators import parse_duration
+
+            duration = parse_duration(duration)
         self._builder.delay(name, duration)
         return self
 
@@ -256,7 +412,7 @@ class Flow:
         signal_name: str,
         *,
         name: str | None = None,
-        timeout: "float | timedelta | None" = None,
+        timeout: "str | float | timedelta | None" = None,
     ) -> "Flow":
         """Wait for an external signal before continuing.
 
@@ -267,16 +423,59 @@ class Flow:
         Args:
             signal_name: The named signal to wait for.
             name: Node ID for this step. Defaults to ``signal_name``.
-            timeout: Optional timeout as seconds or timedelta.
+            timeout: Optional timeout as seconds (number), ``timedelta``,
+                or human-readable string (``"30s"``, ``"5m"``, ``"1h"``).
         """
         signal_id = name or signal_name
         timeout_secs: float | None = None
         if timeout is not None:
-            timeout_secs = (
-                timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
-            )
+            if isinstance(timeout, timedelta):
+                timeout_secs = timeout.total_seconds()
+            elif isinstance(timeout, str):
+                from .decorators import parse_duration
+
+                timeout_secs = parse_duration(timeout)
+            else:
+                timeout_secs = timeout
         self._builder.wait_for_signal(signal_id, signal_name, timeout_secs)
         return self
+
+    def route(
+        self,
+        key_fn: Callable[..., Any],
+        *,
+        keys: list[str],
+    ) -> "BranchBuilder":
+        """Start a conditional branch based on a routing key.
+
+        The key function receives the output of the previous step and returns
+        a string key. The ``keys`` parameter declares all valid routing keys
+        up front. ``.branch()`` validates against this set and ``.done()``
+        checks exhaustiveness.
+
+        Args:
+            key_fn: A callable that extracts a string routing key from the
+                previous step's output.
+            keys: All valid routing keys. Each must have a corresponding
+                ``.branch()`` call or a ``.default_branch()`` must be provided.
+
+        Returns:
+            A BranchBuilder for adding named branches.
+
+        Example::
+
+            Flow("classify")
+                .then(classify)
+                .route(lambda r: r["intent"], keys=["billing", "tech"])
+                    .branch("billing", handle_billing)
+                    .branch("tech", handle_tech)
+                    .done()
+                .then(finalize)
+                .build()
+        """
+        branch_id = f"branch_{self._branch_counter}"
+        self._branch_counter += 1
+        return BranchBuilder(self, branch_id, key_fn, keys=keys)
 
     def fork(self) -> "ForkBuilder":
         """Start a fork for parallel execution."""

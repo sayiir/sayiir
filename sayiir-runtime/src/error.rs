@@ -1,6 +1,6 @@
 //! Typed error for the sayiir runtime layer.
 
-use sayiir_core::error::{BoxError, WorkflowError};
+use sayiir_core::error::{BoxError, BuildError, WorkflowError};
 use sayiir_persistence::BackendError;
 
 /// Typed error for the sayiir runtime layer.
@@ -12,6 +12,10 @@ pub enum RuntimeError {
     /// Workflow logic error (cancellation, definition mismatch, task not found, etc.)
     #[error(transparent)]
     Workflow(#[from] WorkflowError),
+
+    /// Build/hydration error (duplicate IDs, missing tasks, empty branches).
+    #[error(transparent)]
+    Build(#[from] BuildError),
 
     /// Persistent backend error (storage failures).
     #[error(transparent)]

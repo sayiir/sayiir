@@ -46,18 +46,52 @@ export class PostgresBackend {
   }
 }
 
+/** Options for running a workflow with durability. */
+export interface DurableRunOptions {
+  instanceId: string;
+  backend: Backend;
+}
+
 /**
- * Run a workflow to completion (no persistence).
+ * Run a workflow to completion and return its output.
  *
- * Uses a stepper pattern that yields control to JavaScript between each task,
- * enabling both sync and async task functions (fetch, timers, file I/O).
+ * When called without options, runs entirely in memory with no persistence
+ * (fastest path for prototyping).
  *
- * Returns a Promise that resolves with the workflow output.
+ * When called **with** `{ instanceId, backend }`, runs with full
+ * checkpointing and durability — but still returns the output directly
+ * instead of a `WorkflowStatus` object. If the workflow does not complete
+ * (e.g. it parks on a delay or signal), a `WorkflowError` is thrown.
+ * Use `runDurableWorkflow()` when you need the full status object.
+ *
+ * @example
+ * ```ts
+ * // Prototype — no persistence
+ * const result = await runWorkflow(wf, input);
+ *
+ * // Production — same function, just add options
+ * const result = await runWorkflow(wf, input, {
+ *   instanceId: "run-1",
+ *   backend: PostgresBackend.connect(url),
+ * });
+ * ```
  */
 export async function runWorkflow<TIn, TOut>(
   workflow: Workflow<TIn, TOut>,
   input: TIn,
+  opts?: DurableRunOptions,
 ): Promise<TOut> {
+  if (opts) {
+    const status = runDurableWorkflow(workflow, opts.instanceId, input, opts.backend);
+    if (status.status !== "completed") {
+      throw new WorkflowError(
+        `Workflow did not complete (status=${status.status}). ` +
+          `Use runDurableWorkflow() to inspect the full status.`,
+      );
+    }
+    return status.output;
+  }
+
   const native = getNative();
   const stepper = new native.NapiContinuationStepper(workflow._inner, input);
   let step = stepper.current();

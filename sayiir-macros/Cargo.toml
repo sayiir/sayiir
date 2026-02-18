@@ -10,6 +10,7 @@ homepage.workspace = true
 readme = "README.md"
 categories.workspace = true
 keywords.workspace = true
+documentation = "https://docs.rs/sayiir-macros"
 
 [lib]
 proc-macro = true

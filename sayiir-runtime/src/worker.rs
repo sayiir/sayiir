@@ -396,7 +396,7 @@ where
     /// Consumes `self`, creates an internal command channel, and spawns the
     /// actor loop on the Tokio runtime. Returns a cloneable [`WorkerHandle`]
     /// for lifecycle control — call [`WorkerHandle::shutdown`] to request
-    /// graceful shutdown and [`WorkerHandle::wait`] to await completion.
+    /// graceful shutdown and [`WorkerHandle::join`] to await completion.
     ///
     /// The worker runs until:
     /// - [`WorkerHandle::shutdown`] is called, or
@@ -1413,6 +1413,25 @@ where
                     false
                 }
             }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for branch_cont in branches.values() {
+                    if Self::find_task_id_in_continuation(branch_cont, task_id) {
+                        return true;
+                    }
+                }
+                if let Some(def) = default
+                    && Self::find_task_id_in_continuation(def, task_id)
+                {
+                    return true;
+                }
+                next.as_ref()
+                    .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
+            }
         }
     }
 
@@ -1470,6 +1489,36 @@ where
                             return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
+                    WorkflowContinuation::Branch {
+                        branches,
+                        default,
+                        next,
+                        ..
+                    } => {
+                        // Search branch sub-continuations for the task
+                        let mut found = false;
+                        for branch_cont in branches.values() {
+                            if Self::find_task_id_in_continuation(branch_cont, task_id) {
+                                current = branch_cont;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if found {
+                            continue;
+                        }
+                        if let Some(def) = default
+                            && Self::find_task_id_in_continuation(def, task_id)
+                        {
+                            current = def;
+                            continue;
+                        }
+                        if let Some(next_cont) = next {
+                            current = next_cont;
+                        } else {
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
+                        }
+                    }
                 }
             }
         }
@@ -1505,6 +1554,52 @@ where
                     Self::update_position_after_task(join_cont, completed_task_id, snapshot);
                 }
             }
+            WorkflowContinuation::Branch {
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                for branch_cont in branches.values() {
+                    Self::update_position_after_task(branch_cont, completed_task_id, snapshot);
+                }
+                if let Some(def) = default {
+                    Self::update_position_after_task(def, completed_task_id, snapshot);
+                }
+                if let Some(next_cont) = next {
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                }
+            }
+        }
+    }
+
+    /// Create a builder with sensible defaults.
+    ///
+    /// By default, the worker ID is derived from `{hostname}-{pid}`.
+    /// Override with [`PooledWorkerBuilder::worker_id`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use sayiir_runtime::prelude::*;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Auto-generated worker ID from hostname + PID
+    /// let worker = PooledWorker::builder(InMemoryBackend::new(), TaskRegistry::new()).build();
+    ///
+    /// // Or override with explicit ID
+    /// let worker = PooledWorker::builder(InMemoryBackend::new(), TaskRegistry::new())
+    ///     .worker_id("custom-worker-1")
+    ///     .build();
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder(backend: B, registry: TaskRegistry) -> PooledWorkerBuilder<B> {
+        PooledWorkerBuilder {
+            worker_id: None,
+            backend,
+            registry,
+            claim_ttl: Some(Duration::from_secs(5 * 60)),
+            batch_size: NonZeroUsize::MIN,
         }
     }
 
@@ -1547,6 +1642,80 @@ where
                     true
                 }
             }
+            WorkflowContinuation::Branch { id, next, .. } => {
+                // Branch is complete when the branch node itself has a cached result
+                if snapshot.get_task_result(id).is_none() {
+                    return false;
+                }
+                next.as_ref()
+                    .is_none_or(|n| Self::is_workflow_complete(n, snapshot))
+            }
+        }
+    }
+}
+
+/// Generate a default worker ID from `{hostname}-{pid}`.
+fn default_worker_id() -> String {
+    let host = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{host}-{}", std::process::id())
+}
+
+/// Builder for [`PooledWorker`] with sensible defaults.
+///
+/// By default, derives the worker ID from `{hostname}-{pid}`.
+/// Override with [`worker_id`](Self::worker_id).
+///
+/// Created via [`PooledWorker::builder`].
+pub struct PooledWorkerBuilder<B> {
+    worker_id: Option<String>,
+    backend: B,
+    registry: TaskRegistry,
+    claim_ttl: Option<Duration>,
+    batch_size: NonZeroUsize,
+}
+
+impl<B> PooledWorkerBuilder<B>
+where
+    B: PersistentBackend + TaskClaimStore + 'static,
+{
+    /// Set an explicit worker ID.
+    ///
+    /// If not called, the ID is auto-generated from `{hostname}-{pid}`.
+    #[must_use]
+    pub fn worker_id(mut self, id: impl Into<String>) -> Self {
+        self.worker_id = Some(id.into());
+        self
+    }
+
+    /// Set the TTL for task claims (default: 5 minutes).
+    #[must_use]
+    pub fn claim_ttl(mut self, ttl: Option<Duration>) -> Self {
+        self.claim_ttl = ttl;
+        self
+    }
+
+    /// Set the number of tasks to fetch per poll (default: 1).
+    #[must_use]
+    pub fn batch_size(mut self, size: NonZeroUsize) -> Self {
+        self.batch_size = size;
+        self
+    }
+
+    /// Build the [`PooledWorker`].
+    ///
+    /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
+    #[must_use]
+    pub fn build(self) -> PooledWorker<B> {
+        let worker_id = self.worker_id.unwrap_or_else(default_worker_id);
+        PooledWorker {
+            worker_id,
+            backend: Arc::new(self.backend),
+            registry: Arc::new(self.registry),
+            claim_ttl: self.claim_ttl,
+            batch_size: self.batch_size,
         }
     }
 }
@@ -1627,6 +1796,48 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), handle.join())
             .await
             .ok();
+    }
+
+    #[test]
+    fn test_builder_auto_generates_worker_id() {
+        let backend = InMemoryBackend::new();
+        let registry = TaskRegistry::new();
+        let worker = PooledWorker::builder(backend, registry).build();
+
+        // Should contain PID
+        let pid = std::process::id().to_string();
+        assert!(
+            worker.worker_id.contains(&pid),
+            "Auto-generated ID '{}' should contain PID '{}'",
+            worker.worker_id,
+            pid
+        );
+    }
+
+    #[test]
+    fn test_builder_explicit_worker_id() {
+        let backend = InMemoryBackend::new();
+        let registry = TaskRegistry::new();
+        let worker = PooledWorker::builder(backend, registry)
+            .worker_id("my-worker")
+            .build();
+
+        assert_eq!(worker.worker_id, "my-worker");
+    }
+
+    #[test]
+    fn test_builder_custom_settings() {
+        let backend = InMemoryBackend::new();
+        let registry = TaskRegistry::new();
+        let worker = PooledWorker::builder(backend, registry)
+            .worker_id("w1")
+            .claim_ttl(Some(Duration::from_secs(120)))
+            .batch_size(NonZeroUsize::new(8).unwrap())
+            .build();
+
+        assert_eq!(worker.worker_id, "w1");
+        assert_eq!(worker.claim_ttl, Some(Duration::from_secs(120)));
+        assert_eq!(worker.batch_size.get(), 8);
     }
 
     #[tokio::test]

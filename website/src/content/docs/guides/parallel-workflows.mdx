@@ -1,6 +1,6 @@
 ---
-title: Parallel Workflows
-description: Fork/join parallelism, branch composition, and join handlers
+title: Parallel & Conditional Workflows
+description: Fork/join parallelism, conditional branching, and join handlers
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -97,12 +97,14 @@ let workflow = WorkflowBuilder::new(ctx)
 Rust also supports a concise macro syntax for fork/join:
 
 ```rust
-let wf = workflow!("checkout", JsonCodec, registry,
-    validate_payment || check_inventory => finalize
-);
+let wf = workflow! {
+    name: "checkout",
+    registry: registry,
+    steps: [validate_payment || check_inventory, finalize]
+};
 ```
 
-The `||` operator denotes parallel execution, and `=>` connects the fork to the join handler.
+The `||` operator denotes parallel execution, and `,` separates sequential steps including the join handler.
 
 ## Multi-Step Branches
 
@@ -169,3 +171,165 @@ def finalize(results: dict) -> str:
 </Tabs>
 
 The join task only executes after all branches complete successfully. If any branch fails, the entire fork/join fails and triggers workflow retry logic.
+
+## Conditional Branching
+
+While fork/join runs all branches in parallel, **conditional branching** routes execution to exactly one branch based on a runtime value. A key function extracts a routing key from the previous step's output, and the matching branch runs. All languages now support declaring the set of valid keys upfront, enabling exhaustiveness checks at build time.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def classify(ticket: dict) -> str:
+    return "billing" if ticket["type"] == "invoice" else "tech"
+
+@task
+def handle_billing(ticket: dict) -> str:
+    return f"Billing resolved: {ticket['id']}"
+
+@task
+def handle_tech(ticket: dict) -> str:
+    return f"Tech resolved: {ticket['id']}"
+
+@task
+def fallback(ticket: dict) -> str:
+    return f"General: {ticket['id']}"
+
+workflow = (
+    Flow("support-router")
+    .route(classify, keys=["billing", "tech"])
+        .branch("billing", handle_billing)
+        .branch("tech", handle_tech)
+        .default_branch(fallback)
+    .done()
+    .build()
+)
+
+result = run_workflow(workflow, {"id": 1, "type": "invoice"})
+# {"branch": "billing", "result": "Billing resolved: 1"}
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, runWorkflow } from "sayiir";
+
+const classify = task("classify", (ticket: { id: number; type: string }) => {
+  return ticket.type === "invoice" ? "billing" : "tech";
+});
+
+const handleBilling = task("handle-billing", (ticket: { id: number }) => {
+  return `Billing resolved: ${ticket.id}`;
+});
+
+const handleTech = task("handle-tech", (ticket: { id: number }) => {
+  return `Tech resolved: ${ticket.id}`;
+});
+
+const workflow = flow<{ id: number; type: string }>("support-router")
+  .route(
+    (ticket) => ticket.type === "invoice" ? "billing" : "tech",
+    ["billing", "tech"] as const
+  )
+    .branch("billing", handleBilling)
+    .branch("tech", handleTech)
+    .defaultBranch("fallback", (ticket) => `General: ${ticket.id}`)
+  .done()
+  .build();
+
+const result = await runWorkflow(workflow, { id: 1, type: "invoice" });
+// { branch: "billing", result: "Billing resolved: 1" }
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Builder API — #[derive(BranchKey)] gives static type checking:
+// the compiler rejects typos, missing branches, and orphan keys.
+#[derive(BranchKey)]
+enum Route {
+    Billing,
+    Tech,
+}
+
+let wf = WorkflowBuilder::new(ctx)
+    .then("classify", classify_fn)
+    .route::<_, Route, _, _>( |input: ClassifyOutput| async move {
+        Ok(if input.intent == "billing" { Route::Billing } else { Route::Tech })
+    })
+        .branch(Route::Billing, |sub| sub.then("handle_billing", billing_fn))?
+        .branch(Route::Tech, |sub| sub.then("handle_tech", tech_fn))?
+        .default_branch(|sub| sub.then("fallback", fallback_fn))?
+    .done()?  // Err(MissingBranches) if a Route variant is unhandled
+    .build()?;
+
+// Or using the workflow! macro with typed keys
+let wf = workflow! {
+    name: "support-router",
+    registry: registry,
+    steps: [
+        classify_ticket,
+        route extract_intent -> Route {
+            Billing => [handle_billing],
+            Tech    => [handle_tech],
+            _ => [fallback],
+        }
+    ]
+};
+
+// String-based keys also work (without `-> Type`)
+let wf = workflow! {
+    name: "support-router",
+    registry: registry,
+    steps: [
+        classify_ticket,
+        route extract_intent {
+            "billing" => [handle_billing],
+            "tech"    => [handle_tech],
+            _ => [fallback],
+        }
+    ]
+};
+```
+
+</TabItem>
+</Tabs>
+
+### How It Works
+
+1. **Declare your keys upfront** — `keys=` in Python, `as const` array in Node.js, `#[derive(BranchKey)]` enum in Rust. This is the recommended approach across all three languages: it catches typos and missing branches at build time
+2. The **key function** receives the current step's output and returns one of the declared keys
+3. Sayiir matches the key against named branches — only the matching branch executes
+4. If no branch matches and a **default** is set, the default runs; otherwise the workflow fails with `BranchKeyNotFound`
+5. `.done()` performs **exhaustiveness checks** — missing or orphan branches are caught at build time. In Rust, `#[derive(BranchKey)]` enums give you compile-time safety: the type system rejects typos and missing cases before the code runs. The `workflow!` macro supports typed keys via `route key_fn -> EnumType { Variant => [...] }`, which generates a compile-time match exhaustiveness check
+6. The output is a **`BranchEnvelope`** containing `branch` (the matched key) and `result` (the branch output)
+7. The branch result is checkpointed — on resume, the key function is not re-evaluated
+
+:::note[String keys for dynamic routing]
+All three languages also support plain string keys without upfront declaration — useful when routing keys are determined at runtime or workflows are built dynamically. In that case, omit `keys=` (Python), use a plain `string[]` instead of `as const` (Node.js), or use string-based `route` without `-> EnumType` (Rust). Exhaustiveness is not checked in this mode.
+:::
+
+### Multi-Step Branches
+
+Each branch can contain a chain of tasks:
+
+```python
+workflow = (
+    Flow("order-router")
+    .route(classify_order, keys=["express", "standard"])
+        .branch("express", validate_express, ship_express, notify_customer)
+        .branch("standard", validate_standard, ship_standard)
+    .done()
+    .then(send_confirmation)
+    .build()
+)
+```
+
+### Combining with Fork/Join
+
+Conditional branching composes naturally with other workflow primitives. You can branch after a fork/join, fork within a branch, or chain additional steps after a branch:

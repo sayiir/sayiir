@@ -20,7 +20,7 @@ from models import ResearchFindings, ResearchQuery, ResearchReport, SourceResult
 # Configuration
 # ---------------------------------------------------------------------------
 
-RETRY = RetryPolicy(max_retries=3, initial_delay_secs=1.0, backoff_multiplier=2.0)
+RETRY = 3
 DRAFTS_DIR = Path("reports/drafts")
 
 SYSTEM_PROMPT = """\
@@ -62,7 +62,7 @@ def parse_query(raw: dict) -> dict:
 
 
 @task(
-    timeout_secs=30,
+    timeout="30s",
     retries=RETRY,
     tags=["search", "external"],
     description="Search the web via DuckDuckGo",
@@ -83,7 +83,7 @@ def search_web(query: dict) -> dict:
 
 
 @task(
-    timeout_secs=30,
+    timeout="30s",
     retries=RETRY,
     tags=["search", "external"],
     description="Search Wikipedia via REST API",
@@ -116,7 +116,7 @@ def search_wikipedia(query: dict) -> dict:
 
 
 @task(
-    timeout_secs=30,
+    timeout="30s",
     retries=RETRY,
     tags=["search", "external"],
     description="Search academic papers on arxiv",
@@ -169,8 +169,8 @@ def merge_sources(branches: dict) -> dict:
 
 
 @task(
-    timeout_secs=120,
-    retries=RetryPolicy(max_retries=2, initial_delay_secs=2.0, backoff_multiplier=2.0),
+    timeout="2m",
+    retries=RetryPolicy(max_retries=2, initial_delay_secs=2.0),
     tags=["llm"],
     description="Synthesize sources into a research report using a local LLM",
 )

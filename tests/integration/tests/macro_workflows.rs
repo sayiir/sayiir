@@ -5,7 +5,7 @@ use sayiir_core::error::BoxError;
 use sayiir_core::registry::TaskRegistry;
 use sayiir_core::task::CoreTask;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
-use sayiir_macros::{task, workflow};
+use sayiir_macros::{BranchKey, task, workflow};
 use sayiir_persistence::SnapshotStore;
 use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::CheckpointingRunner;
@@ -119,8 +119,8 @@ async fn infallible_add(input: u32) -> u32 {
 
 #[test]
 fn task_basic_struct_generation() {
-    let task = AddTen::new();
-    assert_eq!(AddTen::task_id(), "add_ten");
+    let task = AddTenTask::new();
+    assert_eq!(AddTenTask::task_id(), "add_ten");
 
     let fut = task.run(5u32);
     let result = tokio::runtime::Runtime::new()
@@ -132,8 +132,8 @@ fn task_basic_struct_generation() {
 
 #[test]
 fn task_with_metadata() {
-    assert_eq!(Double::task_id(), "double");
-    let meta = Double::metadata();
+    assert_eq!(DoubleTask::task_id(), "double");
+    let meta = DoubleTask::metadata();
     assert!(meta.timeout.is_some());
     assert_eq!(
         meta.timeout.unwrap(),
@@ -149,7 +149,7 @@ fn task_with_metadata() {
 #[test]
 fn task_with_inject() {
     let mul = Arc::new(Multiplier { factor: 3 });
-    let task = Multiply::new(mul);
+    let task = MultiplyTask::new(mul);
 
     let fut = task.run(7u32);
     let result = tokio::runtime::Runtime::new()
@@ -161,12 +161,12 @@ fn task_with_inject() {
 
 #[test]
 fn task_custom_id() {
-    assert_eq!(Process::task_id(), "process_order");
+    assert_eq!(ProcessTask::task_id(), "process_order");
 }
 
 #[test]
 fn task_display_name_and_description() {
-    let meta = DescribedTask::metadata();
+    let meta = DescribedTaskTask::metadata();
     assert_eq!(meta.display_name.as_deref(), Some("Add Ten"));
     assert_eq!(meta.description.as_deref(), Some("Adds 10 to the input"));
 }
@@ -182,7 +182,7 @@ fn original_fn_preserved() {
 
 #[test]
 fn task_custom_error_type_ok() {
-    let task = FallibleCustomErr::new();
+    let task = FallibleCustomErrTask::new();
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(task.run(5u32))
@@ -192,7 +192,7 @@ fn task_custom_error_type_ok() {
 
 #[test]
 fn task_custom_error_type_err() {
-    let task = FallibleCustomErr::new();
+    let task = FallibleCustomErrTask::new();
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(task.run(0u32));
@@ -202,7 +202,7 @@ fn task_custom_error_type_err() {
 
 #[test]
 fn task_infallible_return() {
-    let task = InfallibleAdd::new();
+    let task = InfallibleAddTask::new();
     let result = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(task.run(8u32))
@@ -216,8 +216,8 @@ fn task_infallible_return() {
 fn task_register_into_registry() {
     let codec = Arc::new(JsonCodec);
     let mut registry = TaskRegistry::new();
-    AddTen::register(&mut registry, codec.clone(), AddTen::new());
-    Double::register(&mut registry, codec, Double::new());
+    AddTenTask::register(&mut registry, codec.clone(), AddTenTask::new());
+    DoubleTask::register(&mut registry, codec, DoubleTask::new());
 
     assert!(registry.contains("add_ten"));
     assert!(registry.contains("double"));
@@ -236,15 +236,15 @@ async fn task_macro_with_checkpointing_runner() {
 
     let codec = Arc::new(JsonCodec);
     let mut registry = TaskRegistry::new();
-    AddTen::register(&mut registry, codec.clone(), AddTen::new());
-    Double::register(&mut registry, codec.clone(), Double::new());
+    AddTenTask::register(&mut registry, codec.clone(), AddTenTask::new());
+    DoubleTask::register(&mut registry, codec.clone(), DoubleTask::new());
 
     let ctx = WorkflowContext::new("macro-test", codec, Arc::new(()));
     let workflow = WorkflowBuilder::new(ctx)
         .with_existing_registry(registry)
-        .then_registered::<<AddTen as CoreTask>::Output>(AddTen::task_id())
+        .then_registered::<<AddTenTask as CoreTask>::Output>(AddTenTask::task_id())
         .unwrap()
-        .then_registered::<<Double as CoreTask>::Output>(Double::task_id())
+        .then_registered::<<DoubleTask as CoreTask>::Output>(DoubleTask::task_id())
         .unwrap()
         .build()
         .unwrap();
@@ -271,9 +271,11 @@ async fn workflow_macro_linear() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let workflow = workflow!("linear-test", JsonCodec, TaskRegistry::new(),
-        add_ten => double
-    )
+    let workflow = workflow! {
+        name: "linear-test",
+        codec: JsonCodec,
+        steps: [add_ten, double]
+    }
     .unwrap();
 
     // 5 + 10 = 15, 15 * 2 = 30
@@ -291,10 +293,14 @@ async fn workflow_macro_inline_task() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let workflow = workflow!("inline-test", JsonCodec, TaskRegistry::new(),
-        add_five(x: u32) { Ok(x + 5) }
-        => double
-    )
+    let workflow = workflow! {
+        name: "inline-test",
+        codec: JsonCodec,
+        steps: [
+            add_five(x: u32) { Ok(x + 5) },
+            double,
+        ]
+    }
     .unwrap();
 
     // 10 + 5 = 15, 15 * 2 = 30
@@ -335,11 +341,11 @@ async fn workflow_macro_fork_join() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let workflow = workflow!("fork-join-test", JsonCodec, TaskRegistry::new(),
-        add_ten
-        => branch_a || branch_b
-        => join_branches
-    )
+    let workflow = workflow! {
+        name: "fork-join-test",
+        codec: JsonCodec,
+        steps: [add_ten, branch_a || branch_b, join_branches]
+    }
     .unwrap();
 
     let status = runner
@@ -358,9 +364,11 @@ async fn workflow_macro_signal() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
-    let workflow = workflow!("signal-test", JsonCodec, TaskRegistry::new(),
-        add_ten => signal "approval" => double
-    )
+    let workflow = workflow! {
+        name: "signal-test",
+        codec: JsonCodec,
+        steps: [add_ten, signal "approval", double]
+    }
     .unwrap();
 
     // 5 + 10 = 15, then parks at signal
@@ -381,6 +389,159 @@ async fn workflow_macro_signal() {
     // Resume — consumes the signal, then 15 * 2 = 30
     let status = runner
         .resume(workflow.workflow(), "signal-inst-1")
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── 8. workflow! macro — route ──────────────────────────────────────────
+
+#[task]
+async fn classify(input: u32) -> Result<String, BoxError> {
+    if input >= 100 {
+        Ok("big".to_string())
+    } else {
+        Ok("small".to_string())
+    }
+}
+
+#[task]
+async fn handle_big(input: u32) -> Result<u32, BoxError> {
+    Ok(input / 10)
+}
+
+#[task]
+async fn handle_small(input: u32) -> Result<u32, BoxError> {
+    Ok(input * 10)
+}
+
+#[task]
+async fn handle_default(input: u32) -> Result<u32, BoxError> {
+    Ok(input)
+}
+
+#[tokio::test]
+async fn workflow_macro_route() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow! {
+        name: "branch-on-test",
+        codec: JsonCodec,
+        steps: [
+            add_ten,
+            route classify {
+                "big" => [handle_big],
+                "small" => [handle_small],
+                _ => [handle_default],
+            },
+        ]
+    }
+    .unwrap();
+
+    // Input 5 → add_ten → 15 → classify → "small" → handle_small → 150
+    let status = runner
+        .run(workflow.workflow(), "branch-on-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+#[task]
+async fn unwrap_envelope(
+    envelope: sayiir_core::task::BranchEnvelope<u32>,
+) -> Result<u32, BoxError> {
+    Ok(envelope.result)
+}
+
+#[tokio::test]
+async fn workflow_macro_route_then_next() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow! {
+        name: "branch-on-next-test",
+        codec: JsonCodec,
+        steps: [
+            add_ten,
+            route classify {
+                "big" => [handle_big],
+                "small" => [handle_small],
+            },
+            unwrap_envelope,
+            double,
+        ]
+    }
+    .unwrap();
+
+    // Input 5 → add_ten → 15 → classify → "small" → handle_small → 150
+    // → unwrap_envelope → 150 → double → 300
+    let status = runner
+        .run(workflow.workflow(), "branch-on-next-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── 9. workflow! macro — typed route with BranchKey enum ────────────────
+
+#[derive(BranchKey)]
+enum Size {
+    Big,
+    Small,
+}
+
+#[tokio::test]
+async fn workflow_macro_typed_route() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow! {
+        name: "typed-route-test",
+        codec: JsonCodec,
+        steps: [
+            add_ten,
+            route classify -> Size {
+                Big => [handle_big],
+                Small => [handle_small],
+                _ => [handle_default],
+            },
+        ]
+    }
+    .unwrap();
+
+    // Input 5 → add_ten → 15 → classify → "small" → handle_small → 150
+    let status = runner
+        .run(workflow.workflow(), "typed-route-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+#[tokio::test]
+async fn workflow_macro_typed_route_then_next() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow! {
+        name: "typed-route-next-test",
+        codec: JsonCodec,
+        steps: [
+            add_ten,
+            route classify -> Size {
+                Big => [handle_big],
+                Small => [handle_small],
+            },
+            unwrap_envelope,
+            double,
+        ]
+    }
+    .unwrap();
+
+    // Input 5 → add_ten → 15 → classify → "small" → handle_small → 150
+    // → unwrap_envelope → 150 → double → 300
+    let status = runner
+        .run(workflow.workflow(), "typed-route-next-inst-1", 5u32)
         .await
         .unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));

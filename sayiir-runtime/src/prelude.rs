@@ -6,7 +6,8 @@
 
 // Runtime types
 pub use crate::{
-    CheckpointingRunner, InProcessRunner, PooledWorker, RuntimeError, WorkerHandle, WorkflowRunner,
+    CheckpointingRunner, InProcessRunner, PooledWorker, PooledWorkerBuilder, RuntimeError,
+    WorkerHandle, WorkflowRunExt, WorkflowRunner,
 };
 
 // Codecs
@@ -15,7 +16,11 @@ pub use crate::serialization::JsonCodec;
 #[cfg(feature = "rkyv")]
 pub use crate::serialization::RkyvCodec;
 
+// Codec traits
+pub use sayiir_core::codec::EnvelopeCodec;
+
 // Core workflow types (from sayiir-core)
+pub use sayiir_core::branch_key::BranchKey;
 pub use sayiir_core::context::WorkflowContext;
 pub use sayiir_core::registry::TaskRegistry;
 pub use sayiir_core::workflow::{Workflow, WorkflowBuilder, WorkflowStatus};
@@ -25,4 +30,4 @@ pub use sayiir_persistence::{InMemoryBackend, PersistentBackend};
 
 // Macros (from sayiir-macros)
 #[cfg(feature = "macros")]
-pub use sayiir_macros::{task, workflow};
+pub use sayiir_macros::{BranchKey, task, workflow};

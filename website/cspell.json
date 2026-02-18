@@ -66,7 +66,10 @@
     "deprioritizes",
     "seti",
     "rusqlite",
-    "Ollama"
+    "Ollama",
+    "fieldless",
+    "myhost",
+    "resumability"
   ],
   "flagWords": [],
   "dictionaries": ["softwareTerms", "typescript", "python", "rust", "node"]

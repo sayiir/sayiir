@@ -1,10 +1,17 @@
+//! Workflow execution context.
+//!
+//! [`WorkflowContext`] carries the workflow ID, codec, and user-supplied
+//! metadata through every task execution. With the `tokio` feature it can
+//! also be stored in task-local storage and retrieved via the
+//! [`sayiir_ctx!`](crate::sayiir_ctx) macro.
+
 use std::sync::Arc;
 
 /// Workflow execution context that provides access to metadata and codec.
 ///
 /// This context is always available as a plain struct. When the `tokio` feature
 /// is enabled, it can also be stored in task-local storage and retrieved via
-/// the [`sayiir_ctx!`] macro.
+/// the [`sayiir_ctx!`](crate::sayiir_ctx) macro.
 pub struct WorkflowContext<C, M> {
     /// The unique workflow identifier.
     pub workflow_id: Arc<str>,
@@ -34,16 +41,19 @@ impl<C, M> WorkflowContext<C, M> {
         }
     }
 
+    /// Returns the workflow identifier.
     #[must_use]
     pub fn workflow_id(&self) -> &str {
         &self.workflow_id
     }
 
+    /// Returns a clone of the codec `Arc`.
     #[must_use]
     pub fn codec(&self) -> Arc<C> {
         self.codec.clone()
     }
 
+    /// Returns a clone of the metadata `Arc`.
     #[must_use]
     pub fn metadata(&self) -> Arc<M> {
         self.metadata.clone()

@@ -62,31 +62,44 @@ pub enum ExecutionPosition {
     NotStarted,
     /// Execution is at the start of a task.
     /// The task ID indicates which task should be executed next.
-    AtTask { task_id: String },
+    AtTask {
+        /// ID of the task to execute next.
+        task_id: String,
+    },
     /// Execution is parked at a fork because one or more branches hit a delay.
     /// Completed branches have their results cached; delayed branches will
     /// re-execute (skipping cached sub-tasks) once `wake_at` passes.
     AtFork {
+        /// Fork node ID.
         fork_id: String,
+        /// Branch results collected so far.
         completed_branches: HashMap<String, TaskResult>,
+        /// Earliest time the fork can resume.
         wake_at: DateTime<Utc>,
     },
     /// Execution is at a join task, waiting for all branches.
     AtJoin {
+        /// Join task ID.
         join_id: String,
+        /// Branch results collected so far.
         completed_branches: HashMap<String, TaskResult>,
     },
     /// Execution is parked at a delay node, waiting for `wake_at`.
     AtDelay {
+        /// Delay node ID.
         delay_id: String,
+        /// When the delay was entered.
         entered_at: DateTime<Utc>,
+        /// When the delay expires.
         wake_at: DateTime<Utc>,
         /// First task ID after the delay (so backends can advance without traversing the workflow tree).
         next_task_id: Option<String>,
     },
     /// Execution is parked waiting for an external signal.
     AtSignal {
+        /// Signal node ID.
         signal_id: String,
+        /// Name of the signal being waited on.
         signal_name: String,
         /// Optional timeout deadline. `None` means wait indefinitely.
         wake_at: Option<DateTime<Utc>>,
@@ -235,6 +248,9 @@ impl From<SignalRequest> for PauseRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, strum::AsRefStr, strum::EnumDiscriminants)]
 #[strum_discriminants(name(SnapshotStatus))]
 #[strum_discriminants(derive(strum::EnumString, strum::AsRefStr))]
+#[strum_discriminants(
+    doc = "Discriminant-only version of [`WorkflowSnapshotState`] for lightweight status checks."
+)]
 pub enum WorkflowSnapshotState {
     /// Workflow is in progress.
     InProgress {

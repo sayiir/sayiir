@@ -119,6 +119,7 @@ impl PyDurableEngine {
                         &mut snapshot,
                         backend.as_ref(),
                         &executor,
+                        &JsonCodec,
                     )
                     .await;
 
@@ -195,6 +196,7 @@ impl PyDurableEngine {
                                 &mut snapshot,
                                 backend.as_ref(),
                                 &executor,
+                                &JsonCodec,
                             )
                             .await;
 

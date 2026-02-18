@@ -36,7 +36,7 @@ Use `run_durable_workflow` to checkpoint after each task. If the process crashes
 ```python
 from sayiir import task, Flow, run_durable_workflow, InMemoryBackend
 
-@task(timeout_secs=30)
+@task(timeout="30s")
 def process_order(order_id: int) -> dict:
     return {"order_id": order_id, "status": "processed"}
 

@@ -1,6 +1,6 @@
 """Order processing pipeline with validation, payment, and parallel inventory check."""
 
-from sayiir import Flow, RetryPolicy, run_durable_workflow, task
+from sayiir import Flow, run_durable_workflow, task
 
 
 @task
@@ -10,12 +10,7 @@ def validate_order(order: dict) -> dict:
     return {**order, "validated": True}
 
 
-@task(
-    timeout_secs=30,
-    retries=RetryPolicy(
-        max_retries=3, initial_delay_secs=1.0, backoff_multiplier=2.0
-    ),
-)
+@task(timeout="30s", retries=3)
 def charge_payment(order: dict) -> dict:
     # In production: call Stripe, Square, etc.
     return {**order, "payment_id": "pay_123", "charged": True}

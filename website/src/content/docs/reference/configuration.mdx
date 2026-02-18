@@ -15,15 +15,18 @@ Configure automatic retry behavior for tasks that may fail transiently.
 ```python
 from sayiir import RetryPolicy, task
 
-policy = RetryPolicy(
-    max_retries=3,
-    initial_delay_secs=1.0,
-    backoff_multiplier=2.0
-)
-
-@task(retries=policy)
+# Simple: int shorthand (uses 1s initial delay, 2× backoff)
+@task(retries=3)
 def flaky_task(data: dict) -> dict:
-    # May fail and retry with exponential backoff
+    return process(data)
+
+# Full control: custom backoff timing
+@task(retries=RetryPolicy(
+    max_retries=3,
+    initial_delay_secs=0.5,
+    backoff_multiplier=3.0,
+))
+def critical_task(data: dict) -> dict:
     return process(data)
 ```
 
@@ -130,8 +133,8 @@ Configure individual task behavior and documentation.
 from sayiir import task, RetryPolicy
 
 @task(
-    name="process_payment",
-    timeout_secs=30.0,
+    "process_payment",
+    timeout="30s",
     retries=RetryPolicy(max_retries=3, initial_delay_secs=2.0),
     tags=["payment", "external", "critical"],
     description="Processes customer payment via Stripe API"
@@ -656,9 +659,11 @@ JSON serialization using `serde_json`.
 ```rust
 use sayiir_runtime::prelude::*;
 
-let workflow = workflow!("example", JsonCodec, registry,
-    task_a => task_b
-).unwrap();
+let workflow = workflow! {
+    name: "example",
+    registry: registry,
+    steps: [task_a, task_b]
+}.unwrap();
 ```
 
 **Advantages:**
@@ -678,9 +683,12 @@ Zero-copy binary serialization using `rkyv`.
 ```rust
 use sayiir_runtime::serialization::RkyvCodec;
 
-let workflow = workflow!("example", RkyvCodec, registry,
-    task_a => task_b
-).unwrap();
+let workflow = workflow! {
+    name: "example",
+    codec: RkyvCodec,
+    registry: registry,
+    steps: [task_a, task_b]
+}.unwrap();
 ```
 
 **Advantages:**

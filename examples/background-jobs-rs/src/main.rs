@@ -18,16 +18,13 @@ async fn send_emails(recipients: Vec<String>) -> Result<String, BoxError> {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
-    let workflow = workflow!("email-pipeline", JsonCodec, TaskRegistry::new(),
-        fetch_recipients => send_emails
-    )
+    let workflow = workflow! {
+        name: "email-pipeline",
+        steps: [fetch_recipients, send_emails]
+    }
     .unwrap();
 
-    let backend = InMemoryBackend::new();
-    let runner = CheckpointingRunner::new(backend);
-    let status = runner
-        .run(workflow.workflow(), "campaign-001", "summer-sale".to_string())
-        .await?;
+    let status = workflow.run_once("summer-sale".to_string()).await?;
 
     println!("{:?}", status);
     Ok(())

@@ -8,16 +8,13 @@ async fn greet(name: String) -> Result<String, BoxError> {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
-    let workflow = workflow!("hello", JsonCodec, TaskRegistry::new(),
-        greet
-    )
+    let workflow = workflow! {
+        name: "hello",
+        steps: [greet]
+    }
     .unwrap();
 
-    let backend = InMemoryBackend::new();
-    let runner = CheckpointingRunner::new(backend);
-    let status = runner
-        .run(workflow.workflow(), "hello-001", "World".to_string())
-        .await?;
+    let status = workflow.run_once("World".to_string()).await?;
 
     println!("{:?}", status);
     Ok(())

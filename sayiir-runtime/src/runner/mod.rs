@@ -5,8 +5,8 @@
 //! such as in-process execution, distributed execution, or execution with
 //! persistence and recovery.
 
-use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
+use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::workflow::{Workflow, WorkflowStatus};
 use std::future::Future;
 
@@ -33,8 +33,11 @@ pub trait WorkflowRunner: Send + Sync {
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::EncodeValue<Input>;
+        C: Codec + EnvelopeCodec + sealed::EncodeValue<Input>;
 }
 
 pub mod distributed;
+pub mod ext;
 pub mod in_process;
+
+pub use ext::WorkflowRunExt;
