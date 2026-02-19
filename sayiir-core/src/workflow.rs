@@ -172,6 +172,19 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Get the next continuation in the chain, if any.
+    ///
+    #[must_use]
+    pub fn get_next(&self) -> Option<&WorkflowContinuation> {
+        match self {
+            Self::Task { next, .. }
+            | Self::Delay { next, .. }
+            | Self::AwaitSignal { next, .. }
+            | Self::Branch { next, .. } => next.as_deref(),
+            Self::Fork { join, .. } => join.as_deref(),
+        }
+    }
+
     /// Get the first task ID from this continuation.
     ///
     /// For a `Task`, returns its ID. For a `Fork`, returns the first task ID

@@ -1,24 +1,28 @@
 //! Sync, async, and checkpointing execution loops.
 
+use std::future::Future;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+
 use backon::{BlockingRetryable, Retryable};
 use bytes::Bytes;
 use sayiir_core::codec::EnvelopeCodec;
 use sayiir_core::error::{BoxError, WorkflowError};
+use sayiir_core::snapshot::ExecutionPosition;
 use sayiir_core::workflow::WorkflowContinuation;
 use sayiir_persistence::SignalStore;
-use std::future::Future;
-use std::sync::Arc;
 
 use crate::error::RuntimeError;
 
+use super::control_flow::{
+    ParkReason, StepOutcome, StepResult, compute_signal_timeout, compute_wake_at,
+    save_park_checkpoint,
+};
 use super::fork::{
     JoinResolution, collect_cached_branches, execute_fork_branches_sequential, resolve_join,
     settle_fork_outcome,
 };
-use super::helpers::{
-    check_guards, execute_task_step, park_at_delay, park_at_signal, policy_to_backoff,
-    resolve_branch,
-};
+use super::helpers::{check_guards, execute_task_step, policy_to_backoff, resolve_branch};
 
 // ── Sync ────────────────────────────────────────────────────────────────
 
@@ -408,7 +412,7 @@ where
     let mut current_input = input;
 
     loop {
-        match current {
+        let step: StepResult = match current {
             WorkflowContinuation::Task {
                 id,
                 timeout,
@@ -427,37 +431,22 @@ where
                     |i| execute_task(id, i),
                 )
                 .await?;
-
-                match next {
-                    Some(next_continuation) => {
-                        current = next_continuation;
-                        current_input = output;
-                    }
-                    None => return Ok(output),
-                }
+                Ok(ControlFlow::Continue(output))
             }
             WorkflowContinuation::Delay { id, duration, next } => {
                 check_guards(backend, &snapshot.instance_id, Some(id)).await?;
 
                 if snapshot.get_task_result(id).is_some() {
-                    match next {
-                        Some(n) => {
-                            current = n;
-                            continue;
-                        }
-                        None => return Ok(current_input),
-                    }
+                    Ok(ControlFlow::Continue(current_input.clone()))
+                } else {
+                    let wake_at = compute_wake_at(duration)?;
+                    Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
+                        delay_id: id.clone(),
+                        wake_at,
+                        next_task_id: next.as_deref().map(|n| n.first_task_id().to_string()),
+                        passthrough: current_input.clone(),
+                    })))
                 }
-
-                return Err(park_at_delay(
-                    id,
-                    duration,
-                    next.as_deref(),
-                    current_input,
-                    snapshot,
-                    backend,
-                )
-                .await);
             }
             WorkflowContinuation::AwaitSignal {
                 id,
@@ -467,43 +456,43 @@ where
             } => {
                 check_guards(backend, &snapshot.instance_id, Some(id)).await?;
 
-                // If we already consumed this signal (on resume), skip it
                 if snapshot.get_task_result(id).is_some() {
-                    match next {
-                        Some(n) => {
-                            current = n;
-                            // Use the signal payload as input for the next step
-                            current_input =
-                                snapshot.get_task_result_bytes(id).unwrap_or(current_input);
-                            continue;
+                    let payload = snapshot
+                        .get_task_result_bytes(id)
+                        .unwrap_or(current_input.clone());
+                    Ok(ControlFlow::Continue(payload))
+                } else {
+                    // Try to consume a buffered signal before parking
+                    match backend
+                        .consume_event(&snapshot.instance_id, signal_name)
+                        .await
+                    {
+                        Ok(Some(payload)) => {
+                            snapshot.mark_task_completed(id.clone(), payload);
+                            if let Some(next_cont) = next.as_deref() {
+                                snapshot.update_position(ExecutionPosition::AtTask {
+                                    task_id: next_cont.first_task_id().to_string(),
+                                });
+                            }
+                            backend.save_snapshot(snapshot).await?;
+                            let output = snapshot
+                                .get_task_result_bytes(id)
+                                .unwrap_or(current_input.clone());
+                            Ok(ControlFlow::Continue(output))
                         }
-                        None => return Ok(current_input),
+                        Ok(None) => Ok(ControlFlow::Break(StepOutcome::Park(
+                            ParkReason::AwaitingSignal {
+                                signal_id: id.clone(),
+                                signal_name: signal_name.clone(),
+                                timeout: compute_signal_timeout(timeout.as_ref()),
+                                next_task_id: next
+                                    .as_deref()
+                                    .map(|n| n.first_task_id().to_string()),
+                            },
+                        ))),
+                        Err(e) => Err(RuntimeError::from(e)),
                     }
                 }
-
-                let err = park_at_signal(
-                    id,
-                    signal_name,
-                    timeout.as_ref(),
-                    next.as_deref(),
-                    snapshot,
-                    backend,
-                )
-                .await;
-
-                // If the signal was already buffered, park_at_signal consumed it
-                // and updated the snapshot — continue execution
-                if matches!(err, RuntimeError::Workflow(WorkflowError::SignalConsumed)) {
-                    if let Some(n) = next {
-                        current = n;
-                        current_input = snapshot.get_task_result_bytes(id).unwrap_or(current_input);
-                        continue;
-                    }
-                    let output = snapshot.get_task_result_bytes(id).unwrap_or(current_input);
-                    return Ok(output);
-                }
-
-                return Err(err);
             }
             WorkflowContinuation::Fork {
                 id: fork_id,
@@ -530,66 +519,67 @@ where
                     };
 
                 match resolve_join(join.as_deref(), &branch_results, envelope_codec)? {
-                    JoinResolution::Continue { next, input } => {
-                        current = next;
-                        current_input = input;
+                    JoinResolution::Continue { input, .. } => Ok(ControlFlow::Continue(input)),
+                    JoinResolution::Done(output) => {
+                        Ok(ControlFlow::Break(StepOutcome::Done(output)))
                     }
-                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
             WorkflowContinuation::Branch {
                 id,
                 branches,
                 default,
-                next,
                 ..
             } => {
                 check_guards(backend, &snapshot.instance_id, Some(id)).await?;
 
-                // Check if the branch result is already cached (resume case)
                 if let Some(result) = snapshot.get_task_result(id) {
-                    match next {
-                        Some(n) => {
-                            current = n;
-                            current_input = result.output.clone();
-                            continue;
-                        }
-                        None => return Ok(result.output.clone()),
-                    }
-                }
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let key_bytes =
+                        execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())
+                            .await
+                            .map_err(RuntimeError::from)?;
+                    let (key, chosen) = resolve_branch(
+                        id,
+                        &key_bytes,
+                        branches,
+                        default.as_deref(),
+                        envelope_codec,
+                    )?;
+                    let branch_output = super::fork::execute_branch_with_checkpointing(
+                        chosen,
+                        current_input.clone(),
+                        &snapshot.instance_id,
+                        backend,
+                        execute_task,
+                        envelope_codec,
+                    )
+                    .await?;
 
-                let key_bytes =
-                    execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())
-                        .await
+                    let envelope_bytes = envelope_codec
+                        .encode_branch_envelope(&key, &branch_output)
                         .map_err(RuntimeError::from)?;
-                let (key, chosen) =
-                    resolve_branch(id, &key_bytes, branches, default.as_deref(), envelope_codec)?;
-                let branch_output = super::fork::execute_branch_with_checkpointing(
-                    chosen,
-                    current_input.clone(),
-                    &snapshot.instance_id,
-                    backend,
-                    execute_task,
-                    envelope_codec,
-                )
-                .await?;
 
-                // Wrap in discriminated envelope
-                let envelope_bytes = envelope_codec
-                    .encode_branch_envelope(&key, &branch_output)
-                    .map_err(RuntimeError::from)?;
+                    snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
+                    backend.save_snapshot(snapshot).await?;
 
-                // Checkpoint the branch result
-                snapshot.mark_task_completed(id.clone(), envelope_bytes.clone());
-                backend.save_snapshot(snapshot).await?;
-
-                match next {
-                    Some(next_cont) => {
-                        current = next_cont;
-                        current_input = envelope_bytes;
-                    }
-                    None => return Ok(envelope_bytes),
+                    Ok(ControlFlow::Continue(envelope_bytes))
                 }
+            }
+        };
+
+        match step? {
+            ControlFlow::Continue(output) => match current.get_next() {
+                Some(next) => {
+                    current = next;
+                    current_input = output;
+                }
+                None => return Ok(output),
+            },
+            ControlFlow::Break(StepOutcome::Done(output)) => return Ok(output),
+            ControlFlow::Break(StepOutcome::Park(reason)) => {
+                return Err(save_park_checkpoint(reason, snapshot, backend).await);
             }
         }
     }

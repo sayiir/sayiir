@@ -1,17 +1,22 @@
 //! Fork/join/branch execution.
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::ops::ControlFlow;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use sayiir_core::codec::EnvelopeCodec;
 use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::snapshot::{ExecutionPosition, TaskResult, WorkflowSnapshot};
 use sayiir_core::workflow::WorkflowContinuation;
 use sayiir_persistence::{SignalStore, SnapshotStore};
-use std::collections::HashMap;
-use std::future::Future;
-use std::sync::Arc;
 
 use crate::error::RuntimeError;
 
+use super::control_flow::{
+    ParkReason, StepOutcome, StepResult, compute_wake_at, save_branch_park_checkpoint,
+};
 use super::helpers::{
     branch_execute_or_skip_task, check_guards, resolve_branch, retry_with_checkpoint,
 };
@@ -98,70 +103,6 @@ pub(crate) async fn park_at_fork<B: SnapshotStore>(
     *snapshot = updated_snapshot;
 
     WorkflowError::Waiting { wake_at }.into()
-}
-
-/// Park a branch at a delay node.
-///
-/// Computes `wake_at`, saves the current input as a pass-through result via
-/// `save_task_result`, and returns `WorkflowError::Waiting`.
-///
-/// Returns `RuntimeError` (not `Result`) — the caller uses
-/// `return Err(park_branch_at_delay(...).await)`.
-pub(crate) async fn park_branch_at_delay<B: SnapshotStore>(
-    id: &str,
-    duration: &std::time::Duration,
-    current_input: Bytes,
-    instance_id: &str,
-    backend: &B,
-) -> RuntimeError {
-    tracing::info!(delay_id = %id, ?duration, "parking branch at delay");
-    let now = chrono::Utc::now();
-    let wake_at = match chrono::Duration::from_std(*duration) {
-        Ok(d) => now + d,
-        Err(e) => return WorkflowError::ResumeError(e.to_string()).into(),
-    };
-    if let Err(e) = backend
-        .save_task_result(instance_id, id, current_input)
-        .await
-    {
-        return RuntimeError::from(e);
-    }
-    WorkflowError::Waiting { wake_at }.into()
-}
-
-/// Park a branch at a signal node.
-///
-/// Computes optional `wake_at`, saves the current input as a pass-through
-/// result via `save_task_result`, and returns `WorkflowError::AwaitingSignal`.
-///
-/// Returns `RuntimeError` (not `Result`) — the caller uses
-/// `return Err(park_branch_at_signal(...).await)`.
-pub(crate) async fn park_branch_at_signal<B: SnapshotStore>(
-    id: &str,
-    signal_name: &str,
-    timeout: Option<&std::time::Duration>,
-    current_input: Bytes,
-    instance_id: &str,
-    backend: &B,
-) -> RuntimeError {
-    tracing::info!(signal_id = %id, %signal_name, "parking branch at signal");
-    let wake_at = timeout.and_then(|d| {
-        chrono::Duration::from_std(*d)
-            .ok()
-            .map(|cd| chrono::Utc::now() + cd)
-    });
-    if let Err(e) = backend
-        .save_task_result(instance_id, id, current_input)
-        .await
-    {
-        return RuntimeError::from(e);
-    }
-    WorkflowError::AwaitingSignal {
-        signal_id: id.to_string(),
-        signal_name: signal_name.to_string(),
-        wake_at,
-    }
-    .into()
 }
 
 /// Sync branch results into the local snapshot and save the join position.
@@ -398,12 +339,11 @@ where
     let mut current_input = input;
 
     loop {
-        match current {
+        let step: StepResult = match current {
             WorkflowContinuation::Task {
                 id,
                 timeout,
                 retry_policy,
-                next,
                 ..
             } => {
                 let output = retry_with_checkpoint(
@@ -426,66 +366,42 @@ where
                     },
                 )
                 .await?;
-
-                match next {
-                    Some(next_continuation) => {
-                        current = next_continuation;
-                        current_input = output;
-                    }
-                    None => return Ok(output),
-                }
+                Ok(ControlFlow::Continue(output))
             }
-            WorkflowContinuation::Delay { id, duration, next } => {
-                // Skip if pass-through was already saved (resume case)
+            WorkflowContinuation::Delay { id, duration, .. } => {
                 if let Some(result) = snapshot.get_task_result(id) {
                     tracing::debug!(delay_id = %id, "delay already completed in branch, skipping");
-                    match next {
-                        Some(next_cont) => {
-                            current = next_cont;
-                            current_input = result.output.clone();
-                            continue;
-                        }
-                        None => return Ok(result.output.clone()),
-                    }
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let wake_at = compute_wake_at(duration)?;
+                    Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
+                        delay_id: id.clone(),
+                        wake_at,
+                        next_task_id: None,
+                        passthrough: current_input.clone(),
+                    })))
                 }
-
-                return Err(park_branch_at_delay(
-                    id,
-                    duration,
-                    current_input,
-                    instance_id,
-                    backend,
-                )
-                .await);
             }
             WorkflowContinuation::AwaitSignal {
                 id,
                 signal_name,
                 timeout,
-                next,
+                ..
             } => {
-                // Skip if signal was already consumed (resume case)
                 if let Some(result) = snapshot.get_task_result(id) {
                     tracing::debug!(signal_id = %id, %signal_name, "signal already consumed in branch, skipping");
-                    match next {
-                        Some(next_cont) => {
-                            current = next_cont;
-                            current_input = result.output.clone();
-                            continue;
-                        }
-                        None => return Ok(result.output.clone()),
-                    }
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let wake_at = super::control_flow::compute_signal_timeout(timeout.as_ref());
+                    Ok(ControlFlow::Break(StepOutcome::Park(
+                        ParkReason::AwaitingSignal {
+                            signal_id: id.clone(),
+                            signal_name: signal_name.clone(),
+                            timeout: wake_at,
+                            next_task_id: None,
+                        },
+                    )))
                 }
-
-                return Err(park_branch_at_signal(
-                    id,
-                    signal_name,
-                    timeout.as_ref(),
-                    current_input,
-                    instance_id,
-                    backend,
-                )
-                .await);
             }
             WorkflowContinuation::Fork { branches, join, .. } => {
                 let branch_results = execute_nested_branches(
@@ -499,67 +415,67 @@ where
                 .await?;
 
                 match resolve_join(join.as_deref(), &branch_results, envelope_codec)? {
-                    JoinResolution::Continue { next, input } => {
-                        current = next;
-                        current_input = input;
+                    JoinResolution::Continue { input, .. } => Ok(ControlFlow::Continue(input)),
+                    JoinResolution::Done(output) => {
+                        Ok(ControlFlow::Break(StepOutcome::Done(output)))
                     }
-                    JoinResolution::Done(output) => return Ok(output),
                 }
             }
             WorkflowContinuation::Branch {
                 id,
                 branches,
                 default,
-                next,
                 ..
             } => {
-                // Check if already cached (resume case)
                 if let Some(result) = snapshot.get_task_result(id) {
-                    match next {
-                        Some(n) => {
-                            current = n;
-                            current_input = result.output.clone();
-                            continue;
-                        }
-                        None => return Ok(result.output.clone()),
-                    }
-                }
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let key_bytes =
+                        execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())
+                            .await
+                            .map_err(RuntimeError::from)?;
+                    let (key, chosen) = resolve_branch(
+                        id,
+                        &key_bytes,
+                        branches,
+                        default.as_deref(),
+                        envelope_codec,
+                    )?;
 
-                let key_bytes =
-                    execute_task(&sayiir_core::workflow::key_fn_id(id), current_input.clone())
-                        .await
-                        .map_err(RuntimeError::from)?;
-                let (key, chosen) =
-                    resolve_branch(id, &key_bytes, branches, default.as_deref(), envelope_codec)?;
-
-                // Execute chosen sub-continuation (recursive)
-                let branch_output = Box::pin(execute_branch_with_checkpointing(
-                    chosen,
-                    current_input.clone(),
-                    instance_id,
-                    backend,
-                    execute_task,
-                    envelope_codec,
-                ))
-                .await?;
-
-                // Wrap in discriminated envelope
-                let envelope_bytes = envelope_codec
-                    .encode_branch_envelope(&key, &branch_output)
-                    .map_err(RuntimeError::from)?;
-
-                // Save result
-                backend
-                    .save_task_result(instance_id, id, envelope_bytes.clone())
+                    let branch_output = Box::pin(execute_branch_with_checkpointing(
+                        chosen,
+                        current_input.clone(),
+                        instance_id,
+                        backend,
+                        execute_task,
+                        envelope_codec,
+                    ))
                     .await?;
 
-                match next {
-                    Some(next_cont) => {
-                        current = next_cont;
-                        current_input = envelope_bytes;
-                    }
-                    None => return Ok(envelope_bytes),
+                    let envelope_bytes = envelope_codec
+                        .encode_branch_envelope(&key, &branch_output)
+                        .map_err(RuntimeError::from)?;
+
+                    backend
+                        .save_task_result(instance_id, id, envelope_bytes.clone())
+                        .await?;
+
+                    Ok(ControlFlow::Continue(envelope_bytes))
                 }
+            }
+        };
+
+        match step? {
+            ControlFlow::Continue(output) => match current.get_next() {
+                Some(next) => {
+                    current = next;
+                    current_input = output;
+                }
+                None => return Ok(output),
+            },
+            ControlFlow::Break(StepOutcome::Done(output)) => return Ok(output),
+            ControlFlow::Break(StepOutcome::Park(reason)) => {
+                return Err(save_branch_park_checkpoint(reason, instance_id, backend).await);
             }
         }
     }
