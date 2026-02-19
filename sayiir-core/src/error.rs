@@ -152,13 +152,6 @@ pub enum WorkflowError {
         /// Optional timeout deadline.
         wake_at: Option<chrono::DateTime<chrono::Utc>>,
     },
-
-    /// A buffered signal was consumed during park — execution should continue.
-    ///
-    /// This is an internal sentinel used by `park_at_signal` when a signal is
-    /// already buffered. The executor should re-enter the loop.
-    #[error("Signal consumed (internal)")]
-    SignalConsumed,
 }
 
 impl WorkflowError {

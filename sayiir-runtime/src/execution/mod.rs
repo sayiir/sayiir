@@ -3,6 +3,7 @@
 //! Provides generic execution functions that can be used by different runners
 //! (in-process, Python bindings, etc.) by supplying task execution callbacks.
 
+pub(crate) mod control_flow;
 mod executors;
 mod fork;
 mod helpers;
@@ -24,14 +25,13 @@ mod tests;
 // ── helpers ─────────────────────────────────────────────────────────────
 pub(crate) use helpers::{
     ResumeParkedPosition, branch_execute_or_skip_task, check_guards, execute_or_skip_task,
-    park_at_delay, park_at_signal, retry_with_checkpoint, set_deadline_if_needed,
+    retry_with_checkpoint, set_deadline_if_needed,
 };
 
 // ── fork ────────────────────────────────────────────────────────────────
 pub use fork::serialize_branch_results;
 pub(crate) use fork::{
-    ForkBranchOutcome, JoinResolution, collect_cached_branches, park_branch_at_delay,
-    park_branch_at_signal, resolve_join, settle_fork_outcome,
+    ForkBranchOutcome, JoinResolution, collect_cached_branches, resolve_join, settle_fork_outcome,
 };
 
 // ── executors ───────────────────────────────────────────────────────────
