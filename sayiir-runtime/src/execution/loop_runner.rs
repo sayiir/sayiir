@@ -1,0 +1,186 @@
+//! Shared loop iteration logic.
+//!
+//! Deduplicates the decode → decision → max-iterations-policy pattern that was
+//! previously copy-pasted across all six execution paths (sync, async,
+//! checkpointing callback, branch checkpointing, runner main, runner branch).
+
+use std::future::Future;
+use std::ops::ControlFlow;
+
+use bytes::Bytes;
+use sayiir_core::codec::{EnvelopeCodec, LoopDecision};
+use sayiir_core::error::WorkflowError;
+use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot};
+use sayiir_core::workflow::{MaxIterationsPolicy, WorkflowContinuation};
+use sayiir_persistence::SnapshotStore;
+
+use crate::error::RuntimeError;
+
+/// Final output of a loop (`Break` arm of `ControlFlow`).
+pub(crate) struct LoopExit(pub Bytes);
+
+/// Input for the next iteration (`Continue` arm of `ControlFlow`).
+pub(crate) struct LoopNext(pub Bytes);
+
+/// Configuration for a loop, extracted from [`WorkflowContinuation::Loop`].
+pub(crate) struct LoopConfig<'a> {
+    pub id: &'a str,
+    pub body: &'a WorkflowContinuation,
+    pub max_iterations: u32,
+    pub on_max: MaxIterationsPolicy,
+    pub start_iteration: u32,
+}
+
+/// Decode a loop body's raw output and resolve the iteration decision.
+///
+/// Returns `Break(LoopExit)` when the loop should exit (body returned
+/// [`LoopDecision::Done`] or max-iterations was reached with
+/// [`MaxIterationsPolicy::ExitWithLast`]).
+///
+/// Returns `Continue(LoopNext)` when the body returned
+/// [`LoopDecision::Again`] and more iterations remain.
+///
+/// Returns `Err(MaxIterationsExceeded)` when max-iterations is reached
+/// with [`MaxIterationsPolicy::Fail`].
+pub(crate) fn resolve_loop_iteration(
+    output: &Bytes,
+    iteration: u32,
+    cfg: &LoopConfig<'_>,
+    codec: &impl EnvelopeCodec,
+) -> Result<ControlFlow<LoopExit, LoopNext>, RuntimeError> {
+    let (decision, inner) = codec
+        .decode_loop_result(output)
+        .map_err(RuntimeError::from)?;
+    match decision {
+        LoopDecision::Done => Ok(ControlFlow::Break(LoopExit(inner))),
+        LoopDecision::Again => {
+            if iteration + 1 >= cfg.max_iterations {
+                match cfg.on_max {
+                    MaxIterationsPolicy::Fail => Err(WorkflowError::MaxIterationsExceeded {
+                        loop_id: cfg.id.to_string(),
+                        max_iterations: cfg.max_iterations,
+                    }
+                    .into()),
+                    MaxIterationsPolicy::ExitWithLast => Ok(ControlFlow::Break(LoopExit(inner))),
+                }
+            } else {
+                Ok(ControlFlow::Continue(LoopNext(inner)))
+            }
+        }
+    }
+}
+
+/// Optional snapshot bookkeeping for loop iterations.
+///
+/// Default methods are no-ops, used by non-checkpointing executors.
+#[allow(unused_variables)]
+pub(crate) trait LoopHooks: Send {
+    /// Clear body task results from the snapshot after each iteration.
+    fn clear_body_tasks(&mut self, body: &WorkflowContinuation) {}
+
+    /// Called when the loop exits (Done or `ExitWithLast`).
+    fn on_loop_exit(&mut self, loop_id: &str) {}
+
+    /// Checkpoint iteration progress (set iteration counter, optionally
+    /// update position, save snapshot).
+    fn on_iteration_progress(
+        &mut self,
+        loop_id: &str,
+        next_iteration: u32,
+        body: &WorkflowContinuation,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send {
+        async { Ok(()) }
+    }
+}
+
+/// No-op hooks for executors that don't checkpoint.
+pub(crate) struct NoHooks;
+impl LoopHooks for NoHooks {}
+
+/// Snapshot-aware hooks for checkpointing executors.
+///
+/// When `track_position` is `true` (main executor path), updates
+/// [`ExecutionPosition::InLoop`] and saves the snapshot after each
+/// iteration. When `false` (branch executor path), only updates the
+/// iteration counter without position tracking.
+pub(crate) struct CheckpointingLoopHooks<'a, B> {
+    pub snapshot: &'a mut WorkflowSnapshot,
+    pub backend: &'a B,
+    pub track_position: bool,
+}
+
+impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
+    fn clear_body_tasks(&mut self, body: &WorkflowContinuation) {
+        let body_ser = body.to_serializable();
+        for tid in &body_ser.task_ids() {
+            self.snapshot.remove_task_result(tid);
+        }
+    }
+
+    fn on_loop_exit(&mut self, loop_id: &str) {
+        self.snapshot.clear_loop_iteration(loop_id);
+    }
+
+    async fn on_iteration_progress(
+        &mut self,
+        loop_id: &str,
+        next_iteration: u32,
+        body: &WorkflowContinuation,
+    ) -> Result<(), RuntimeError> {
+        self.snapshot.set_loop_iteration(loop_id, next_iteration);
+        if self.track_position {
+            self.snapshot.update_position(ExecutionPosition::InLoop {
+                loop_id: loop_id.to_string(),
+                iteration: next_iteration,
+                next_task_id: Some(body.first_task_id().to_string()),
+            });
+            self.backend.save_snapshot(self.snapshot).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Execute a loop body repeatedly, resolving each iteration's decision.
+///
+/// Generic over body execution (async closure) and snapshot hooks.
+/// The sync executor uses [`resolve_loop_iteration`] directly instead.
+pub(crate) async fn run_loop_async<F, Fut, H, E>(
+    cfg: &LoopConfig<'_>,
+    initial_input: Bytes,
+    codec: &E,
+    execute_body: F,
+    hooks: &mut H,
+) -> Result<Bytes, RuntimeError>
+where
+    F: Fn(Bytes) -> Fut,
+    Fut: Future<Output = Result<Bytes, RuntimeError>>,
+    H: LoopHooks,
+    E: EnvelopeCodec,
+{
+    let mut loop_input = initial_input;
+
+    for iteration in cfg.start_iteration..cfg.max_iterations {
+        let output = execute_body(loop_input.clone()).await?;
+
+        hooks.clear_body_tasks(cfg.body);
+
+        match resolve_loop_iteration(&output, iteration, cfg, codec)? {
+            ControlFlow::Break(LoopExit(inner)) => {
+                hooks.on_loop_exit(cfg.id);
+                return Ok(inner);
+            }
+            ControlFlow::Continue(LoopNext(inner)) => {
+                hooks
+                    .on_iteration_progress(cfg.id, iteration + 1, cfg.body)
+                    .await?;
+                loop_input = inner;
+            }
+        }
+    }
+
+    Err(WorkflowError::MaxIterationsExceeded {
+        loop_id: cfg.id.to_string(),
+        max_iterations: cfg.max_iterations,
+    }
+    .into())
+}

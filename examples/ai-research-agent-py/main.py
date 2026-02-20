@@ -1,8 +1,8 @@
 """AI Research Agent — durable workflow that searches, synthesizes, and saves.
 
-Demonstrates: fork/join, conditional branching, retries, timeouts, signals,
-Pydantic models, and durable checkpointing. If the process crashes at any
-point, resume picks up from the last completed step.
+Demonstrates: fork/join, loops (iterative refinement), retries, timeouts,
+signals, Pydantic models, and durable checkpointing. If the process crashes
+at any point, resume picks up from the last completed step.
 
 Usage:
     python main.py "What are the latest advances in battery technology?"
@@ -23,25 +23,21 @@ from pathlib import Path
 from sayiir import (
     Flow,
     InMemoryBackend,
+    OnMax,
     resume_workflow,
     run_durable_workflow,
     send_signal,
 )
 
 from tasks import (
-    assess_quality,
-    extract_verdict,
-    flag_insufficient,
     merge_sources,
     parse_query,
-    pass_through,
-    revise_report,
+    refine_report,
     save_draft,
     save_report,
     search_arxiv,
     search_web,
     search_wikipedia,
-    synthesize,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,16 +53,8 @@ workflow = (
         .branch(search_wikipedia)
         .branch(search_arxiv)
     .join(merge_sources)
-    # Synthesize findings into a report
-    .then(synthesize)
-    # Quality gate — LLM self-assesses the report
-    .then(assess_quality)
-    .route(extract_verdict, keys=["publish", "revise", "insufficient"])
-        .branch("publish", pass_through)          # Ready as-is
-        .branch("revise", revise_report)           # LLM improves the report
-        .branch("insufficient", flag_insufficient) # Flag with warning header
-    .done()
-    # Save draft for human review (extracts report from BranchEnvelope)
+    # Refine loop: synthesize → assess → revise (up to 3 iterations)
+    .loop(refine_report, max_iterations=3, on_max=OnMax.EXIT_WITH_LAST)
     .then(save_draft)
     # Human approval before saving
     .wait_for_signal("human_approval", timeout=timedelta(hours=48))
@@ -126,7 +114,7 @@ def main() -> None:
         print(f"Depth: {args.depth}, Max sources per provider: {args.max_sources}")
         print()
 
-        # Run the workflow — it will park at wait_for_signal after quality routing
+        # Run the workflow — it will park at wait_for_signal after the refine loop
         status = run_durable_workflow(workflow, instance_id, query, backend=backend)
 
     if status.is_awaiting_signal():
@@ -159,7 +147,7 @@ def main() -> None:
 
 
 def _find_draft(topic: str) -> Path | None:
-    """Find the draft JSON file saved by the synthesize task."""
+    """Find the draft JSON file saved by the save_draft task."""
     import re
 
     drafts_dir = Path("reports/drafts")

@@ -1,11 +1,11 @@
 ---
 title: Roadmap
-description: What's planned for Sayiir — workflow context, loops, observability, child workflows, edge runtimes, and more
+description: What's planned for Sayiir — workflow context, observability, child workflows, edge runtimes, and more
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, conditional branching, retries, signals, and crash recovery — all with zero infrastructure.
+Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, conditional branching, loops, retries, signals, and crash recovery — all with zero infrastructure.
 
 This page is about what's missing and what we're building next. We're honest about gaps because that's how you decide if Sayiir is right for your use case today, or if you should wait.
 
@@ -40,6 +40,9 @@ These features are stable and production-ready across Rust, Python, and Node.js:
   <Card title="Python & Node.js bindings" icon="approve-check-circle">
     Thin wrappers around the shared Rust core. Pydantic and Zod integration.
   </Card>
+  <Card title="Loops with exit conditions" icon="approve-check-circle">
+    Iterative workflows with `LoopResult` (again/done). Max iterations policy, durable checkpointing per iteration.
+  </Card>
   <Card title="PostgreSQL backend" icon="approve-check-circle">
     Production-grade persistence with ACID transactions, claim-based distribution, and snapshot history.
   </Card>
@@ -69,33 +72,6 @@ def search_web(query: dict, ctx: WorkflowContext) -> list[dict]:
     results = do_search(query["topic"], depth)
     ctx.set("web_results_count", len(results))
     return results
-```
-
-### Loops with Exit Conditions
-
-**Status:** Planned
-
-Sayiir's DAG model is acyclic by definition — no loops. This prevents iterative patterns like "try a tool, check if the result is good enough, try again if not."
-
-**What it enables:**
-- Iterative AI agents that refine their output
-- Polling workflows that wait for external conditions
-- Retry-with-different-strategy patterns
-
-**Proposed API:**
-
-```python
-workflow = (
-    Flow("iterative-agent")
-    .then(initial_attempt)
-    .loop(
-        refine_and_check,
-        until=lambda result: result["quality_score"] > 0.8,
-        max_iterations=5,
-    )
-    .then(finalize)
-    .build()
-)
 ```
 
 ### Child Workflows

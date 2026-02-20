@@ -20,6 +20,7 @@ use super::control_flow::{
 use super::helpers::{
     branch_execute_or_skip_task, check_guards, resolve_branch, retry_with_checkpoint,
 };
+use super::loop_runner::{CheckpointingLoopHooks, LoopConfig, run_loop_async};
 
 // ── Branch helpers ──────────────────────────────────────────────────────
 
@@ -462,6 +463,44 @@ where
 
                     Ok(ControlFlow::Continue(envelope_bytes))
                 }
+            }
+            WorkflowContinuation::Loop {
+                id,
+                body,
+                max_iterations,
+                on_max,
+                ..
+            } => {
+                let cfg = LoopConfig {
+                    id,
+                    body,
+                    max_iterations: *max_iterations,
+                    on_max: *on_max,
+                    start_iteration: snapshot.loop_iteration(id),
+                };
+                let mut hooks = CheckpointingLoopHooks {
+                    snapshot: &mut snapshot,
+                    backend,
+                    track_position: false,
+                };
+                let output = run_loop_async(
+                    &cfg,
+                    current_input.clone(),
+                    envelope_codec,
+                    |input| {
+                        Box::pin(execute_branch_with_checkpointing(
+                            body,
+                            input,
+                            instance_id,
+                            backend,
+                            execute_task,
+                            envelope_codec,
+                        ))
+                    },
+                    &mut hooks,
+                )
+                .await?;
+                Ok(ControlFlow::Continue(output))
             }
         };
 

@@ -78,9 +78,13 @@ pub mod codec;
 pub mod context;
 pub mod continuation_builder;
 pub mod error;
+pub mod loop_result;
 pub mod prelude;
 pub mod registry;
 pub mod snapshot;
 pub mod task;
 pub mod task_claim;
 pub mod workflow;
+
+pub use loop_result::LoopResult;
+pub use workflow::MaxIterationsPolicy;

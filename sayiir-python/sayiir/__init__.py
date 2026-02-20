@@ -23,6 +23,7 @@ from .executor import (
     unpause_workflow,
 )
 from .flow import BranchBuilder, Flow, ForkBuilder, Workflow
+from .loop_result import LoopResult, OnMax
 from .worker import Worker, WorkerHandle
 
 __all__ = [
@@ -32,6 +33,8 @@ __all__ = [
     "Flow",
     "FlowBuilder",
     "ForkBuilder",
+    "LoopResult",
+    "OnMax",
     "InMemoryBackend",
     "PostgresBackend",
     "RetryPolicy",

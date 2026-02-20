@@ -106,6 +106,15 @@ pub enum ExecutionPosition {
         /// First task ID after the signal (so backends can advance without traversing the workflow tree).
         next_task_id: Option<String>,
     },
+    /// Execution is inside a loop at a given iteration.
+    InLoop {
+        /// Loop node ID.
+        loop_id: String,
+        /// Current iteration (0-based).
+        iteration: u32,
+        /// Next task to execute within the loop body (for resume positioning).
+        next_task_id: Option<String>,
+    },
 }
 
 /// Result of a completed task execution.
@@ -441,6 +450,9 @@ pub struct WorkflowSnapshot {
     /// Retry state for tasks that have failed and are pending retry.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub task_retries: HashMap<String, TaskRetryState>,
+    /// Current iteration counts for active loops (keyed by loop ID).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub loop_iterations: HashMap<String, u32>,
 }
 
 impl WorkflowSnapshot {
@@ -467,6 +479,7 @@ impl WorkflowSnapshot {
             initial_input: None,
             task_deadline: None,
             task_retries: HashMap::new(),
+            loop_iterations: HashMap::new(),
         }
     }
 
@@ -490,6 +503,7 @@ impl WorkflowSnapshot {
             initial_input: Some(initial_input),
             task_deadline: None,
             task_retries: HashMap::new(),
+            loop_iterations: HashMap::new(),
         }
     }
 
@@ -681,10 +695,42 @@ impl WorkflowSnapshot {
             .is_some_and(|rs| rs.attempts >= rs.policy.max_retries)
     }
 
+    /// Get the current iteration for a loop, defaulting to 0.
+    #[must_use]
+    pub fn loop_iteration(&self, loop_id: &str) -> u32 {
+        self.loop_iterations.get(loop_id).copied().unwrap_or(0)
+    }
+
+    /// Set the current iteration for a loop.
+    pub fn set_loop_iteration(&mut self, loop_id: &str, iteration: u32) {
+        self.loop_iterations.insert(loop_id.to_string(), iteration);
+        self.updated_at = Self::current_timestamp();
+    }
+
+    /// Clear loop iteration tracking (called when a loop completes).
+    pub fn clear_loop_iteration(&mut self, loop_id: &str) {
+        self.loop_iterations.remove(loop_id);
+    }
+
+    /// Remove a task result from the completed tasks map.
+    ///
+    /// Used by loop execution to clear body task results between iterations
+    /// so the body re-executes on the next iteration.
+    pub fn remove_task_result(&mut self, task_id: &str) {
+        if let WorkflowSnapshotState::InProgress {
+            completed_tasks, ..
+        } = &mut self.state
+        {
+            completed_tasks.remove(task_id);
+            self.updated_at = Self::current_timestamp();
+        }
+    }
+
     /// Mark the workflow as completed with a final output.
     pub fn mark_completed(&mut self, final_output: Bytes) {
         self.task_deadline = None;
         self.task_retries.clear();
+        self.loop_iterations.clear();
         self.state = WorkflowSnapshotState::Completed { final_output };
         self.updated_at = Self::current_timestamp();
     }
@@ -693,6 +739,7 @@ impl WorkflowSnapshot {
     pub fn mark_failed(&mut self, error: String) {
         self.task_deadline = None;
         self.task_retries.clear();
+        self.loop_iterations.clear();
         self.state = WorkflowSnapshotState::Failed { error };
         self.updated_at = Self::current_timestamp();
     }

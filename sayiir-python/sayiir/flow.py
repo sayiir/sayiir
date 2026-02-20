@@ -10,6 +10,7 @@ from ._sayiir import PyFlowBuilder, PyTaskMetadata
 
 if TYPE_CHECKING:
     from ._sayiir import PyWorkflow
+    from .loop_result import OnMax
 
 # Suffix convention for branch key-function task IDs.
 # Must match ``sayiir_core::workflow::key_fn_id``.
@@ -60,37 +61,34 @@ def _maybe_wrap_pydantic(task_func: Callable[..., Any]) -> Callable[..., Any]:
 
 def _resolve_task_id(
     task_func: Callable[..., Any],
+    builder: "PyFlowBuilder",
     *,
     name: str | None = None,
-    lambda_counter: int = 0,
-) -> tuple[str, int]:
-    """Determine task id and return (task_id, updated_counter)."""
+) -> str:
+    """Determine task id, using the builder's lambda counter for anonymous fns."""
     if name is not None:
-        return name, lambda_counter
+        return name
     task_id = getattr(task_func, "_task_id", None)
     if task_id is not None:
-        return task_id, lambda_counter
+        return task_id
     fn_name = getattr(task_func, "__name__", "<lambda>")
     if fn_name == "<lambda>":
-        task_id = f"lambda_{lambda_counter}"
-        return task_id, lambda_counter + 1
-    return fn_name, lambda_counter
+        return builder.next_lambda_id()
+    return fn_name
 
 
 def _register_task(
     task_func: Callable[..., Any],
     registry: dict[str, Callable[..., Any]],
+    builder: "PyFlowBuilder",
     *,
     name: str | None = None,
-    lambda_counter: int = 0,
-) -> tuple[str, PyTaskMetadata | None, int]:
+) -> tuple[str, PyTaskMetadata | None]:
     """Extract task id/metadata and register the wrapped task."""
-    task_id, lambda_counter = _resolve_task_id(
-        task_func, name=name, lambda_counter=lambda_counter
-    )
+    task_id = _resolve_task_id(task_func, builder, name=name)
     metadata = getattr(task_func, "_metadata", None)
     registry[task_id] = _maybe_wrap_pydantic(task_func)
-    return task_id, metadata, lambda_counter
+    return task_id, metadata
 
 
 class Workflow:
@@ -162,11 +160,11 @@ class ForkBuilder:
         chain: list[tuple[str, Callable[..., Any]]] = []
         for i, func in enumerate(task_funcs):
             task_name = name if i == 0 else None
-            task_id, _, self._flow._lambda_counter = _register_task(
+            task_id, _ = _register_task(
                 func,
                 self._flow._task_registry,
+                self._flow._builder,
                 name=task_name,
-                lambda_counter=self._flow._lambda_counter,
             )
             chain.append((task_id, func))
         self._branches.append(chain)
@@ -181,11 +179,11 @@ class ForkBuilder:
             name: Override the task ID. Useful for lambdas or when the same
                 function is used as a join in multiple forks.
         """
-        task_id, metadata, self._flow._lambda_counter = _register_task(
+        task_id, metadata = _register_task(
             task_func,
             self._flow._task_registry,
+            self._flow._builder,
             name=name,
-            lambda_counter=self._flow._lambda_counter,
         )
         branches: list[list[tuple[str, PyTaskMetadata | None]]] = [
             [(name, getattr(func, "_metadata", None)) for name, func in chain]
@@ -207,13 +205,11 @@ class BranchBuilder:
     def __init__(
         self,
         flow: "Flow",
-        branch_id: str,
         key_fn: Callable[..., Any],
         *,
         keys: list[str],
     ):
         self._flow = flow
-        self._branch_id = branch_id
         self._key_fn = key_fn
         self._declared_keys = keys
         self._branches: list[tuple[str, list[tuple[str, Callable[..., Any]]]]] = []
@@ -242,11 +238,11 @@ class BranchBuilder:
         chain: list[tuple[str, Callable[..., Any]]] = []
         for i, func in enumerate(task_funcs):
             task_name = name if i == 0 else None
-            task_id, _, self._flow._lambda_counter = _register_task(
+            task_id, _ = _register_task(
                 func,
                 self._flow._task_registry,
+                self._flow._builder,
                 name=task_name,
-                lambda_counter=self._flow._lambda_counter,
             )
             chain.append((task_id, func))
         self._branches.append((key, chain))
@@ -266,11 +262,11 @@ class BranchBuilder:
         chain: list[tuple[str, Callable[..., Any]]] = []
         for i, func in enumerate(task_funcs):
             task_name = name if i == 0 else None
-            task_id, _, self._flow._lambda_counter = _register_task(
+            task_id, _ = _register_task(
                 func,
                 self._flow._task_registry,
+                self._flow._builder,
                 name=task_name,
-                lambda_counter=self._flow._lambda_counter,
             )
             chain.append((task_id, func))
         self._default = chain
@@ -290,7 +286,7 @@ class BranchBuilder:
         orphans = branched_keys - declared_set
         if orphans:
             raise ValueError(
-                f"Branch node '{self._branch_id}': orphan branches for keys: "
+                f"Route: orphan branches for keys: "
                 f"{', '.join(sorted(orphans))}"
             )
 
@@ -299,13 +295,9 @@ class BranchBuilder:
             missing = declared_set - branched_keys
             if missing:
                 raise ValueError(
-                    f"Branch node '{self._branch_id}': missing branches for keys: "
+                    f"Route: missing branches for keys: "
                     f"{', '.join(sorted(missing))}"
                 )
-
-        # Register the key function
-        key_fn_id = f"{self._branch_id}{_KEY_FN_SUFFIX}"
-        self._flow._task_registry[key_fn_id] = _maybe_wrap_pydantic(self._key_fn)
 
         # Build branch data for the Rust builder
         branches: list[tuple[str, list[tuple[str, PyTaskMetadata | None]]]] = [
@@ -318,7 +310,13 @@ class BranchBuilder:
                 (tid, getattr(func, "_metadata", None)) for tid, func in self._default
             ]
 
-        self._flow._builder.add_branch(self._branch_id, branches, default)
+        # add_branch returns the generated branch ID
+        branch_id = self._flow._builder.add_branch(branches, default)
+
+        # Register the key function using the generated branch ID
+        key_fn_id = f"{branch_id}{_KEY_FN_SUFFIX}"
+        self._flow._task_registry[key_fn_id] = _maybe_wrap_pydantic(self._key_fn)
+
         return self._flow
 
 
@@ -346,8 +344,6 @@ class Flow:
         self._name = name
         self._builder = PyFlowBuilder(name)
         self._task_registry: dict[str, Callable[..., Any]] = {}
-        self._lambda_counter: int = 0
-        self._branch_counter: int = 0
         if metadata is not None:
             self._builder.set_metadata_json(_json.dumps(metadata))
 
@@ -381,11 +377,11 @@ class Flow:
                 .then(str.upper)                        # plain callable
                 .build()
         """
-        task_id, metadata, self._lambda_counter = _register_task(
+        task_id, metadata = _register_task(
             task_func,
             self._task_registry,
+            self._builder,
             name=name,
-            lambda_counter=self._lambda_counter,
         )
         self._builder.then(task_id, metadata)
         return self
@@ -473,9 +469,78 @@ class Flow:
                 .then(finalize)
                 .build()
         """
-        branch_id = f"branch_{self._branch_counter}"
-        self._branch_counter += 1
-        return BranchBuilder(self, branch_id, key_fn, keys=keys)
+        return BranchBuilder(self, key_fn, keys=keys)
+
+    def loop(
+        self,
+        task_func: Callable[..., Any],
+        *,
+        max_iterations: int = 10,
+        on_max: "str | OnMax" = "fail",
+        name: str | None = None,
+    ) -> "Flow":
+        """Add a loop whose body repeats until it returns ``LoopResult.done()``.
+
+        The body task receives the current value and must return a
+        ``LoopResult``. ``LoopResult.again(new_value)`` continues the loop;
+        ``LoopResult.done(final_value)`` exits.
+
+        Args:
+            task_func: The loop body callable.
+            max_iterations: Maximum iterations before ``on_max`` applies.
+            on_max: ``"fail"`` (default) raises an error, ``"exit_with_last"``
+                exits with the most recent iteration's output.
+            name: Override the task ID.
+
+        Returns:
+            The Flow instance for chaining.
+        """
+        from .loop_result import LoopResult
+
+        task_id, metadata = _register_task(
+            task_func,
+            self._task_registry,
+            self._builder,
+            name=name,
+        )
+
+        # Wrap the task to serialize LoopResult to its wire format
+        original_fn = self._task_registry[task_id]
+
+        # Check if the function is async
+        import inspect
+
+        if inspect.iscoroutinefunction(original_fn):
+
+            @functools.wraps(original_fn)
+            async def async_loop_wrapper(data: Any) -> Any:
+                result = await original_fn(data)
+                if isinstance(result, LoopResult):
+                    return result.to_dict()
+                return result
+
+            loop_wrapper = async_loop_wrapper
+        else:
+
+            @functools.wraps(original_fn)
+            def sync_loop_wrapper(data: Any) -> Any:
+                result = original_fn(data)
+                if isinstance(result, LoopResult):
+                    return result.to_dict()
+                return result
+
+            loop_wrapper = sync_loop_wrapper
+
+        # Preserve task attributes on the wrapper
+        for attr in ("_task_id", "_metadata", "_input_type", "_output_type"):
+            val = getattr(original_fn, attr, None)
+            if val is not None:
+                setattr(loop_wrapper, attr, val)
+
+        self._task_registry[task_id] = loop_wrapper
+
+        self._builder.add_loop(task_id, metadata, max_iterations, on_max)
+        return self
 
     def fork(self) -> "ForkBuilder":
         """Start a fork for parallel execution."""

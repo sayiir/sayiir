@@ -1432,6 +1432,13 @@ where
                 next.as_ref()
                     .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
             }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                if Self::find_task_id_in_continuation(body, task_id) {
+                    return true;
+                }
+                next.as_ref()
+                    .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
+            }
         }
     }
 
@@ -1519,6 +1526,17 @@ where
                             return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
+                    WorkflowContinuation::Loop { body, next, .. } => {
+                        if Self::find_task_id_in_continuation(body, task_id) {
+                            current = body;
+                            continue;
+                        }
+                        if let Some(next_cont) = next {
+                            current = next_cont;
+                        } else {
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
+                        }
+                    }
                 }
             }
         }
@@ -1566,6 +1584,12 @@ where
                 if let Some(def) = default {
                     Self::update_position_after_task(def, completed_task_id, snapshot);
                 }
+                if let Some(next_cont) = next {
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                }
+            }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                Self::update_position_after_task(body, completed_task_id, snapshot);
                 if let Some(next_cont) = next {
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
                 }
@@ -1644,6 +1668,14 @@ where
             }
             WorkflowContinuation::Branch { id, next, .. } => {
                 // Branch is complete when the branch node itself has a cached result
+                if snapshot.get_task_result(id).is_none() {
+                    return false;
+                }
+                next.as_ref()
+                    .is_none_or(|n| Self::is_workflow_complete(n, snapshot))
+            }
+            WorkflowContinuation::Loop { id, next, .. } => {
+                // Loop is complete when the loop node itself has a cached result
                 if snapshot.get_task_result(id).is_none() {
                     return false;
                 }

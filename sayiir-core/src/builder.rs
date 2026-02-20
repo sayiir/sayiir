@@ -11,13 +11,14 @@ use crate::branch_key::BranchKey;
 use crate::codec::Codec;
 use crate::codec::sealed;
 use crate::context::WorkflowContext;
-use crate::error::BuildError;
+use crate::error::{BuildError, BuildErrors};
+use crate::loop_result::LoopResult;
 use crate::registry::TaskRegistry;
 use crate::task::{
-    BranchEnvelope, BranchOutputs, ErasedBranch, branch, to_core_task_arc,
-    to_heterogeneous_join_task_arc,
+    BranchEnvelope, BranchOutputs, ErasedBranch, RegisterableTask, branch, to_core_task_arc,
+    to_heterogeneous_join_task_arc, wrap_core_task,
 };
-use crate::workflow::{SerializableWorkflow, Workflow, WorkflowContinuation};
+use crate::workflow::{MaxIterationsPolicy, SerializableWorkflow, Workflow, WorkflowContinuation};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -58,6 +59,20 @@ pub trait RegistryBehavior {
         Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
 
+    /// Register a `CoreTask` struct (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
+    fn maybe_register_core_task<T, C>(
+        &mut self,
+        _id: &str,
+        _codec: Arc<C>,
+        _task: Arc<T>,
+        _metadata: crate::task::TaskMetadata,
+    ) where
+        T: crate::task::CoreTask + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static;
+
     /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
     fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
     where
@@ -80,6 +95,22 @@ impl RegistryBehavior for NoRegistry {
         O: Send + 'static,
         Fut: std::future::Future<Output = Result<O, crate::error::BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        // No-op for non-serializable workflows
+    }
+
+    fn maybe_register_core_task<T, C>(
+        &mut self,
+        _id: &str,
+        _codec: Arc<C>,
+        _task: Arc<T>,
+        _metadata: crate::task::TaskMetadata,
+    ) where
+        T: crate::task::CoreTask + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
     {
         // No-op for non-serializable workflows
     }
@@ -113,6 +144,22 @@ impl RegistryBehavior for TaskRegistry {
         self.register_fn_arc(id, codec, Arc::clone(func), TaskMetadata::default());
     }
 
+    fn maybe_register_core_task<T, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        task: Arc<T>,
+        metadata: crate::task::TaskMetadata,
+    ) where
+        T: crate::task::CoreTask + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.register_task_arc(id, codec, task, metadata);
+    }
+
     fn maybe_register_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
     where
         F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
@@ -144,6 +191,8 @@ pub struct WorkflowBuilder<C, Input, Output, M = (), Cont = NoContinuation, R = 
     registry: R,
     last_task_id: Option<String>,
     branch_counter: usize,
+    loop_counter: usize,
+    errors: BuildErrors,
     _phantom: PhantomData<(Input, Output)>,
 }
 
@@ -165,6 +214,8 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
             registry: NoRegistry,
             last_task_id: None,
             branch_counter: 0,
+            loop_counter: 0,
+            errors: BuildErrors::new(),
             _phantom: PhantomData,
         }
     }
@@ -254,7 +305,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// let ctx = WorkflowContext::new("my-workflow", codec.clone(), metadata);
     /// let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
-    ///     .then_registered::<u32>("step1")?
+    ///     .then_registered::<u32>("step1")
     ///     .build()?;
     ///
     /// // Deserialize (on another side): rebuild registry, then convert to runnable
@@ -275,6 +326,8 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
             registry,
             last_task_id: None,
             branch_counter: 0,
+            loop_counter: 0,
+            errors: BuildErrors::new(),
             _phantom: PhantomData,
         }
     }
@@ -326,6 +379,329 @@ where
             registry: self.registry,
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Loop method — available for all registry/continuation combinations.
+impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
+where
+    R: RegistryBehavior,
+    Cont: ContinuationState,
+{
+    /// Add a loop task to the workflow.
+    ///
+    /// The task function receives the current value and must return
+    /// `LoopResult<NewOutput>`:
+    /// - `LoopResult::Again(val)` feeds `val` back as the next iteration's input.
+    /// - `LoopResult::Done(val)` exits the loop; `val` becomes the loop's output.
+    ///
+    /// The `max_iterations` parameter sets a safety limit. When reached, the
+    /// default `MaxIterationsPolicy::Fail` causes the workflow to fail.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use sayiir_core::LoopResult;
+    ///
+    /// workflow
+    ///     .loop_task("refine", |draft: String| async move {
+    ///         if is_good_enough(&draft) {
+    ///             Ok(LoopResult::Done(draft))
+    ///         } else {
+    ///             Ok(LoopResult::Again(improve(draft)))
+    ///         }
+    ///     }, 10)
+    /// ```
+    ///
+    /// If `max_iterations` is 0, an error is recorded and reported at `build()` time.
+    pub fn loop_task<F, Fut, NewOutput>(
+        self,
+        id: &str,
+        func: F,
+        max_iterations: u32,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
+    where
+        F: Fn(Output) -> Fut + Send + Sync + 'static,
+        Output: Send + 'static,
+        NewOutput: Send + 'static,
+        Fut: std::future::Future<Output = Result<LoopResult<NewOutput>, crate::error::BoxError>>
+            + Send
+            + 'static,
+        C: Codec
+            + sealed::DecodeValue<Output>
+            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + 'static,
+    {
+        self.loop_task_with_policy(id, func, max_iterations, MaxIterationsPolicy::Fail)
+    }
+
+    /// Add a loop task with a custom `MaxIterationsPolicy`.
+    ///
+    /// Same as [`loop_task`](Self::loop_task) but allows specifying what happens
+    /// when `max_iterations` is reached.
+    ///
+    pub fn loop_task_with_policy<F, Fut, NewOutput>(
+        mut self,
+        id: &str,
+        func: F,
+        max_iterations: u32,
+        on_max: MaxIterationsPolicy,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
+    where
+        F: Fn(Output) -> Fut + Send + Sync + 'static,
+        Output: Send + 'static,
+        NewOutput: Send + 'static,
+        Fut: std::future::Future<Output = Result<LoopResult<NewOutput>, crate::error::BoxError>>
+            + Send
+            + 'static,
+        C: Codec
+            + sealed::DecodeValue<Output>
+            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + 'static,
+    {
+        if max_iterations == 0 {
+            self.errors
+                .push(BuildError::InvalidMaxIterations(id.to_string()));
+        }
+        let codec = Arc::clone(&self.context.codec);
+        let func = Arc::new(func);
+
+        self.registry
+            .maybe_register::<Output, LoopResult<NewOutput>, _, _, _>(id, codec.clone(), &func);
+
+        let task = to_core_task_arc(func, codec);
+        let loop_id = crate::workflow::loop_node_id(self.loop_counter);
+        self.loop_counter += 1;
+
+        let body = WorkflowContinuation::Task {
+            id: id.to_string(),
+            func: Some(task),
+            timeout: None,
+            retry_policy: None,
+            next: None,
+        };
+
+        let loop_node = WorkflowContinuation::Loop {
+            id: loop_id.clone(),
+            body: Box::new(body),
+            max_iterations,
+            on_max,
+            next: None,
+        };
+
+        let continuation = self.continuation.append(loop_node);
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(loop_id),
+            branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Type-safe builder methods for `RegisterableTask` structs (generated by `#[task]`).
+///
+/// These methods extract the task ID, output type, and metadata directly from
+/// the type, eliminating stringly-typed wiring.
+impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
+where
+    R: RegistryBehavior,
+    Cont: ContinuationState,
+{
+    /// Add a `#[task]` struct to the workflow (no injected deps — requires `Default`).
+    ///
+    /// The task ID, output type, timeout, and retry policy are all derived from
+    /// `T`'s [`RegisterableTask`] implementation.
+    ///
+    /// For tasks that carry injected dependencies, use
+    /// [`then_task_with`](Self::then_task_with) instead.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Given:  #[task] async fn add_ten(input: u32) -> Result<u32, BoxError> { … }
+    ///
+    /// WorkflowBuilder::new(ctx)
+    ///     .with_registry()
+    ///     .then_task::<AddTenTask>()
+    ///     .then_task::<DoubleTask>()
+    ///     .build()?;
+    /// ```
+    pub fn then_task<T>(self) -> WorkflowBuilder<C, Input, T::Output, M, WorkflowContinuation, R>
+    where
+        T: RegisterableTask<Input = Output> + Default,
+        Output: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.then_task_with(T::default())
+    }
+
+    /// Add a `#[task]` struct instance to the workflow (for tasks with injected deps).
+    ///
+    /// The task ID, output type, timeout, and retry policy are derived from
+    /// `T`'s [`RegisterableTask`] implementation. The caller provides the
+    /// constructed instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Given:  #[task] async fn fetch(url: String, #[inject] client: HttpClient) -> …
+    ///
+    /// WorkflowBuilder::new(ctx)
+    ///     .with_registry()
+    ///     .then_task_with(FetchTask::new(client.clone()))
+    ///     .build()?;
+    /// ```
+    pub fn then_task_with<T>(
+        mut self,
+        task: T,
+    ) -> WorkflowBuilder<C, Input, T::Output, M, WorkflowContinuation, R>
+    where
+        T: RegisterableTask<Input = Output>,
+        Output: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        let id = T::task_id();
+        let metadata = T::metadata();
+        let codec = Arc::clone(&self.context.codec);
+        let task = Arc::new(task);
+
+        self.registry.maybe_register_core_task::<T, C>(
+            id,
+            codec.clone(),
+            Arc::clone(&task),
+            metadata.clone(),
+        );
+
+        let untyped = wrap_core_task(task, codec);
+        let timeout = metadata.timeout;
+        let retry_policy = metadata.retries;
+
+        let new_task = WorkflowContinuation::Task {
+            id: id.to_string(),
+            func: Some(untyped),
+            timeout,
+            retry_policy,
+            next: None,
+        };
+
+        let continuation = self.continuation.append(new_task);
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(id.to_string()),
+            branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Add a `#[task]` loop struct (no injected deps — requires `Default`).
+    ///
+    /// The task's output must be `LoopResult<NewOutput>`. The loop node ID
+    /// is auto-derived. See [`loop_task`](Self::loop_task) for semantics.
+    pub fn loop_task_struct<T, NewOutput>(
+        self,
+        max_iterations: u32,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
+    where
+        T: RegisterableTask<Input = Output, Output = LoopResult<NewOutput>> + Default,
+        Output: Send + 'static,
+        NewOutput: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec
+            + sealed::DecodeValue<Output>
+            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + 'static,
+    {
+        self.loop_task_struct_with(T::default(), max_iterations)
+    }
+
+    /// Add a `#[task]` loop struct instance (for tasks with injected deps).
+    ///
+    /// The task's output must be `LoopResult<NewOutput>`. The loop node ID
+    /// is auto-derived. See [`loop_task`](Self::loop_task) for semantics.
+    pub fn loop_task_struct_with<T, NewOutput>(
+        mut self,
+        task: T,
+        max_iterations: u32,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
+    where
+        T: RegisterableTask<Input = Output, Output = LoopResult<NewOutput>>,
+        Output: Send + 'static,
+        NewOutput: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec
+            + sealed::DecodeValue<Output>
+            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + 'static,
+    {
+        let id = T::task_id();
+        if max_iterations == 0 {
+            self.errors
+                .push(BuildError::InvalidMaxIterations(id.to_string()));
+        }
+
+        let metadata = T::metadata();
+        let codec = Arc::clone(&self.context.codec);
+        let task = Arc::new(task);
+
+        self.registry.maybe_register_core_task::<T, C>(
+            id,
+            codec.clone(),
+            Arc::clone(&task),
+            metadata.clone(),
+        );
+
+        let untyped = wrap_core_task(task, codec);
+        let timeout = metadata.timeout;
+        let retry_policy = metadata.retries;
+
+        let loop_id = crate::workflow::loop_node_id(self.loop_counter);
+        self.loop_counter += 1;
+
+        let body = WorkflowContinuation::Task {
+            id: id.to_string(),
+            func: Some(untyped),
+            timeout,
+            retry_policy,
+            next: None,
+        };
+
+        let loop_node = WorkflowContinuation::Loop {
+            id: loop_id.clone(),
+            body: Box::new(body),
+            max_iterations,
+            on_max: MaxIterationsPolicy::Fail,
+            next: None,
+        };
+
+        let continuation = self.continuation.append(loop_node);
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(loop_id),
+            branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -361,6 +737,8 @@ where
             registry: self.registry,
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -390,6 +768,8 @@ where
             registry: self.registry,
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -406,9 +786,8 @@ where
     /// Type safety is maintained through the `NewOutput` type parameter - ensure it
     /// matches the registered task's output type.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::TaskNotFound` if the task ID is not in the registry.
+    /// If the task ID is not found in the registry, the error is recorded and
+    /// reported at `build()` time.
     ///
     /// # Example
     ///
@@ -436,7 +815,7 @@ where
     ///
     /// let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
     ///     .with_existing_registry(registry)
-    ///     .then_registered::<u32>("double")?
+    ///     .then_registered::<u32>("double")
     ///     .with_metadata(TaskMetadata {
     ///         display_name: Some("Double".into()),
     ///         ..Default::default()
@@ -446,20 +825,17 @@ where
     /// # }
     /// ```
     pub fn then_registered<NewOutput>(
-        self,
+        mut self,
         id: &str,
-    ) -> Result<
-        WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>,
-        BuildError,
-    >
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>
     where
         Output: Send + 'static,
         NewOutput: Send + 'static,
     {
-        let func = self
-            .registry
-            .get(id)
-            .ok_or_else(|| BuildError::TaskNotFound(id.to_string()))?;
+        let func = self.registry.get(id);
+        if func.is_none() {
+            self.errors.push(BuildError::TaskNotFound(id.to_string()));
+        }
         let meta = self.registry.get_metadata(id);
         let timeout = meta.and_then(|m| m.timeout);
         let retry_policy = self
@@ -469,7 +845,7 @@ where
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
-            func: Some(func),
+            func,
             timeout,
             retry_policy,
             next: None,
@@ -477,14 +853,81 @@ where
 
         let continuation = self.continuation.append(new_task);
 
-        Ok(WorkflowBuilder {
+        WorkflowBuilder {
             continuation,
             context: self.context,
             registry: self.registry,
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
-        })
+        }
+    }
+
+    /// Reference a pre-registered loop body task by ID.
+    ///
+    /// The body task must already be registered in the registry under
+    /// `body_task_id`. The loop node ID is derived as `"loop_{body_task_id}"`.
+    ///
+    /// If the body task is not found, or `max_iterations` is 0, the error is
+    /// recorded and reported at `build()` time.
+    pub fn loop_task_registered<NewOutput>(
+        mut self,
+        body_task_id: &str,
+        max_iterations: u32,
+        on_max: MaxIterationsPolicy,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, TaskRegistry>
+    where
+        Output: Send + 'static,
+        NewOutput: Send + 'static,
+    {
+        if max_iterations == 0 {
+            self.errors
+                .push(BuildError::InvalidMaxIterations(body_task_id.to_string()));
+        }
+        let func = self.registry.get(body_task_id);
+        if func.is_none() {
+            self.errors
+                .push(BuildError::TaskNotFound(body_task_id.to_string()));
+        }
+        let meta = self.registry.get_metadata(body_task_id);
+        let timeout = meta.and_then(|m| m.timeout);
+        let retry_policy = self
+            .registry
+            .get_metadata(body_task_id)
+            .and_then(|m| m.retries.clone());
+
+        let body = WorkflowContinuation::Task {
+            id: body_task_id.to_string(),
+            func,
+            timeout,
+            retry_policy,
+            next: None,
+        };
+
+        let loop_id = crate::workflow::loop_node_id(self.loop_counter);
+        self.loop_counter += 1;
+        let loop_node = WorkflowContinuation::Loop {
+            id: loop_id.clone(),
+            body: Box::new(body),
+            max_iterations,
+            on_max,
+            next: None,
+        };
+
+        let continuation = self.continuation.append(loop_node);
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(loop_id),
+            branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -570,8 +1013,8 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
     ///         b.add("name", |i: u32| async move { Ok(format!("item_{}", i)) });
     ///     })
     ///     .join("combine", |outputs: BranchOutputs<_>| async move {
-    ///         let count: u32 = outputs.get("count")?;
-    ///         let name: String = outputs.get("name")?;
+    ///         let count: u32 = outputs.get_by_id("count")?;
+    ///         let name: String = outputs.get_by_id("name")?;
     ///         Ok(format!("{}: {}", name, count))
     ///     })
     ///     .with_metadata(TaskMetadata {
@@ -598,6 +1041,8 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
             branches: collector.branches,
             registry: self.registry,
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -610,6 +1055,8 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
             branches: Vec::new(),
             registry: self.registry,
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -621,8 +1068,8 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     ///
     /// # Errors
     ///
-    /// Returns an error if duplicate task IDs are found.
-    pub fn build(self) -> Result<Workflow<C, Input, M>, BuildError>
+    /// Returns accumulated build errors or duplicate task IDs.
+    pub fn build(mut self) -> Result<Workflow<C, Input, M>, BuildErrors>
     where
         Input: Send + 'static,
         Output: Send + 'static,
@@ -634,7 +1081,10 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             + sealed::EncodeValue<Output>,
     {
         if let Some(dup) = self.continuation.find_duplicate_id() {
-            return Err(BuildError::DuplicateTaskId(dup));
+            self.errors.push(BuildError::DuplicateTaskId(dup));
+        }
+        if !self.errors.is_empty() {
+            return Err(self.errors);
         }
 
         let definition_hash = self
@@ -657,8 +1107,8 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
     ///
     /// # Errors
     ///
-    /// Returns an error if duplicate task IDs are found.
-    pub fn build(self) -> Result<SerializableWorkflow<C, Input, M>, BuildError>
+    /// Returns accumulated build errors or duplicate task IDs.
+    pub fn build(mut self) -> Result<SerializableWorkflow<C, Input, M>, BuildErrors>
     where
         Input: Send + 'static,
         Output: Send + 'static,
@@ -670,7 +1120,10 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
             + sealed::EncodeValue<Output>,
     {
         if let Some(dup) = self.continuation.find_duplicate_id() {
-            return Err(BuildError::DuplicateTaskId(dup));
+            self.errors.push(BuildError::DuplicateTaskId(dup));
+        }
+        if !self.errors.is_empty() {
+            return Err(self.errors);
         }
 
         let definition_hash = self
@@ -719,6 +1172,37 @@ impl<C, Input> BranchCollector<C, Input> {
         let erased = branch(id, func).erase(Arc::clone(&self.codec));
         self.branches.push(erased);
     }
+
+    /// Add a `#[task]` struct as a branch (no injected deps — requires `Default`).
+    pub fn add_task<T>(&mut self)
+    where
+        T: RegisterableTask<Input = Input> + Default,
+        Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.add_task_with(T::default());
+    }
+
+    /// Add a `#[task]` struct instance as a branch (for tasks with injected deps).
+    pub fn add_task_with<T>(&mut self, task: T)
+    where
+        T: RegisterableTask<Input = Input>,
+        Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        let id = T::task_id();
+        let codec = Arc::clone(&self.codec);
+        let task = Arc::new(task);
+        let untyped = wrap_core_task(task, codec);
+        self.branches.push(ErasedBranch {
+            id: id.to_string(),
+            task: untyped,
+        });
+    }
 }
 
 /// Builder for constructing fork branches fluently.
@@ -731,6 +1215,8 @@ pub struct ForkBuilder<C, Input, Output, M, Cont = NoContinuation, R = NoRegistr
     branches: Vec<ErasedBranch>,
     registry: R,
     branch_counter: usize,
+    loop_counter: usize,
+    errors: BuildErrors,
     _phantom: PhantomData<(Input, Output)>,
 }
 
@@ -768,6 +1254,49 @@ where
         let func_clone = Arc::clone(&func);
         let erased = branch(id, move |input| func_clone(input)).erase(codec);
         self.branches.push(erased);
+        self
+    }
+
+    /// Add a `#[task]` struct as a fork branch (no injected deps — requires `Default`).
+    #[must_use]
+    pub fn branch_task<T>(self) -> Self
+    where
+        T: RegisterableTask<Input = Output> + Default,
+        Output: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        self.branch_task_with(T::default())
+    }
+
+    /// Add a `#[task]` struct instance as a fork branch (for tasks with injected deps).
+    #[must_use]
+    pub fn branch_task_with<T>(mut self, task: T) -> Self
+    where
+        T: RegisterableTask<Input = Output>,
+        Output: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        let id = T::task_id();
+        let metadata = T::metadata();
+        let codec = Arc::clone(&self.context.codec);
+        let task = Arc::new(task);
+
+        self.registry.maybe_register_core_task::<T, C>(
+            id,
+            codec.clone(),
+            Arc::clone(&task),
+            metadata,
+        );
+
+        let untyped = wrap_core_task(task, codec);
+        self.branches.push(ErasedBranch {
+            id: id.to_string(),
+            task: untyped,
+        });
         self
     }
 
@@ -845,6 +1374,8 @@ where
             registry: self.registry,
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -857,45 +1388,43 @@ where
 {
     /// Add a pre-registered branch task by ID.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::TaskNotFound` if the task ID is not in the registry.
-    pub fn branch_registered(mut self, id: &str) -> Result<Self, BuildError>
+    /// If the task ID is not found, the error is recorded and reported at
+    /// `build()` time.
+    #[must_use]
+    pub fn branch_registered(mut self, id: &str) -> Self
     where
         Output: Send + 'static,
     {
-        let task = self
-            .registry
-            .get(id)
-            .ok_or_else(|| BuildError::TaskNotFound(id.to_string()))?;
-
-        self.branches.push(ErasedBranch {
-            id: id.to_string(),
-            task,
-        });
-        Ok(self)
+        match self.registry.get(id) {
+            Some(task) => {
+                self.branches.push(ErasedBranch {
+                    id: id.to_string(),
+                    task,
+                });
+            }
+            None => {
+                self.errors.push(BuildError::TaskNotFound(id.to_string()));
+            }
+        }
+        self
     }
 
     /// Join using a pre-registered join task by ID.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::TaskNotFound` if the task ID is not in the registry.
+    /// If the task ID is not found, the error is recorded and reported at
+    /// `build()` time.
     pub fn join_registered<JoinOutput>(
-        self,
+        mut self,
         id: &str,
-    ) -> Result<
-        WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, TaskRegistry>,
-        BuildError,
-    >
+    ) -> WorkflowBuilder<C, Input, JoinOutput, M, WorkflowContinuation, TaskRegistry>
     where
         Output: Send + 'static,
         JoinOutput: Send + 'static,
     {
-        let join_task_fn = self
-            .registry
-            .get(id)
-            .ok_or_else(|| BuildError::TaskNotFound(id.to_string()))?;
+        let join_task_fn = self.registry.get(id);
+        if join_task_fn.is_none() {
+            self.errors.push(BuildError::TaskNotFound(id.to_string()));
+        }
         let join_timeout = self.registry.get_metadata(id).and_then(|m| m.timeout);
 
         let fork_id = WorkflowContinuation::derive_fork_id(
@@ -932,7 +1461,7 @@ where
             .and_then(|m| m.retries.clone());
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
-            func: Some(join_task_fn),
+            func: join_task_fn,
             timeout: join_timeout,
             retry_policy: join_retry_policy,
             next: None,
@@ -946,14 +1475,16 @@ where
 
         let continuation = self.continuation.append(fork_continuation);
 
-        Ok(WorkflowBuilder {
+        WorkflowBuilder {
             continuation,
             context: self.context,
             registry: self.registry,
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
-        })
+        }
     }
 }
 
@@ -969,6 +1500,7 @@ pub struct SubBuilder<C, Input, Output, R = NoRegistry> {
     codec: Arc<C>,
     continuation: Option<WorkflowContinuation>,
     registry: R,
+    errors: BuildErrors,
     _phantom: PhantomData<(Input, Output)>,
 }
 
@@ -1019,6 +1551,7 @@ where
             codec: self.codec,
             continuation,
             registry: self.registry,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -1045,6 +1578,7 @@ impl<C, Input, Output, R> SubBuilder<C, Input, Output, R> {
             codec: self.codec,
             continuation,
             registry: self.registry,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -1074,19 +1608,17 @@ impl<C, Input, Output, R> SubBuilder<C, Input, Output, R> {
             codec: self.codec,
             continuation,
             registry: self.registry,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
 
-    /// Consume the sub-builder and return the built continuation and registry.
-    ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::EmptyBranch` if no steps were added (the closure
-    /// passed to `branch()` must call `.then()` at least once).
-    fn build(self) -> Result<(WorkflowContinuation, R), BuildError> {
-        let continuation = self.continuation.ok_or(BuildError::EmptyBranch)?;
-        Ok((continuation, self.registry))
+    /// Consume the sub-builder and return the built continuation, registry, and any errors.
+    fn build(mut self) -> (Option<WorkflowContinuation>, BuildErrors, R) {
+        if self.continuation.is_none() {
+            self.errors.push(BuildError::EmptyBranch);
+        }
+        (self.continuation, self.errors, self.registry)
     }
 }
 
@@ -1108,6 +1640,8 @@ pub struct RouteBuilder<C, Input, Output, BranchOut, K, M, Cont, R = NoRegistry>
     named_branches: HashMap<String, Box<WorkflowContinuation>>,
     default_branch: Option<Box<WorkflowContinuation>>,
     branch_counter: usize,
+    loop_counter: usize,
+    errors: BuildErrors,
     _phantom: PhantomData<(Input, Output, BranchOut, K)>,
 }
 
@@ -1177,6 +1711,8 @@ where
             named_branches: HashMap::new(),
             default_branch: None,
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -1192,10 +1728,12 @@ pub struct RouteRegisteredBuilder<C, Input, Output, BranchOut, M, Cont> {
     parent_continuation: Cont,
     registry: TaskRegistry,
     branch_id: String,
-    key_fn: crate::task::UntypedCoreTask,
+    key_fn: Option<crate::task::UntypedCoreTask>,
     named_branches: HashMap<String, Box<WorkflowContinuation>>,
     default_branch: Option<Box<WorkflowContinuation>>,
     branch_counter: usize,
+    loop_counter: usize,
+    errors: BuildErrors,
     _phantom: PhantomData<(Input, Output, BranchOut)>,
 }
 
@@ -1210,21 +1748,19 @@ where
     /// [`key_fn_id(id)`](crate::workflow::key_fn_id) (the convention used by
     /// both the programmatic `route` API and the `workflow!` macro).
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::TaskNotFound` if the key function ID is not in
-    /// the registry.
+    /// If the key function is not found, the error is recorded and reported
+    /// at `build()` time.
     pub fn route_registered<BranchOut>(
-        self,
+        mut self,
         id: &str,
-    ) -> Result<RouteRegisteredBuilder<C, Input, Output, BranchOut, M, Cont>, BuildError> {
-        let key_fn_id = crate::workflow::key_fn_id(id);
-        let key_fn = self
-            .registry
-            .get(&key_fn_id)
-            .ok_or(BuildError::TaskNotFound(key_fn_id))?;
+    ) -> RouteRegisteredBuilder<C, Input, Output, BranchOut, M, Cont> {
+        let key_fn_id_str = crate::workflow::key_fn_id(id);
+        let key_fn = self.registry.get(&key_fn_id_str);
+        if key_fn.is_none() {
+            self.errors.push(BuildError::TaskNotFound(key_fn_id_str));
+        }
 
-        Ok(RouteRegisteredBuilder {
+        RouteRegisteredBuilder {
             context: self.context,
             parent_continuation: self.continuation,
             registry: self.registry,
@@ -1233,8 +1769,10 @@ where
             named_branches: HashMap::new(),
             default_branch: None,
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
-        })
+        }
     }
 }
 
@@ -1244,49 +1782,68 @@ where
     Cont: ContinuationState,
 {
     /// Build a chain of `WorkflowContinuation::Task` nodes from registered task IDs.
+    ///
+    /// Returns `(Ok(chain), errors)` on success or `(Err(()), errors)` if any task
+    /// was not found (errors are pushed to the returned vec).
     fn build_chain_from_registry(
         registry: &TaskRegistry,
         task_ids: &[&str],
-    ) -> Result<Box<WorkflowContinuation>, BuildError> {
+        errors: &mut BuildErrors,
+    ) -> Option<Box<WorkflowContinuation>> {
         let mut current: Option<WorkflowContinuation> = None;
+        let mut ok = true;
         for id in task_ids.iter().rev() {
-            let func = registry
-                .get(id)
-                .ok_or_else(|| BuildError::TaskNotFound((*id).to_string()))?;
+            let func = registry.get(id);
+            if func.is_none() {
+                errors.push(BuildError::TaskNotFound((*id).to_string()));
+                ok = false;
+            }
             let meta = registry.get_metadata(id);
             let timeout = meta.and_then(|m| m.timeout);
             let retry_policy = registry.get_metadata(id).and_then(|m| m.retries.clone());
             current = Some(WorkflowContinuation::Task {
                 id: (*id).to_string(),
-                func: Some(func),
+                func,
                 timeout,
                 retry_policy,
                 next: current.map(Box::new),
             });
         }
-        current.map(Box::new).ok_or(BuildError::EmptyFork)
+        if !ok || current.is_none() {
+            if current.is_none() {
+                errors.push(BuildError::EmptyFork);
+            }
+            return None;
+        }
+        current.map(Box::new)
     }
 
     /// Add a named branch containing a chain of pre-registered tasks.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::TaskNotFound` if any task ID is not in the registry.
-    pub fn branch_registered(mut self, key: &str, task_ids: &[&str]) -> Result<Self, BuildError> {
-        let chain = Self::build_chain_from_registry(&self.registry, task_ids)?;
-        self.named_branches.insert(key.to_string(), chain);
-        Ok(self)
+    /// If any task ID is not found, the error is recorded and reported at
+    /// `build()` time.
+    #[must_use]
+    pub fn branch_registered(mut self, key: &str, task_ids: &[&str]) -> Self {
+        if let Some(chain) =
+            Self::build_chain_from_registry(&self.registry, task_ids, &mut self.errors)
+        {
+            self.named_branches.insert(key.to_string(), chain);
+        }
+        self
     }
 
     /// Set the default branch (used when no key matches) from pre-registered tasks.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::TaskNotFound` if any task ID is not in the registry.
-    pub fn default_registered(mut self, task_ids: &[&str]) -> Result<Self, BuildError> {
-        let chain = Self::build_chain_from_registry(&self.registry, task_ids)?;
-        self.default_branch = Some(chain);
-        Ok(self)
+    /// If any task ID is not found, the error is recorded and reported at
+    /// `build()` time.
+    #[must_use]
+    pub fn default_registered(mut self, task_ids: &[&str]) -> Self {
+        if let Some(chain) =
+            Self::build_chain_from_registry(&self.registry, task_ids, &mut self.errors)
+        {
+            self.default_branch = Some(chain);
+        }
+        self
     }
 
     /// Close the branching node and return to the parent builder.
@@ -1296,7 +1853,7 @@ where
     {
         let branch_node = WorkflowContinuation::Branch {
             id: self.branch_id.clone(),
-            key_fn: Some(self.key_fn),
+            key_fn: self.key_fn,
             branches: self.named_branches,
             default: self.default_branch,
             next: None,
@@ -1310,6 +1867,8 @@ where
             registry: self.registry,
             last_task_id: Some(self.branch_id),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
         }
     }
@@ -1328,11 +1887,11 @@ where
     /// keys can be used. The closure receives a [`SubBuilder`] and must chain
     /// at least one step on it. The final output type must match `BranchOut`.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::EmptyBranch` if the closure doesn't add any steps.
+    /// If the closure doesn't add any steps, the error is recorded and
+    /// reported at `build()` time.
+    #[must_use]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn branch<F>(mut self, key: K, build_fn: F) -> Result<Self, BuildError>
+    pub fn branch<F>(mut self, key: K, build_fn: F) -> Self
     where
         F: FnOnce(SubBuilder<C, Output, Output, R>) -> SubBuilder<C, Output, BranchOut, R>,
     {
@@ -1340,24 +1899,28 @@ where
             codec: Arc::clone(&self.context.codec),
             continuation: None,
             registry: self.registry,
+            errors: BuildErrors::new(),
             _phantom: PhantomData,
         };
         let built = build_fn(sub);
-        let (continuation, registry) = built.build()?;
+        let (continuation, errors, registry) = built.build();
         self.registry = registry;
-        self.named_branches
-            .insert(key.as_key().to_string(), Box::new(continuation));
-        Ok(self)
+        self.errors.extend(errors);
+        if let Some(cont) = continuation {
+            self.named_branches
+                .insert(key.as_key().to_string(), Box::new(cont));
+        }
+        self
     }
 
     /// Set the default branch (used when no key matches).
     ///
     /// The closure receives a [`SubBuilder`] and must chain at least one step on it.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::EmptyBranch` if the closure doesn't add any steps.
-    pub fn default_branch<F>(mut self, build_fn: F) -> Result<Self, BuildError>
+    /// If the closure doesn't add any steps, the error is recorded and
+    /// reported at `build()` time.
+    #[must_use]
+    pub fn default_branch<F>(mut self, build_fn: F) -> Self
     where
         F: FnOnce(SubBuilder<C, Output, Output, R>) -> SubBuilder<C, Output, BranchOut, R>,
     {
@@ -1365,34 +1928,32 @@ where
             codec: Arc::clone(&self.context.codec),
             continuation: None,
             registry: self.registry,
+            errors: BuildErrors::new(),
             _phantom: PhantomData,
         };
         let built = build_fn(sub);
-        let (continuation, registry) = built.build()?;
+        let (continuation, errors, registry) = built.build();
         self.registry = registry;
-        self.default_branch = Some(Box::new(continuation));
-        Ok(self)
+        self.errors.extend(errors);
+        if let Some(cont) = continuation {
+            self.default_branch = Some(Box::new(cont));
+        }
+        self
     }
 
     /// Close the branching node and return to the parent builder.
     ///
     /// Performs exhaustiveness checks against `K::all_keys()`:
     /// - **Missing branches**: keys in the enum with no `.branch()` call and no
-    ///   `.default_branch()` → returns `BuildError::MissingBranches`.
+    ///   `.default_branch()` → error recorded.
     /// - **Orphan branches**: keys passed to `.branch()` that are not in the enum
-    ///   → returns `BuildError::OrphanBranches`.
+    ///   → error recorded.
     ///
-    /// # Errors
-    ///
-    /// Returns `BuildError::MissingBranches` or `BuildError::OrphanBranches` if
-    /// the branch set doesn't match the key enum.
+    /// All errors are reported at `build()` time.
     #[allow(clippy::type_complexity)]
     pub fn done(
-        self,
-    ) -> Result<
-        WorkflowBuilder<C, Input, BranchEnvelope<BranchOut>, M, WorkflowContinuation, R>,
-        BuildError,
-    > {
+        mut self,
+    ) -> WorkflowBuilder<C, Input, BranchEnvelope<BranchOut>, M, WorkflowContinuation, R> {
         let all_keys: std::collections::HashSet<&str> = K::all_keys().iter().copied().collect();
         let declared_keys: std::collections::HashSet<&str> =
             self.named_branches.keys().map(String::as_str).collect();
@@ -1403,8 +1964,8 @@ where
             .map(|k| (*k).to_string())
             .collect();
         if !orphans.is_empty() {
-            return Err(BuildError::OrphanBranches {
-                branch_id: self.branch_id,
+            self.errors.push(BuildError::OrphanBranches {
+                branch_id: self.branch_id.clone(),
                 orphan_keys: orphans,
             });
         }
@@ -1416,8 +1977,8 @@ where
                 .map(|k| (*k).to_string())
                 .collect();
             if !missing.is_empty() {
-                return Err(BuildError::MissingBranches {
-                    branch_id: self.branch_id,
+                self.errors.push(BuildError::MissingBranches {
+                    branch_id: self.branch_id.clone(),
                     missing_keys: missing,
                 });
             }
@@ -1433,13 +1994,15 @@ where
 
         let continuation = self.parent_continuation.append(branch_node);
 
-        Ok(WorkflowBuilder {
+        WorkflowBuilder {
             continuation,
             context: self.context,
             registry: self.registry,
             last_task_id: Some(self.branch_id),
             branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            errors: self.errors,
             _phantom: PhantomData,
-        })
+        }
     }
 }

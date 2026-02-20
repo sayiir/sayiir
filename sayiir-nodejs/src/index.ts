@@ -7,6 +7,7 @@
 // Types
 export type {
   Duration,
+  LoopOptions,
   RetryPolicy,
   TaskCallback,
   TaskOptions,
@@ -15,7 +16,7 @@ export type {
   ZodLike,
 } from "./types.js";
 
-export { WorkflowError, TaskError, BackendError } from "./types.js";
+export { LoopResult, WorkflowError, TaskError, BackendError } from "./types.js";
 
 // Task
 export { task } from "./task.js";

@@ -306,8 +306,8 @@ async fn fork_join() {
             b.add("add_ten", |i: u32| async move { Ok(i + 10) });
         })
         .join("combine", |outputs: BranchOutputs<JsonCodec>| async move {
-            let doubled: u32 = outputs.get("double")?;
-            let added: u32 = outputs.get("add_ten")?;
+            let doubled: u32 = outputs.get_by_id("double")?;
+            let added: u32 = outputs.get_by_id("add_ten")?;
             Ok(doubled + added)
         })
         .build()
@@ -412,10 +412,10 @@ async fn multi_stage_scatter_gather() {
             b.add("double", |n: u64| async move { Ok(n * 2) });
         })
         .join("reduce", |outputs: BranchOutputs<JsonCodec>| async move {
-            let fib: u64 = outputs.get("fibonacci")?;
-            let tri: u64 = outputs.get("triangular")?;
-            let sq: u64 = outputs.get("square")?;
-            let dbl: u64 = outputs.get("double")?;
+            let fib: u64 = outputs.get_by_id("fibonacci")?;
+            let tri: u64 = outputs.get_by_id("triangular")?;
+            let sq: u64 = outputs.get_by_id("square")?;
+            let dbl: u64 = outputs.get_by_id("double")?;
             Ok(fib + tri + sq + dbl)
         })
         // ── Stage 2: intermediate transform ──────────────────────────
@@ -428,8 +428,8 @@ async fn multi_stage_scatter_gather() {
         .join(
             "recombine",
             |outputs: BranchOutputs<JsonCodec>| async move {
-                let half: u64 = outputs.get("halve")?;
-                let rem: u64 = outputs.get("modulo")?;
+                let half: u64 = outputs.get_by_id("halve")?;
+                let rem: u64 = outputs.get_by_id("modulo")?;
                 Ok(half * 1000 + rem)
             },
         )

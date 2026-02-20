@@ -149,8 +149,8 @@ ProcessTask::register(&mut registry, codec.clone(), ProcessTask::new());
 
 let workflow = WorkflowBuilder::new(ctx)
     .with_existing_registry(registry)
-    .then_registered::<serde_json::Value>(CallApiTask::task_id())?
-    .then_registered::<String>(ProcessTask::task_id())?
+    .then_registered::<serde_json::Value>(CallApiTask::task_id())
+    .then_registered::<String>(ProcessTask::task_id())
     .build()?;
 ```
 

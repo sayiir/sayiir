@@ -170,6 +170,13 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         }
     }
 
+    // loop refine_task 10  OR  loop refine_task 10 exit_with_last
+    // `loop` is a Rust keyword — peek with Token![loop], not Ident.
+    if input.peek(Token![loop]) {
+        let kw: Token![loop] = input.parse()?;
+        return parse_loop(input, kw.span);
+    }
+
     // delay "5s"  OR  delay "my_id" "5s"
     // signal "approval"  OR  signal "my_id" "approval"  OR  signal "approval" timeout "30s"
     if input.peek(Ident) && input.peek2(LitStr) {
@@ -260,7 +267,8 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         });
     }
 
-    Err(input.error("expected a task name, inline task, `delay`, `signal`, `route`, or `(`"))
+    Err(input
+        .error("expected a task name, inline task, `delay`, `signal`, `route`, `loop`, or `(`"))
 }
 
 /// Parse an optional `timeout "30s"` suffix.
@@ -277,6 +285,52 @@ fn parse_optional_timeout(input: ParseStream) -> syn::Result<Option<DurationLit>
         }
     }
     Ok(None)
+}
+
+/// Parse `loop body_task max_iterations` or `loop body_task max_iterations exit_with_last`.
+///
+/// The `loop` keyword has already been consumed.
+fn parse_loop(input: ParseStream, span: Span) -> syn::Result<WorkflowStep> {
+    // Body task identifier (e.g. `refine`)
+    let body_ident: Ident = input.parse().map_err(|_| {
+        err(
+            span,
+            "expected a task name after `loop`, e.g. loop refine_task 10",
+        )
+    })?;
+    let body = Ident::new(
+        &format!("{}Task", snake_to_pascal(&body_ident.to_string())),
+        body_ident.span(),
+    );
+
+    // Max iterations (integer literal)
+    let max_iterations: syn::LitInt = input.parse().map_err(|_| {
+        err(
+            span,
+            "expected max_iterations integer after task name, e.g. loop refine_task 10",
+        )
+    })?;
+
+    // Optional on_max policy: `exit_with_last`
+    let on_max = if input.peek(Ident) {
+        let fork = input.fork();
+        let kw: Ident = fork.parse()?;
+        if kw == "exit_with_last" {
+            let ident: Ident = input.parse()?;
+            Some(ident)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(WorkflowStep::Loop {
+        body,
+        max_iterations,
+        on_max,
+        span,
+    })
 }
 
 /// Parse `route key_fn { "key" => [pipeline], ... }` (string keys)
@@ -372,6 +426,7 @@ impl WorkflowStep {
             | Self::Parallel { span, .. }
             | Self::Delay { span, .. }
             | Self::AwaitSignal { span, .. }
+            | Self::Loop { span, .. }
             | Self::Route { span, .. } => *span,
         }
     }

@@ -30,6 +30,9 @@ pub fn collect_task_refs(steps: &[WorkflowStep]) -> Vec<&Ident> {
                     refs.extend(collect_task_refs(default_steps));
                 }
             }
+            WorkflowStep::Loop { body, .. } => {
+                refs.push(body);
+            }
             WorkflowStep::InlineTask { .. }
             | WorkflowStep::Delay { .. }
             | WorkflowStep::AwaitSignal { .. } => {}
@@ -96,7 +99,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                     match branch {
                         WorkflowStep::TaskRef { struct_name, .. } => {
                             fork_tokens.extend(quote! {
-                                .branch_registered(#struct_name::task_id())?
+                                .branch_registered(#struct_name::task_id())
                             });
                         }
                         WorkflowStep::InlineTask { .. } => {
@@ -120,7 +123,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                         fork_tokens.extend(quote! {
                             .join_registered::<<#struct_name as ::sayiir_core::task::CoreTask>::Output>(
                                 #struct_name::task_id()
-                            )?
+                            )
                         });
                     }
                     _ => {
@@ -138,7 +141,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                 tokens.extend(quote! {
                     .then_registered::<<#struct_name as ::sayiir_core::task::CoreTask>::Output>(
                         #struct_name::task_id()
-                    )?
+                    )
                 });
                 i += 1;
             }
@@ -182,6 +185,29 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                 });
                 i += 1;
             }
+            WorkflowStep::Loop {
+                body,
+                max_iterations,
+                on_max,
+                ..
+            } => {
+                let on_max_expr = match on_max {
+                    Some(ident) if ident == "exit_with_last" => quote! {
+                        ::sayiir_core::MaxIterationsPolicy::ExitWithLast
+                    },
+                    _ => quote! {
+                        ::sayiir_core::MaxIterationsPolicy::Fail
+                    },
+                };
+                tokens.extend(quote! {
+                    .loop_task_registered::<<#body as ::sayiir_core::task::CoreTask>::Output>(
+                        #body::task_id(),
+                        #max_iterations,
+                        #on_max_expr,
+                    )
+                });
+                i += 1;
+            }
             WorkflowStep::Route {
                 id,
                 key_fn: _,
@@ -194,7 +220,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                 let output_type = infer_branch_output_type(branches, default.as_deref(), *span)?;
 
                 tokens.extend(quote! {
-                    .route_registered::<#output_type>(#id)?
+                    .route_registered::<#output_type>(#id)
                 });
 
                 // Generate each named branch
@@ -216,7 +242,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                         }
                     };
                     tokens.extend(quote! {
-                        .branch_registered(#key_expr, &[#(#task_id_exprs),*])?
+                        .branch_registered(#key_expr, &[#(#task_id_exprs),*])
                     });
                 }
 
@@ -228,7 +254,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                         .map(|name| quote! { #name::task_id() })
                         .collect();
                     tokens.extend(quote! {
-                        .default_registered(&[#(#task_id_exprs),*])?
+                        .default_registered(&[#(#task_id_exprs),*])
                     });
                 }
 

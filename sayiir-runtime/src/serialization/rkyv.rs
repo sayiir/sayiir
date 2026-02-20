@@ -2,7 +2,7 @@ use bytecheck::CheckBytes;
 use bytes::Bytes;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
-use sayiir_core::codec::{Decoder, Encoder, EnvelopeCodec, sealed};
+use sayiir_core::codec::{Decoder, Encoder, EnvelopeCodec, LoopDecision, sealed};
 use sayiir_core::error::BoxError;
 
 /// A codec that can serialize and deserialize values using rkyv.
@@ -95,5 +95,15 @@ impl EnvelopeCodec for RkyvCodec {
         })?;
         let vec: Vec<u8> = aligned_vec.into();
         Ok(Bytes::from(vec))
+    }
+
+    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
+        use sayiir_core::LoopResult;
+
+        from_bytes::<LoopResult<Bytes>, Error>(bytes)
+            .map(LoopResult::into_decision)
+            .map_err(|e| -> BoxError {
+                format!("Failed to decode LoopResult with rkyv: {e}").into()
+            })
     }
 }

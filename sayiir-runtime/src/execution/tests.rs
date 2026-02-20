@@ -2683,6 +2683,7 @@ fn test_sync_branch_then_next() {
                 // Receives BranchEnvelope JSON
                 let envelope: serde_json::Value = serde_json::from_slice(&input).unwrap();
                 assert_eq!(envelope["branch"], "billing");
+                #[allow(clippy::cast_possible_truncation)]
                 let inner = envelope["result"].as_u64().unwrap() as u32;
                 Ok(encode_u32(inner + 1))
             }

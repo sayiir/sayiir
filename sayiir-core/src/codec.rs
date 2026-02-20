@@ -148,6 +148,26 @@ pub trait EnvelopeCodec: Send + Sync {
     ///
     /// Returns an error if serialization fails.
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError>;
+
+    /// Decode a `LoopResult` envelope and return the decision + inner value bytes.
+    ///
+    /// The runtime calls this after each loop body execution to determine whether
+    /// to iterate again or exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes cannot be decoded as a `LoopResult` envelope.
+    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError>;
+}
+
+/// Whether a loop body returned `Again` or `Done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum LoopDecision {
+    /// Continue iterating with the inner value as the next input.
+    Again,
+    /// Exit the loop; the inner value is the loop's output.
+    Done,
 }
 
 /// Blanket implementation for `&C` to allow passing references generically.
@@ -163,6 +183,10 @@ impl<C: EnvelopeCodec> EnvelopeCodec for &C {
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
         (**self).encode_named_results(results)
     }
+
+    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
+        (**self).decode_loop_result(bytes)
+    }
 }
 
 /// Blanket implementation for `Arc<C>` to allow passing Arc-wrapped envelope codecs.
@@ -177,5 +201,9 @@ impl<C: EnvelopeCodec> EnvelopeCodec for std::sync::Arc<C> {
 
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
         (**self).encode_named_results(results)
+    }
+
+    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
+        (**self).decode_loop_result(bytes)
     }
 }

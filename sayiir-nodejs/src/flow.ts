@@ -12,7 +12,7 @@
  * ```
  */
 
-import type { Duration, StepOptions, TaskCallback } from "./types.js";
+import type { Duration, LoopOptions, LoopResult, StepOptions, TaskCallback } from "./types.js";
 import type { TaskFn } from "./task.js";
 import { parseDuration } from "./duration.js";
 import type {
@@ -116,10 +116,6 @@ export class Flow<TInput, TLast = TInput> {
   readonly _builder: NapiFlowBuilder;
   /** @internal */
   readonly _taskRegistry: Record<string, TaskCallback> = {};
-  /** @internal */
-  private _lambdaCounter = 0;
-  /** @internal */
-  private _branchCounter = 0;
 
   constructor(name: string, opts?: FlowOptions) {
     this._builder = new (getNative().NapiFlowBuilder)(name);
@@ -173,7 +169,7 @@ export class Flow<TInput, TLast = TInput> {
       metadata = idOrFn._metadata;
     } else {
       // .then(lambda) — auto-generate id
-      taskId = `lambda_${this._lambdaCounter++}`;
+      taskId = this._builder.nextLambdaId();
       taskFn = idOrFn;
     }
 
@@ -251,10 +247,78 @@ export class Flow<TInput, TLast = TInput> {
       | ((input: TLast) => TKeys[number] | Promise<TKeys[number]>),
     keys: TKeys,
   ): RouteBuilder<TInput, TLast, never, TKeys[number]> {
-    const branchId = `branch_${this._branchCounter++}`;
-    return new RouteBuilder(this, branchId, keyFn as TaskCallback, [
+    return new RouteBuilder(this, keyFn as TaskCallback, [
       ...keys,
     ]);
+  }
+
+  /**
+   * Add a loop step whose body repeats until it returns `LoopResult.done()`.
+   *
+   * The body task receives the current value and must return a `LoopResult<T>`.
+   * `LoopResult.again(newValue)` continues the loop; `LoopResult.done(finalValue)` exits.
+   *
+   * ```ts
+   * flow<string>("refine")
+   *   .loop("refine", (draft) => {
+   *     const improved = improve(draft);
+   *     return isGood(improved) ? LoopResult.done(improved) : LoopResult.again(improved);
+   *   }, { maxIterations: 5 })
+   *   .build();
+   * ```
+   */
+  loop<TOut>(
+    fn: TaskFn<TLast, LoopResult<TOut>>,
+    opts?: LoopOptions,
+  ): Flow<TInput, TOut>;
+  loop<TOut>(
+    id: string,
+    fn: ((input: TLast) => LoopResult<TOut> | Promise<LoopResult<TOut>>) | TaskFn<TLast, LoopResult<TOut>>,
+    opts?: LoopOptions,
+  ): Flow<TInput, TOut>;
+  loop<TOut>(
+    idOrFn:
+      | string
+      | TaskFn<TLast, LoopResult<TOut>>
+      | ((input: TLast) => LoopResult<TOut> | Promise<LoopResult<TOut>>),
+    fnOrOpts?:
+      | ((input: TLast) => LoopResult<TOut> | Promise<LoopResult<TOut>>)
+      | TaskFn<TLast, LoopResult<TOut>>
+      | LoopOptions,
+    maybeOpts?: LoopOptions,
+  ): Flow<TInput, TOut> {
+    let taskId: string;
+    let taskFn: TaskCallback;
+    let metadata: NapiTaskMetadata | undefined;
+    let opts: LoopOptions | undefined;
+
+    if (typeof idOrFn === "string") {
+      taskId = idOrFn;
+      taskFn = fnOrOpts as TaskCallback;
+      opts = maybeOpts;
+      if (isTaskFn(taskFn)) {
+        metadata = (taskFn as TaskFn<TLast, LoopResult<TOut>>)._metadata;
+      }
+    } else if (isTaskFn(idOrFn)) {
+      taskId = idOrFn._taskId;
+      taskFn = idOrFn;
+      metadata = idOrFn._metadata;
+      opts = fnOrOpts as LoopOptions | undefined;
+    } else {
+      taskId = this._builder.nextLambdaId();
+      taskFn = idOrFn;
+      opts = fnOrOpts as LoopOptions | undefined;
+    }
+
+    this._taskRegistry[taskId] = taskFn;
+    const maxIterations = opts?.maxIterations ?? 10;
+    if (maxIterations < 1) {
+      throw new Error("maxIterations must be at least 1");
+    }
+    const onMax = opts?.onMax ?? "fail";
+    this._builder.addLoop(taskId, metadata, maxIterations, onMax);
+
+    return this as unknown as Flow<TInput, TOut>;
   }
 
   /** Build the workflow definition. */
@@ -326,7 +390,6 @@ export class RouteBuilder<
   TKey extends string = string,
 > {
   private readonly flow: Flow<TInput, TLast>;
-  private readonly branchId: string;
   private readonly keyFn: TaskCallback;
   private readonly declaredKeys: string[];
   private readonly branches: Array<{
@@ -337,12 +400,10 @@ export class RouteBuilder<
 
   constructor(
     flow: Flow<TInput, TLast>,
-    branchId: string,
     keyFn: TaskCallback,
     declaredKeys: string[],
   ) {
     this.flow = flow;
-    this.branchId = branchId;
     this.keyFn = keyFn;
     this.declaredKeys = declaredKeys;
   }
@@ -439,7 +500,7 @@ export class RouteBuilder<
     const orphans = [...branchedKeys].filter((k) => !declaredSet.has(k));
     if (orphans.length > 0) {
       throw new Error(
-        `Branch node '${this.branchId}': orphan branches for keys: ${orphans.join(", ")}`,
+        `Route: orphan branches for keys: ${orphans.join(", ")}`,
       );
     }
 
@@ -448,14 +509,10 @@ export class RouteBuilder<
       const missing = this.declaredKeys.filter((k) => !branchedKeys.has(k));
       if (missing.length > 0) {
         throw new Error(
-          `Branch node '${this.branchId}': missing branches for keys: ${missing.join(", ")}`,
+          `Route: missing branches for keys: ${missing.join(", ")}`,
         );
       }
     }
-
-    // Register key function
-    const keyFnId = `${this.branchId}${KEY_FN_SUFFIX}`;
-    this.flow._taskRegistry[keyFnId] = this.keyFn;
 
     // Build native branch entries
     const napiBranches = this.branches.map((b) => ({
@@ -471,7 +528,12 @@ export class RouteBuilder<
       return { taskId: step.taskId, metadata: step.metadata };
     });
 
-    this.flow._builder.addBranch(this.branchId, napiBranches, napiDefault);
+    // addBranch returns the generated branch ID
+    const branchId = this.flow._builder.addBranch(napiBranches, napiDefault);
+
+    // Register key function using the generated branch ID
+    const keyFnId = `${branchId}${KEY_FN_SUFFIX}`;
+    this.flow._taskRegistry[keyFnId] = this.keyFn;
 
     return this.flow as unknown as Flow<TInput, BranchEnvelope<TBranchOut>>;
   }
@@ -514,7 +576,7 @@ function resolveBranchTask<TIn, TOut>(
       metadata: idOrFn._metadata,
     };
   } else {
-    const taskId = `${fallbackId}_lambda_${flow["_lambdaCounter"]++}`;
+    const taskId = `${fallbackId}_${flow._builder.nextLambdaId()}`;
     return { taskId, taskFn: idOrFn as TaskCallback };
   }
 }

@@ -75,15 +75,16 @@ const result = await runWorkflow(workflow, { order_id: 1 });
 
 ```rust
 let workflow = WorkflowBuilder::new(ctx)
-    .then("fetch_order", fetch_order)
+    .with_registry()
+    .then_task::<FetchOrderTask>()
     .fork()
-        .branch("validate_payment", validate_payment)
-        .branch("check_inventory", check_inventory)
-        .branch("calculate_shipping", calculate_shipping)
+        .add_task::<ValidatePaymentTask>()
+        .add_task::<CheckInventoryTask>()
+        .add_task::<CalculateShippingTask>()
     .join("finalize_order", |results: BranchOutputs<JsonCodec>| async move {
-        let payment: PaymentResult = results.get("validate_payment")?;
-        let inventory: InventoryResult = results.get("check_inventory")?;
-        let shipping: ShippingResult = results.get("calculate_shipping")?;
+        let payment = results.get::<ValidatePaymentTask>()?;
+        let inventory = results.get::<CheckInventoryTask>()?;
+        let shipping = results.get::<CalculateShippingTask>()?;
         Ok(Order::finalize(payment, inventory, shipping))
     })
     .build()?;
@@ -156,9 +157,9 @@ def finalize(results: dict) -> str:
 
 ```rust
 .join("finalize_order", |results: BranchOutputs<JsonCodec>| async move {
-    let payment: PaymentResult = results.get("validate_payment")?;
-    let inventory: InventoryResult = results.get("check_inventory")?;
-    let shipping: ShippingResult = results.get("calculate_shipping")?;
+    let payment: PaymentResult = results.get_by_id(ValidatePaymentTask::task_id())?;
+    let inventory: InventoryResult = results.get_by_id(CheckInventoryTask::task_id())?;
+    let shipping: ShippingResult = results.get_by_id(CalculateShippingTask::task_id())?;
 
     Ok(format!(
         "Order processed: payment={:?}, stock={:?}, shipping={:?}",
@@ -258,14 +259,15 @@ enum Route {
 }
 
 let wf = WorkflowBuilder::new(ctx)
-    .then("classify", classify_fn)
+    .with_registry()
+    .then_task::<ClassifyTask>()
     .route::<_, Route, _, _>( |input: ClassifyOutput| async move {
         Ok(if input.intent == "billing" { Route::Billing } else { Route::Tech })
     })
-        .branch(Route::Billing, |sub| sub.then("handle_billing", billing_fn))?
-        .branch(Route::Tech, |sub| sub.then("handle_tech", tech_fn))?
-        .default_branch(|sub| sub.then("fallback", fallback_fn))?
-    .done()?  // Err(MissingBranches) if a Route variant is unhandled
+        .branch(Route::Billing, |sub| sub.then_task::<HandleBillingTask>())
+        .branch(Route::Tech, |sub| sub.then_task::<HandleTechTask>())
+        .default_branch(|sub| sub.then_task::<FallbackTask>())
+    .done()
     .build()?;
 
 // Or using the workflow! macro with typed keys

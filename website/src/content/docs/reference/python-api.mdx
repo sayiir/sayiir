@@ -130,6 +130,62 @@ workflow = (
 
 **Returns:** Flow instance for chaining
 
+#### .loop(task_func, *, max_iterations=10, on_max="fail", name=None)
+
+Add a loop whose body repeats until the task returns `LoopResult.done()`.
+
+```python
+from sayiir import Flow, LoopResult, task
+
+@task
+def refine(draft: str) -> dict:
+    improved = improve(draft)
+    if is_good_enough(improved):
+        return LoopResult.done(improved).to_dict()
+    return LoopResult.again(improved).to_dict()
+
+workflow = (
+    Flow("iterative")
+    .then(initial_attempt)
+    .loop(refine, max_iterations=5)
+    .then(finalize)
+    .build()
+)
+```
+
+**Parameters:**
+- `task_func` — Callable that returns a `LoopResult`. Use `LoopResult.again(value)` to continue or `LoopResult.done(value)` to exit.
+- `max_iterations` (int, optional) — Maximum iterations before `on_max` applies (default: 10, must be ≥ 1)
+- `on_max` (str, optional) — `"fail"` (default) raises an error; `"exit_with_last"` exits with the last iteration's output
+- `name` (str, optional) — Override the task ID
+
+**Returns:** Flow instance for chaining
+
+### LoopResult
+
+Control flow type for loop body tasks.
+
+```python
+from sayiir import LoopResult
+
+# Continue the loop with a new value
+LoopResult.again(new_value)
+
+# Exit the loop with the final value
+LoopResult.done(final_value)
+```
+
+**Class methods:**
+- `LoopResult.again(value)` — Continue iterating with `value`
+- `LoopResult.done(value)` — Exit the loop with `value`
+
+**Properties:**
+- `.is_again` (bool) — True if this is an `again` result
+- `.is_done` (bool) — True if this is a `done` result
+- `.value` — The wrapped value
+
+**Wire format:** Serializes as `{"_loop": "again"|"done", "value": ...}`. Call `.to_dict()` to get the serialized form.
+
 #### .fork()
 
 Start a fork for parallel execution.

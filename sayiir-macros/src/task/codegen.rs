@@ -11,12 +11,16 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
     let struct_def = gen_struct(parsed, &name);
     let impl_block = gen_impl(parsed, &name);
     let core_task_impl = gen_core_task(parsed, &name);
+    let registerable_impl = gen_registerable_task(parsed, &name);
+    let default_impl = gen_default(parsed, &name);
     let original_fn = &parsed.original_fn;
 
     quote! {
         #struct_def
         #impl_block
         #core_task_impl
+        #registerable_impl
+        #default_impl
         #original_fn
     }
 }
@@ -147,6 +151,34 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
             #tags
             ..::std::default::Default::default()
         }
+    }
+}
+
+/// Generate the `RegisterableTask` impl.
+fn gen_registerable_task(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
+    let task_id = &parsed.task_id;
+    let metadata_body = gen_metadata_body(parsed);
+
+    quote! {
+        impl ::sayiir_core::task::RegisterableTask for #name {
+            fn task_id() -> &'static str { #task_id }
+            fn metadata() -> ::sayiir_core::task::TaskMetadata {
+                #metadata_body
+            }
+        }
+    }
+}
+
+/// Generate `Default` impl for tasks without injected dependencies.
+fn gen_default(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
+    if parsed.inject_params.is_empty() {
+        quote! {
+            impl ::std::default::Default for #name {
+                fn default() -> Self { Self }
+            }
+        }
+    } else {
+        quote! {}
     }
 }
 

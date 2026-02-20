@@ -27,6 +27,9 @@ use crate::execution::control_flow::{
     ParkReason, StepOutcome, StepResult, compute_signal_timeout, compute_wake_at,
     save_branch_park_checkpoint, save_park_checkpoint,
 };
+use crate::execution::loop_runner::{
+    CheckpointingLoopHooks, LoopConfig, LoopExit, LoopNext, resolve_loop_iteration, run_loop_async,
+};
 use crate::execution::{
     ForkBranchOutcome, JoinResolution, ResumeParkedPosition, branch_execute_or_skip_task,
     check_guards, collect_cached_branches, execute_or_skip_task, finalize_execution,
@@ -512,6 +515,72 @@ where
                     )
                     .into());
                 }
+                WorkflowContinuation::Loop {
+                    id,
+                    body,
+                    max_iterations,
+                    on_max,
+                    ..
+                } => {
+                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+
+                    let cfg = LoopConfig {
+                        id,
+                        body,
+                        max_iterations: *max_iterations,
+                        on_max: *on_max,
+                        start_iteration: snapshot.loop_iteration(id),
+                    };
+                    let mut loop_input = current_input.clone();
+                    let mut final_output = None;
+
+                    for iteration in cfg.start_iteration..cfg.max_iterations {
+                        let output = Box::pin(Self::execute_with_checkpointing(
+                            body,
+                            loop_input.clone(),
+                            snapshot,
+                            Arc::clone(&backend),
+                            context.clone(),
+                        ))
+                        .await?;
+
+                        let body_ser = body.to_serializable();
+                        for tid in &body_ser.task_ids() {
+                            snapshot.remove_task_result(tid);
+                        }
+
+                        match resolve_loop_iteration(
+                            &output,
+                            iteration,
+                            &cfg,
+                            context.codec.as_ref(),
+                        )? {
+                            ControlFlow::Break(LoopExit(inner)) => {
+                                snapshot.clear_loop_iteration(id);
+                                final_output = Some(inner);
+                                break;
+                            }
+                            ControlFlow::Continue(LoopNext(inner)) => {
+                                snapshot.set_loop_iteration(id, iteration + 1);
+                                snapshot.update_position(ExecutionPosition::InLoop {
+                                    loop_id: id.clone(),
+                                    iteration: iteration + 1,
+                                    next_task_id: Some(body.first_task_id().to_string()),
+                                });
+                                backend.save_snapshot(snapshot).await?;
+                                loop_input = inner;
+                            }
+                        }
+                    }
+
+                    match final_output {
+                        Some(output) => Ok(ControlFlow::Continue(output)),
+                        None => Err(RuntimeError::from(WorkflowError::MaxIterationsExceeded {
+                            loop_id: id.clone(),
+                            max_iterations: *max_iterations,
+                        })),
+                    }
+                }
             };
 
             match step? {
@@ -839,6 +908,43 @@ where
                         )
                         .into());
                     }
+                    WorkflowContinuation::Loop {
+                        id,
+                        body,
+                        max_iterations,
+                        on_max,
+                        ..
+                    } => {
+                        let cfg = LoopConfig {
+                            id,
+                            body,
+                            max_iterations: *max_iterations,
+                            on_max: *on_max,
+                            start_iteration: snapshot.loop_iteration(id),
+                        };
+                        let mut hooks = CheckpointingLoopHooks {
+                            snapshot: &mut snapshot,
+                            backend: backend.as_ref(),
+                            track_position: false,
+                        };
+                        let output = run_loop_async(
+                            &cfg,
+                            current_input.clone(),
+                            context.codec.as_ref(),
+                            |input| {
+                                Box::pin(Self::execute_branch_with_checkpoint(
+                                    body,
+                                    input,
+                                    Arc::clone(&backend),
+                                    instance_id.clone(),
+                                    context.clone(),
+                                ))
+                            },
+                            &mut hooks,
+                        )
+                        .await?;
+                        Ok(ControlFlow::Continue(output))
+                    }
                 };
 
                 match step? {
@@ -995,8 +1101,8 @@ mod tests {
                 b.add("add_ten", |i: u32| async move { Ok(i + 10) });
             })
             .join("combine", |outputs: BranchOutputs<JsonCodec>| async move {
-                let doubled: u32 = outputs.get("double")?;
-                let added: u32 = outputs.get("add_ten")?;
+                let doubled: u32 = outputs.get_by_id("double")?;
+                let added: u32 = outputs.get_by_id("add_ten")?;
                 Ok(doubled + added)
             })
             .build()
@@ -1530,15 +1636,12 @@ mod tests {
                     Ok(100u32)
                 })
             })
-            .unwrap()
             .branch(RouteKey::Tech, |sub| {
                 sub.then("handle_tech", |_data: serde_json::Value| async move {
                     Ok(200u32)
                 })
             })
-            .unwrap()
             .done()
-            .unwrap()
             .build()
             .unwrap();
 
@@ -1583,15 +1686,12 @@ mod tests {
                     Ok("matched".to_string())
                 })
             })
-            .unwrap()
             .default_branch(|sub| {
                 sub.then("handle_fallback", |_data: String| async move {
                     Ok("fallback".to_string())
                 })
             })
-            .unwrap()
             .done()
-            .unwrap()
             .build()
             .unwrap();
 
@@ -1629,28 +1729,31 @@ mod tests {
                     Ok("ok".to_string())
                 })
             })
-            .unwrap()
-            .done();
+            .done()
+            .build();
 
-        match result {
-            Err(sayiir_core::error::BuildError::MissingBranches {
-                branch_id,
-                missing_keys,
-            }) => {
-                assert_eq!(branch_id, "branch_1");
-                assert!(missing_keys.contains(&"tech".to_string()));
-            }
-            Err(other) => panic!("Expected MissingBranches, got: {other}"),
-            Ok(_) => panic!("Expected MissingBranches error, got Ok"),
-        }
+        let errors = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected build error"),
+        };
+        let has_missing = errors.iter().any(|e| {
+            matches!(
+                e,
+                sayiir_core::error::BuildError::MissingBranches {
+                    branch_id,
+                    missing_keys,
+                } if branch_id == "branch_1" && missing_keys.contains(&"tech".to_string())
+            )
+        });
+        assert!(has_missing, "Expected MissingBranches error in: {errors:?}");
     }
 
     #[tokio::test]
     async fn test_route_then_next_step() {
+        use sayiir_core::task::BranchEnvelope;
+
         let backend = InMemoryBackend::new();
         let runner = CheckpointingRunner::new(backend.clone());
-
-        use sayiir_core::task::BranchEnvelope;
 
         let workflow = WorkflowBuilder::new(ctx())
             .route::<u32, AbKey, _, _>(|input: String| async move {
@@ -1663,13 +1766,10 @@ mod tests {
             .branch(AbKey::A, |sub| {
                 sub.then("handle_a", |_data: String| async move { Ok(10u32) })
             })
-            .unwrap()
             .branch(AbKey::B, |sub| {
                 sub.then("handle_b", |_data: String| async move { Ok(20u32) })
             })
-            .unwrap()
             .done()
-            .unwrap()
             .then("finalize", |env: BranchEnvelope<u32>| async move {
                 Ok(env.result + 1)
             })

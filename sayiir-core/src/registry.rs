@@ -40,8 +40,8 @@
 //! let registry = build_task_registry(codec.clone());
 //! let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
 //!     .with_existing_registry(registry)
-//!     .then_registered::<u32>("double")?
-//!     .then_registered::<u32>("add_ten")?
+//!     .then_registered::<u32>("double")
+//!     .then_registered::<u32>("add_ten")
 //!     .build()?;
 //! let serializable = workflow.continuation().to_serializable();
 //! let serialized = serde_json::to_string(&serializable)?;

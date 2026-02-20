@@ -1,6 +1,6 @@
 //! Typed error for the sayiir runtime layer.
 
-use sayiir_core::error::{BoxError, BuildError, WorkflowError};
+use sayiir_core::error::{BoxError, BuildError, BuildErrors, WorkflowError};
 use sayiir_persistence::BackendError;
 
 /// Typed error for the sayiir runtime layer.
@@ -13,9 +13,9 @@ pub enum RuntimeError {
     #[error(transparent)]
     Workflow(#[from] WorkflowError),
 
-    /// Build/hydration error (duplicate IDs, missing tasks, empty branches).
+    /// Build/hydration errors (duplicate IDs, missing tasks, empty branches).
     #[error(transparent)]
-    Build(#[from] BuildError),
+    Build(#[from] BuildErrors),
 
     /// Persistent backend error (storage failures).
     #[error(transparent)]
@@ -28,6 +28,12 @@ pub enum RuntimeError {
     /// Tokio task join error (branch spawn failures).
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
+}
+
+impl From<BuildError> for RuntimeError {
+    fn from(error: BuildError) -> Self {
+        Self::Build(BuildErrors::from(error))
+    }
 }
 
 impl RuntimeError {

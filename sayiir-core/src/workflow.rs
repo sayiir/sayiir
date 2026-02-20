@@ -19,6 +19,27 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
 
+/// Policy for what happens when a loop reaches its maximum iteration count.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::EnumString,
+    strum::Display,
+)]
+pub enum MaxIterationsPolicy {
+    /// Fail the workflow with a `MaxIterationsExceeded` error.
+    #[strum(serialize = "fail")]
+    Fail,
+    /// Exit the loop with the last iteration's output (unwrapped from `LoopResult`).
+    #[strum(serialize = "exit_with_last")]
+    ExitWithLast,
+}
+
 /// Generate a `find_duplicate_id` method for continuation-like enums
 ///
 macro_rules! impl_find_duplicate_id {
@@ -60,6 +81,13 @@ macro_rules! impl_find_duplicate_id {
                                 return Some(id.clone());
                             }
                             next.as_ref().and_then(|n| collect(n, seen))
+                        }
+                        $name::Loop { id, body, next, .. } => {
+                            if !seen.insert(id.clone()) {
+                                return Some(id.clone());
+                            }
+                            collect(body, seen)
+                                .or_else(|| next.as_ref().and_then(|n| collect(n, seen)))
                         }
                     }
                 }
@@ -132,6 +160,20 @@ pub enum WorkflowContinuation {
         /// Continuation after the chosen branch completes.
         next: Option<Box<WorkflowContinuation>>,
     },
+    /// A loop node. Repeatedly executes its body until the task returns
+    /// `LoopResult::Done`, or until `max_iterations` is reached.
+    Loop {
+        /// Unique loop identifier.
+        id: String,
+        /// The body continuation to execute on each iteration.
+        body: Box<WorkflowContinuation>,
+        /// Maximum number of iterations before applying `on_max` policy.
+        max_iterations: u32,
+        /// What to do when `max_iterations` is reached.
+        on_max: MaxIterationsPolicy,
+        /// Continuation after the loop completes.
+        next: Option<Box<WorkflowContinuation>>,
+    },
 }
 
 impl_find_duplicate_id!(
@@ -151,6 +193,15 @@ pub fn key_fn_id(branch_id: &str) -> String {
     format!("{branch_id}::key_fn")
 }
 
+/// Derive a loop node ID from a counter value.
+///
+/// By convention loop nodes are named `"loop_0"`, `"loop_1"`, etc.,
+/// matching the pattern used by branch nodes (`"branch_0"`, …).
+#[must_use]
+pub fn loop_node_id(counter: usize) -> String {
+    format!("loop_{counter}")
+}
+
 impl WorkflowContinuation {
     /// Derive a fork ID from a list of branch IDs.
     ///
@@ -168,7 +219,8 @@ impl WorkflowContinuation {
             | WorkflowContinuation::Fork { id, .. }
             | WorkflowContinuation::Delay { id, .. }
             | WorkflowContinuation::AwaitSignal { id, .. }
-            | WorkflowContinuation::Branch { id, .. } => id,
+            | WorkflowContinuation::Branch { id, .. }
+            | WorkflowContinuation::Loop { id, .. } => id,
         }
     }
 
@@ -180,7 +232,8 @@ impl WorkflowContinuation {
             Self::Task { next, .. }
             | Self::Delay { next, .. }
             | Self::AwaitSignal { next, .. }
-            | Self::Branch { next, .. } => next.as_deref(),
+            | Self::Branch { next, .. }
+            | Self::Loop { next, .. } => next.as_deref(),
             Self::Fork { join, .. } => join.as_deref(),
         }
     }
@@ -203,6 +256,7 @@ impl WorkflowContinuation {
                     "unknown"
                 }
             }
+            WorkflowContinuation::Loop { body, .. } => body.first_task_id(),
         }
     }
 
@@ -248,6 +302,9 @@ impl WorkflowContinuation {
                 }
                 next.as_ref().and_then(|n| n.find_task(target_id))
             }
+            WorkflowContinuation::Loop { body, next, .. } => body
+                .find_task(target_id)
+                .or_else(|| next.as_ref().and_then(|n| n.find_task(target_id))),
         }
     }
 
@@ -283,6 +340,12 @@ impl WorkflowContinuation {
                 if let Some(d) = default
                     && let Some(found) = d.find_task_mut(target_id)
                 {
+                    return Some(found);
+                }
+                next.as_mut().and_then(|n| n.find_task_mut(target_id))
+            }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                if let Some(found) = body.find_task_mut(target_id) {
                     return Some(found);
                 }
                 next.as_mut().and_then(|n| n.find_task_mut(target_id))
@@ -378,6 +441,19 @@ impl WorkflowContinuation {
                 default: default.as_ref().map(|d| Box::new(d.to_serializable())),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
+            WorkflowContinuation::Loop {
+                id,
+                body,
+                max_iterations,
+                on_max,
+                next,
+            } => SerializableContinuation::Loop {
+                id: id.clone(),
+                body: Box::new(body.to_serializable()),
+                max_iterations: *max_iterations,
+                on_max: *on_max,
+                next: next.as_ref().map(|n| Box::new(n.to_serializable())),
+            },
         }
     }
 
@@ -389,7 +465,8 @@ impl WorkflowContinuation {
             WorkflowContinuation::Task { next, .. }
             | WorkflowContinuation::Delay { next, .. }
             | WorkflowContinuation::AwaitSignal { next, .. }
-            | WorkflowContinuation::Branch { next, .. } => match next {
+            | WorkflowContinuation::Branch { next, .. }
+            | WorkflowContinuation::Loop { next, .. } => match next {
                 Some(next_box) => next_box.append_to_chain(new_node),
                 None => *next = Some(Box::new(new_node)),
             },
@@ -497,6 +574,19 @@ pub enum SerializableContinuation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<Box<SerializableContinuation>>,
         /// Continuation after the chosen branch completes.
+        next: Option<Box<SerializableContinuation>>,
+    },
+    /// A loop node.
+    Loop {
+        /// Unique loop identifier.
+        id: String,
+        /// The body continuation to execute on each iteration.
+        body: Box<SerializableContinuation>,
+        /// Maximum number of iterations.
+        max_iterations: u32,
+        /// What to do when `max_iterations` is reached.
+        on_max: MaxIterationsPolicy,
+        /// Continuation after the loop completes.
         next: Option<Box<SerializableContinuation>>,
     },
 }
@@ -636,6 +726,26 @@ impl SerializableContinuation {
                     next,
                 })
             }
+            SerializableContinuation::Loop {
+                id,
+                body,
+                max_iterations,
+                on_max,
+                next,
+            } => {
+                let body = body.to_runnable_unchecked(registry)?;
+                let next = next
+                    .as_ref()
+                    .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
+                    .transpose()?;
+                Ok(WorkflowContinuation::Loop {
+                    id: id.clone(),
+                    body: Box::new(body),
+                    max_iterations: *max_iterations,
+                    on_max: *on_max,
+                    next,
+                })
+            }
         }
     }
 
@@ -674,6 +784,13 @@ impl SerializableContinuation {
                     if let Some(d) = default {
                         collect(d, ids);
                     }
+                    if let Some(n) = next {
+                        collect(n, ids);
+                    }
+                }
+                SerializableContinuation::Loop { id, body, next, .. } => {
+                    ids.push(id.as_str());
+                    collect(body, ids);
                     if let Some(n) = next {
                         collect(n, ids);
                     }
@@ -801,6 +918,27 @@ impl SerializableContinuation {
                         hash_continuation(n, hasher);
                     }
                 }
+                SerializableContinuation::Loop {
+                    id,
+                    body,
+                    max_iterations,
+                    on_max,
+                    next,
+                } => {
+                    hasher.update(b"L:");
+                    hasher.update(id.as_bytes());
+                    hasher.update(b":");
+                    hasher.update(max_iterations.to_string().as_bytes());
+                    hasher.update(b":");
+                    hasher.update(format!("{on_max:?}").as_bytes());
+                    hasher.update(b"{");
+                    hash_continuation(body, hasher);
+                    hasher.update(b"}");
+                    hasher.update(b";");
+                    if let Some(n) = next {
+                        hash_continuation(n, hasher);
+                    }
+                }
             }
         }
 
@@ -829,15 +967,23 @@ pub struct SerializedWorkflowState {
 }
 
 /// The status of a workflow execution.
-#[derive(Debug)]
+#[derive(Debug, strum::AsRefStr, strum::EnumDiscriminants)]
+#[strum_discriminants(name(WorkflowStatusKind))]
+#[strum_discriminants(derive(strum::AsRefStr))]
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
+#[strum_discriminants(doc = "Fieldless discriminant of [`WorkflowStatus`] for string comparisons.")]
 pub enum WorkflowStatus {
     /// The workflow is still in progress (task completed, workflow continues).
+    #[strum(serialize = "in_progress")]
     InProgress,
     /// The workflow completed successfully.
+    #[strum(serialize = "completed")]
     Completed,
     /// The workflow failed with an error.
+    #[strum(serialize = "failed")]
     Failed(String),
     /// The workflow was cancelled.
+    #[strum(serialize = "cancelled")]
     Cancelled {
         /// Optional reason for the cancellation.
         reason: Option<String>,
@@ -845,6 +991,7 @@ pub enum WorkflowStatus {
         cancelled_by: Option<String>,
     },
     /// The workflow was paused.
+    #[strum(serialize = "paused")]
     Paused {
         /// Optional reason for the pause.
         reason: Option<String>,
@@ -852,6 +999,7 @@ pub enum WorkflowStatus {
         paused_by: Option<String>,
     },
     /// The workflow is waiting for a delay to expire.
+    #[strum(serialize = "waiting")]
     Waiting {
         /// When the delay expires.
         wake_at: chrono::DateTime<chrono::Utc>,
@@ -859,6 +1007,7 @@ pub enum WorkflowStatus {
         delay_id: String,
     },
     /// The workflow is waiting for an external signal.
+    #[strum(serialize = "awaiting_signal")]
     AwaitingSignal {
         /// The signal node ID.
         signal_id: String,
@@ -867,6 +1016,72 @@ pub enum WorkflowStatus {
         /// Optional timeout deadline.
         wake_at: Option<chrono::DateTime<chrono::Utc>>,
     },
+}
+
+/// Flattened representation of [`WorkflowStatus`] for binding crates.
+///
+/// Both the Node.js and Python bindings expose a flat struct with string
+/// fields to their respective languages. This struct holds the common
+/// fields so bindings only need to map the language-specific output.
+#[derive(Debug, Default)]
+pub struct FlatWorkflowStatus {
+    /// One of: `"completed"`, `"in_progress"`, `"failed"`, `"cancelled"`,
+    /// `"paused"`, `"waiting"`, `"awaiting_signal"`.
+    pub status: String,
+    /// Error message (present when `status == "failed"`).
+    pub error: Option<String>,
+    /// Reason (present when `status` is `"cancelled"` or `"paused"`).
+    pub reason: Option<String>,
+    /// Who cancelled (present when `status == "cancelled"`).
+    pub cancelled_by: Option<String>,
+    /// Who paused (present when `status == "paused"`).
+    pub paused_by: Option<String>,
+    /// ISO-8601 wake-up timestamp (present when `status` is `"waiting"` or `"awaiting_signal"`).
+    pub wake_at: Option<String>,
+    /// Delay step identifier (present when `status == "waiting"`).
+    pub delay_id: Option<String>,
+    /// Signal step identifier (present when `status == "awaiting_signal"`).
+    pub signal_id: Option<String>,
+    /// Signal name (present when `status == "awaiting_signal"`).
+    pub signal_name: Option<String>,
+}
+
+impl From<WorkflowStatus> for FlatWorkflowStatus {
+    fn from(status: WorkflowStatus) -> Self {
+        let mut flat = Self {
+            status: status.as_ref().to_string(),
+            ..Self::default()
+        };
+        match status {
+            WorkflowStatus::Completed | WorkflowStatus::InProgress => {}
+            WorkflowStatus::Failed(e) => flat.error = Some(e),
+            WorkflowStatus::Cancelled {
+                reason,
+                cancelled_by,
+            } => {
+                flat.reason = reason;
+                flat.cancelled_by = cancelled_by;
+            }
+            WorkflowStatus::Paused { reason, paused_by } => {
+                flat.reason = reason;
+                flat.paused_by = paused_by;
+            }
+            WorkflowStatus::Waiting { wake_at, delay_id } => {
+                flat.wake_at = Some(wake_at.to_rfc3339());
+                flat.delay_id = Some(delay_id);
+            }
+            WorkflowStatus::AwaitingSignal {
+                signal_id,
+                signal_name,
+                wake_at,
+            } => {
+                flat.signal_id = Some(signal_id);
+                flat.signal_name = Some(signal_name);
+                flat.wake_at = wake_at.map(|t| t.to_rfc3339());
+            }
+        }
+        flat
+    }
 }
 
 // Re-export builder types for backwards compatibility.
@@ -1193,9 +1408,9 @@ mod tests {
             })
             .join("combine", |outputs: BranchOutputs<DummyCodec>| async move {
                 // In a real workflow with a proper codec, you would:
-                // let count: u32 = outputs.get("count")?;
-                // let name: String = outputs.get("name")?;
-                // let ratio: f64 = outputs.get("ratio")?;
+                // let count: u32 = outputs.get_by_id("count")?;
+                // let name: String = outputs.get_by_id("name")?;
+                // let ratio: f64 = outputs.get_by_id("ratio")?;
                 // For this test, just verify the API compiles
                 let _ = outputs.len();
                 Ok(format!("combined {} branches", outputs.len()))
@@ -1223,10 +1438,14 @@ mod tests {
             .join("combine", |_outputs| async move { Ok(0u32) })
             .build();
 
-        assert!(matches!(
-            result,
-            Err(BuildError::DuplicateTaskId(id)) if id == "count"
-        ));
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected build error"),
+        };
+        assert!(
+            err.iter()
+                .any(|e| matches!(e, BuildError::DuplicateTaskId(id) if id == "count"))
+        );
     }
 
     #[test]
@@ -1347,9 +1566,7 @@ mod tests {
         let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
             .with_existing_registry(registry)
             .then_registered::<u32>("double")
-            .unwrap()
             .then_registered::<u32>("add_ten")
-            .unwrap()
             .build()
             .unwrap();
 
@@ -1391,7 +1608,6 @@ mod tests {
         let workflow: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx)
             .with_existing_registry(registry)
             .then_registered::<u32>("preregistered") // Use pre-registered
-            .unwrap()
             .then("inline", |i: u32| async move { Ok(i + 5) }) // Define inline
             .build()
             .unwrap();
@@ -1632,10 +1848,14 @@ mod tests {
             .delay("dup", Duration::from_secs(1))
             .build();
 
-        assert!(matches!(
-            result,
-            Err(BuildError::DuplicateTaskId(id)) if id == "dup"
-        ));
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected build error"),
+        };
+        assert!(
+            err.iter()
+                .any(|e| matches!(e, BuildError::DuplicateTaskId(id) if id == "dup"))
+        );
     }
 
     #[test]
@@ -1871,7 +2091,7 @@ mod tests {
     clippy::indexing_slicing
 )]
 mod proptests {
-    use super::SerializableContinuation;
+    use super::{MaxIterationsPolicy, SerializableContinuation};
     use proptest::prelude::*;
 
     /// Strategy for alphanumeric IDs (1..8 chars).
@@ -1958,6 +2178,27 @@ mod proptests {
                         id,
                         branches,
                         default,
+                        next,
+                    }
+                }),
+            // Loop with body and optional next
+            (
+                arb_id(),
+                arb_continuation(depth - 1).prop_map(Box::new),
+                1..100u32,
+                prop::bool::ANY.prop_map(|b| if b {
+                    MaxIterationsPolicy::Fail
+                } else {
+                    MaxIterationsPolicy::ExitWithLast
+                }),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, body, max_iterations, on_max, next)| {
+                    SerializableContinuation::Loop {
+                        id,
+                        body,
+                        max_iterations,
+                        on_max,
                         next,
                     }
                 }),
@@ -2066,7 +2307,7 @@ mod proptests {
             },
             // Branch with two named branches, optional default and next
             {
-                let id_b = id;
+                let id_b = id.clone();
                 let prefix_b = prefix.to_string();
                 let b0 = arb_unique_continuation(depth - 1, &format!("{prefix_b}br0_"))
                     .prop_map(Box::new);
@@ -2091,6 +2332,38 @@ mod proptests {
                         next,
                     }
                 })
+            },
+            // Loop with body and optional next
+            {
+                let id_l = id;
+                let prefix_l = prefix.to_string();
+                let body = arb_unique_continuation(depth - 1, &format!("{prefix_l}lb_"))
+                    .prop_map(Box::new);
+                let next = prop::option::of(
+                    arb_unique_continuation(depth - 1, &format!("{prefix_l}ln_"))
+                        .prop_map(Box::new),
+                );
+                (
+                    body,
+                    1..100u32,
+                    prop::bool::ANY.prop_map(|b| {
+                        if b {
+                            MaxIterationsPolicy::Fail
+                        } else {
+                            MaxIterationsPolicy::ExitWithLast
+                        }
+                    }),
+                    next,
+                )
+                    .prop_map(move |(body, max_iterations, on_max, next)| {
+                        SerializableContinuation::Loop {
+                            id: id_l.clone(),
+                            body,
+                            max_iterations,
+                            on_max,
+                            next,
+                        }
+                    })
             },
         ]
         .boxed()
@@ -2131,6 +2404,13 @@ mod proptests {
                     if let Some(d) = default {
                         walk(d, out);
                     }
+                    if let Some(n) = next {
+                        walk(n, out);
+                    }
+                }
+                SerializableContinuation::Loop { id, body, next, .. } => {
+                    out.push(id.clone());
+                    walk(body, out);
                     if let Some(n) = next {
                         walk(n, out);
                     }
@@ -2189,6 +2469,19 @@ mod proptests {
                 id: dup_id.to_string(),
                 branches: branches.clone(),
                 default: default.clone(),
+                next: next.clone(),
+            },
+            SerializableContinuation::Loop {
+                body,
+                max_iterations,
+                on_max,
+                next,
+                ..
+            } => SerializableContinuation::Loop {
+                id: dup_id.to_string(),
+                body: body.clone(),
+                max_iterations: *max_iterations,
+                on_max: *on_max,
                 next: next.clone(),
             },
         }
