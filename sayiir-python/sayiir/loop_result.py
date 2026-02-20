@@ -1,7 +1,15 @@
 """LoopResult type for controlling loop iteration."""
 
-from enum import StrEnum
+import sys
 from typing import Any, Generic, TypeVar
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # type: ignore[no-redef]
+        """Minimal StrEnum backport for Python <3.11."""
 
 T = TypeVar("T")
 

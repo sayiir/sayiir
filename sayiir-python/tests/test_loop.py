@@ -4,7 +4,6 @@ import pytest
 
 from sayiir import (
     Flow,
-    InMemoryBackend,
     LoopResult,
     WorkflowError,
     run_durable_workflow,
@@ -81,7 +80,11 @@ class TestLoopSimple:
         def infinite_loop(x):
             return LoopResult.again(x + 1)
 
-        wf = Flow("infinite").loop(infinite_loop, max_iterations=3, on_max="fail").build()
+        wf = (
+            Flow("infinite")
+            .loop(infinite_loop, max_iterations=3, on_max="fail")
+            .build()
+        )
         with pytest.raises(WorkflowError):
             run_workflow(wf, 0)
 
@@ -134,7 +137,7 @@ class TestLoopSimple:
 
         wf = Flow("dict-state").loop(accumulator, max_iterations=10).build()
         result = run_workflow(wf, {"count": 0, "total": 0})
-        # Iterations: count=0,total=0 → count=1,total=0 → count=2,total=1 → count=3,total=3
+        # count=0,total=0 → 1,0 → 2,1 → 3,3
         assert result == 3
 
     def test_loop_with_string_state(self):
