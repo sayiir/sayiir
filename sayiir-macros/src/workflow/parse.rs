@@ -313,13 +313,15 @@ fn parse_loop(input: ParseStream, span: Span) -> syn::Result<WorkflowStep> {
 
     // Optional on_max policy: `exit_with_last`
     let on_max = if input.peek(Ident) {
-        let fork = input.fork();
-        let kw: Ident = fork.parse()?;
+        let kw: Ident = input.parse()?;
         if kw == "exit_with_last" {
-            let ident: Ident = input.parse()?;
-            Some(ident)
+            Some(kw)
         } else {
-            None
+            return Err(err(
+                kw.span(),
+                "expected `exit_with_last` after max_iterations, \
+                 or `,` / `]` to end the loop step",
+            ));
         }
     } else {
         None

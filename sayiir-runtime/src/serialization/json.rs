@@ -69,4 +69,18 @@ impl EnvelopeCodec for JsonCodec {
         let (decision, inner) = result.into_decision();
         Ok((decision, Bytes::from(serde_json::to_vec(&inner)?)))
     }
+
+    fn encode_loop_result(
+        &self,
+        decision: LoopDecision,
+        inner_bytes: &[u8],
+    ) -> Result<Bytes, BoxError> {
+        let inner: serde_json::Value = serde_json::from_slice(inner_bytes)?;
+        let tag = match decision {
+            LoopDecision::Again => "again",
+            LoopDecision::Done => "done",
+        };
+        let envelope = serde_json::json!({"_loop": tag, "value": inner});
+        Ok(Bytes::from(serde_json::to_vec(&envelope)?))
+    }
 }

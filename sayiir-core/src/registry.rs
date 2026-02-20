@@ -54,8 +54,9 @@
 //! # }
 //! ```
 
-use crate::codec::{Codec, sealed};
+use crate::codec::{Codec, EnvelopeCodec, sealed};
 use crate::error::BoxError;
+use crate::loop_result::LoopResult;
 use crate::task::{
     BranchOutputs, BytesFuture, CoreTask, TaskMetadata, UntypedCoreTask,
     to_heterogeneous_join_task_arc,
@@ -276,6 +277,57 @@ impl TaskRegistry {
             let func = Arc::clone(&func);
             let codec = Arc::clone(&codec);
             Box::new(FnTaskWrapper {
+                func,
+                codec,
+                _phantom: PhantomData,
+            })
+        });
+        self.tasks
+            .insert(id.to_string(), TaskEntry { factory, metadata });
+    }
+
+    /// Register a `CoreTask` struct whose output is `LoopResult<O>` with two-step encoding.
+    pub(crate) fn register_loop_task_arc<T, O, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        task: Arc<T>,
+        metadata: TaskMetadata,
+    ) where
+        T: CoreTask<Output = LoopResult<O>> + 'static,
+        T::Input: Send + 'static,
+        O: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+    {
+        use crate::task::wrap_core_loop_task;
+        let factory = Box::new(move || -> UntypedCoreTask {
+            let task = Arc::clone(&task);
+            let codec = Arc::clone(&codec);
+            wrap_core_loop_task(task, codec)
+        });
+        self.tasks
+            .insert(id.to_string(), TaskEntry { factory, metadata });
+    }
+
+    /// Register a loop body closure that uses two-step encoding via [`EnvelopeCodec`].
+    pub(crate) fn register_loop_fn_arc<I, O, F, Fut, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        func: Arc<F>,
+        metadata: TaskMetadata,
+    ) where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        let factory = Box::new(move || -> UntypedCoreTask {
+            let func = Arc::clone(&func);
+            let codec = Arc::clone(&codec);
+            Box::new(LoopFnTaskWrapper {
                 func,
                 codec,
                 _phantom: PhantomData,
@@ -592,6 +644,38 @@ where
             let decoded_input = codec.decode::<I>(input)?;
             let output = func(decoded_input).await?;
             codec.encode(&output)
+        })
+    }
+}
+
+/// Wrapper for loop body closure-based tasks (two-step encoding).
+struct LoopFnTaskWrapper<F, I, O, C> {
+    func: Arc<F>,
+    codec: Arc<C>,
+    _phantom: PhantomData<fn(I) -> O>,
+}
+
+impl<F, I, O, Fut, C> CoreTask for LoopFnTaskWrapper<F, I, O, C>
+where
+    F: Fn(I) -> Fut + Send + Sync + 'static,
+    I: Send + 'static,
+    O: Send + 'static,
+    Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
+    C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+{
+    type Input = Bytes;
+    type Output = Bytes;
+    type Future = BytesFuture;
+
+    fn run(&self, input: Bytes) -> Self::Future {
+        let func = Arc::clone(&self.func);
+        let codec = Arc::clone(&self.codec);
+        BytesFuture::new(async move {
+            let decoded_input = codec.decode::<I>(input)?;
+            let loop_result = func(decoded_input).await?;
+            let (decision, inner) = loop_result.into_decision();
+            let inner_bytes = codec.encode(&inner)?;
+            codec.encode_loop_result(decision, &inner_bytes)
         })
     }
 }

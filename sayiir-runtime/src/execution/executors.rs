@@ -170,6 +170,7 @@ where
                     start_iteration: 0,
                 };
                 let mut loop_input = current_input.clone();
+                let mut exited = false;
                 for iteration in 0..cfg.max_iterations {
                     let output = execute_continuation_sync(
                         body,
@@ -182,6 +183,7 @@ where
                             Some(next_cont) => {
                                 current = next_cont;
                                 current_input = inner;
+                                exited = true;
                                 break;
                             }
                             None => return Ok(inner),
@@ -190,6 +192,17 @@ where
                             loop_input = inner;
                         }
                     }
+                }
+                if !exited {
+                    // Safety net: if the for-loop exhausts without breaking,
+                    // max iterations was exceeded (resolve_loop_iteration
+                    // prevents this today, but the guard keeps the code
+                    // structurally sound — matching run_loop_async).
+                    return Err(WorkflowError::MaxIterationsExceeded {
+                        loop_id: id.clone(),
+                        max_iterations: *max_iterations,
+                    }
+                    .into());
                 }
             }
         }

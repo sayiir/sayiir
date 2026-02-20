@@ -106,4 +106,22 @@ impl EnvelopeCodec for RkyvCodec {
                 format!("Failed to decode LoopResult with rkyv: {e}").into()
             })
     }
+
+    fn encode_loop_result(
+        &self,
+        decision: LoopDecision,
+        inner_bytes: &[u8],
+    ) -> Result<Bytes, BoxError> {
+        use sayiir_core::LoopResult;
+
+        let envelope = match decision {
+            LoopDecision::Again => LoopResult::Again(Bytes::copy_from_slice(inner_bytes)),
+            LoopDecision::Done => LoopResult::Done(Bytes::copy_from_slice(inner_bytes)),
+        };
+        let aligned_vec = to_bytes::<Error>(&envelope).map_err(|e| -> BoxError {
+            format!("Failed to encode LoopResult with rkyv: {e}").into()
+        })?;
+        let vec: Vec<u8> = aligned_vec.into();
+        Ok(Bytes::from(vec))
+    }
 }

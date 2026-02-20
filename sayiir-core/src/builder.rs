@@ -8,15 +8,15 @@
 //! For the proc-macro DSL alternative, see the `workflow!` macro in `sayiir-macros`.
 
 use crate::branch_key::BranchKey;
-use crate::codec::Codec;
 use crate::codec::sealed;
+use crate::codec::{Codec, EnvelopeCodec};
 use crate::context::WorkflowContext;
 use crate::error::{BuildError, BuildErrors};
 use crate::loop_result::LoopResult;
 use crate::registry::TaskRegistry;
 use crate::task::{
-    BranchEnvelope, BranchOutputs, ErasedBranch, RegisterableTask, branch, to_core_task_arc,
-    to_heterogeneous_join_task_arc, wrap_core_task,
+    BranchEnvelope, BranchOutputs, ErasedBranch, RegisterableTask, branch, to_core_loop_task_arc,
+    to_core_task_arc, to_heterogeneous_join_task_arc, wrap_core_loop_task, wrap_core_task,
 };
 use crate::workflow::{MaxIterationsPolicy, SerializableWorkflow, Workflow, WorkflowContinuation};
 use std::collections::HashMap;
@@ -73,6 +73,31 @@ pub trait RegistryBehavior {
         T::Future: Send + 'static,
         C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static;
 
+    /// Register a `CoreTask` struct whose output is `LoopResult<O>` (no-op for `NoRegistry`).
+    fn maybe_register_core_loop_task<T, O, C>(
+        &mut self,
+        _id: &str,
+        _codec: Arc<C>,
+        _task: Arc<T>,
+        _metadata: crate::task::TaskMetadata,
+    ) where
+        T: crate::task::CoreTask<Output = LoopResult<O>> + 'static,
+        T::Input: Send + 'static,
+        O: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static;
+
+    /// Register a loop body task with two-step encoding (no-op for `NoRegistry`).
+    fn maybe_register_loop<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
+            + Send
+            + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
+
     /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
     fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
     where
@@ -111,6 +136,35 @@ impl RegistryBehavior for NoRegistry {
         T::Output: Send + 'static,
         T::Future: Send + 'static,
         C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        // No-op for non-serializable workflows
+    }
+
+    fn maybe_register_core_loop_task<T, O, C>(
+        &mut self,
+        _id: &str,
+        _codec: Arc<C>,
+        _task: Arc<T>,
+        _metadata: crate::task::TaskMetadata,
+    ) where
+        T: crate::task::CoreTask<Output = LoopResult<O>> + 'static,
+        T::Input: Send + 'static,
+        O: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+    {
+        // No-op for non-serializable workflows
+    }
+
+    fn maybe_register_loop<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
+            + Send
+            + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         // No-op for non-serializable workflows
     }
@@ -158,6 +212,36 @@ impl RegistryBehavior for TaskRegistry {
         C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
     {
         self.register_task_arc(id, codec, task, metadata);
+    }
+
+    fn maybe_register_core_loop_task<T, O, C>(
+        &mut self,
+        id: &str,
+        codec: Arc<C>,
+        task: Arc<T>,
+        metadata: crate::task::TaskMetadata,
+    ) where
+        T: crate::task::CoreTask<Output = LoopResult<O>> + 'static,
+        T::Input: Send + 'static,
+        O: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+    {
+        self.register_loop_task_arc(id, codec, task, metadata);
+    }
+
+    fn maybe_register_loop<I, O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
+            + Send
+            + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    {
+        use crate::task::TaskMetadata;
+        self.register_loop_fn_arc(id, codec, Arc::clone(func), TaskMetadata::default());
     }
 
     fn maybe_register_join<O, F, Fut, C>(&mut self, id: &str, codec: Arc<C>, func: &Arc<F>)
@@ -432,8 +516,9 @@ where
             + Send
             + 'static,
         C: Codec
+            + EnvelopeCodec
             + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + sealed::EncodeValue<NewOutput>
             + 'static,
     {
         self.loop_task_with_policy(id, func, max_iterations, MaxIterationsPolicy::Fail)
@@ -459,8 +544,9 @@ where
             + Send
             + 'static,
         C: Codec
+            + EnvelopeCodec
             + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + sealed::EncodeValue<NewOutput>
             + 'static,
     {
         if max_iterations == 0 {
@@ -471,9 +557,9 @@ where
         let func = Arc::new(func);
 
         self.registry
-            .maybe_register::<Output, LoopResult<NewOutput>, _, _, _>(id, codec.clone(), &func);
+            .maybe_register_loop::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_task_arc(func, codec);
+        let task = to_core_loop_task_arc(func, codec);
         let loop_id = crate::workflow::loop_node_id(self.loop_counter);
         self.loop_counter += 1;
 
@@ -626,19 +712,20 @@ where
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
         C: Codec
+            + EnvelopeCodec
             + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + sealed::EncodeValue<NewOutput>
             + 'static,
     {
-        self.loop_task_struct_with(T::default(), max_iterations)
+        self.loop_task_struct_with_policy(T::default(), max_iterations, MaxIterationsPolicy::Fail)
     }
 
     /// Add a `#[task]` loop struct instance (for tasks with injected deps).
     ///
-    /// The task's output must be `LoopResult<NewOutput>`. The loop node ID
-    /// is auto-derived. See [`loop_task`](Self::loop_task) for semantics.
+    /// Uses the default `MaxIterationsPolicy::Fail`. For a custom policy,
+    /// use [`loop_task_struct_with_policy`](Self::loop_task_struct_with_policy).
     pub fn loop_task_struct_with<T, NewOutput>(
-        mut self,
+        self,
         task: T,
         max_iterations: u32,
     ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
@@ -648,8 +735,33 @@ where
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
         C: Codec
+            + EnvelopeCodec
             + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<LoopResult<NewOutput>>
+            + sealed::EncodeValue<NewOutput>
+            + 'static,
+    {
+        self.loop_task_struct_with_policy(task, max_iterations, MaxIterationsPolicy::Fail)
+    }
+
+    /// Add a `#[task]` loop struct instance with a custom `MaxIterationsPolicy`.
+    ///
+    /// The task's output must be `LoopResult<NewOutput>`. The loop node ID
+    /// is auto-derived. See [`loop_task`](Self::loop_task) for semantics.
+    pub fn loop_task_struct_with_policy<T, NewOutput>(
+        mut self,
+        task: T,
+        max_iterations: u32,
+        on_max: MaxIterationsPolicy,
+    ) -> WorkflowBuilder<C, Input, NewOutput, M, WorkflowContinuation, R>
+    where
+        T: RegisterableTask<Input = Output, Output = LoopResult<NewOutput>>,
+        Output: Send + 'static,
+        NewOutput: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Output>
+            + sealed::EncodeValue<NewOutput>
             + 'static,
     {
         let id = T::task_id();
@@ -662,14 +774,15 @@ where
         let codec = Arc::clone(&self.context.codec);
         let task = Arc::new(task);
 
-        self.registry.maybe_register_core_task::<T, C>(
-            id,
-            codec.clone(),
-            Arc::clone(&task),
-            metadata.clone(),
-        );
+        self.registry
+            .maybe_register_core_loop_task::<T, NewOutput, C>(
+                id,
+                codec.clone(),
+                Arc::clone(&task),
+                metadata.clone(),
+            );
 
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_loop_task(task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
 
@@ -688,7 +801,7 @@ where
             id: loop_id.clone(),
             body: Box::new(body),
             max_iterations,
-            on_max: MaxIterationsPolicy::Fail,
+            on_max,
             next: None,
         };
 

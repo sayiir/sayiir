@@ -2698,3 +2698,378 @@ fn test_sync_branch_then_next() {
 
 // Async and checkpointing branch tests are covered by the distributed runner tests
 // in sayiir-runtime/src/runner/distributed.rs (test_route_*).
+
+// ========================================================================
+// Loop helpers
+// ========================================================================
+
+fn loop_body_task(
+    id: &str,
+    f: impl Fn(
+        u32,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<sayiir_core::LoopResult<u32>, BoxError>> + Send,
+        >,
+    > + Send
+    + Sync
+    + 'static,
+) -> WorkflowContinuation {
+    let c = codec();
+    WorkflowContinuation::Task {
+        id: id.to_string(),
+        func: Some(to_core_task(f, c)),
+        timeout: None,
+        retry_policy: None,
+        next: None,
+    }
+}
+
+// ========================================================================
+// Loop tests — checkpointing (resume from checkpoint)
+// ========================================================================
+
+#[tokio::test]
+async fn test_checkpointing_loop_basic() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(3);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let body = stub_node("countdown", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+
+    let callback = |_id: &str, input: Bytes| async move {
+        let n = decode_u32(&input);
+        if n == 0 {
+            Ok(encode_loop_done(0))
+        } else {
+            Ok(encode_loop_again(n - 1))
+        }
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(decode_u32(&result), 0);
+    // Loop iteration counter should be cleared after completion
+    assert_eq!(snapshot.loop_iteration("loop_0"), 0);
+}
+
+#[tokio::test]
+async fn test_checkpointing_loop_resumes_from_iteration() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(5);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+
+    // Simulate: 2 iterations already completed. Next input should be 3 (5→4→3).
+    snapshot.set_loop_iteration("loop_0", 2);
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let call_count = Arc::new(AtomicU32::new(0));
+    let cc = call_count.clone();
+
+    let body = stub_node("countdown", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+
+    let callback = move |_id: &str, input: Bytes| {
+        let cc = cc.clone();
+        async move {
+            cc.fetch_add(1, Ordering::SeqCst);
+            let n = decode_u32(&input);
+            if n == 0 {
+                Ok(encode_loop_done(0))
+            } else {
+                Ok(encode_loop_again(n - 1))
+            }
+        }
+    };
+
+    // Resume with input 3 (what iteration 2 would have produced)
+    let resume_input = encode_u32(3);
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        resume_input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(decode_u32(&result), 0);
+    // Should have run 4 body executions (3→2→1→0 → Done)
+    assert_eq!(call_count.load(Ordering::SeqCst), 4);
+    // Loop iteration counter should be cleared after completion
+    assert_eq!(snapshot.loop_iteration("loop_0"), 0);
+}
+
+// ========================================================================
+// Loop tests — sync
+// ========================================================================
+
+fn encode_loop_again(val: u32) -> Bytes {
+    Bytes::from(serde_json::to_vec(&serde_json::json!({"_loop":"again","value":val})).unwrap())
+}
+
+fn encode_loop_done(val: u32) -> Bytes {
+    Bytes::from(serde_json::to_vec(&serde_json::json!({"_loop":"done","value":val})).unwrap())
+}
+
+fn loop_node(
+    body_id: &str,
+    max_iterations: u32,
+    on_max: sayiir_core::workflow::MaxIterationsPolicy,
+    next: Option<Box<WorkflowContinuation>>,
+) -> WorkflowContinuation {
+    WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(stub_node(body_id, None)),
+        max_iterations,
+        on_max,
+        next: next.map(Into::into),
+    }
+}
+
+#[test]
+fn test_sync_loop_done_immediately() {
+    use sayiir_core::workflow::MaxIterationsPolicy;
+
+    let cont = loop_node("body", 10, MaxIterationsPolicy::Fail, None);
+    let input = encode_u32(42);
+
+    let callback = |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let val = decode_u32(&input);
+        Ok(encode_loop_done(val * 2))
+    };
+
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
+    assert_eq!(decode_u32(&result), 84);
+}
+
+#[test]
+fn test_sync_loop_three_iterations() {
+    use sayiir_core::workflow::MaxIterationsPolicy;
+
+    let cont = loop_node("countdown", 10, MaxIterationsPolicy::Fail, None);
+    let input = encode_u32(3);
+
+    let callback = |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let n = decode_u32(&input);
+        if n <= 0 {
+            Ok(encode_loop_done(0))
+        } else {
+            Ok(encode_loop_again(n - 1))
+        }
+    };
+
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
+    assert_eq!(decode_u32(&result), 0);
+}
+
+#[test]
+fn test_sync_loop_max_iterations_fail() {
+    use sayiir_core::workflow::MaxIterationsPolicy;
+
+    let cont = loop_node("always_again", 3, MaxIterationsPolicy::Fail, None);
+    let input = encode_u32(0);
+
+    let callback = |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let n = decode_u32(&input);
+        Ok(encode_loop_again(n + 1))
+    };
+
+    let err = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap_err();
+    assert!(
+        err.to_string().contains("max"),
+        "expected MaxIterationsExceeded, got: {err}"
+    );
+}
+
+#[test]
+fn test_sync_loop_max_iterations_exit_with_last() {
+    use sayiir_core::workflow::MaxIterationsPolicy;
+
+    let cont = loop_node("always_again", 3, MaxIterationsPolicy::ExitWithLast, None);
+    let input = encode_u32(0);
+
+    let callback = |_id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let n = decode_u32(&input);
+        Ok(encode_loop_again(n + 1))
+    };
+
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
+    // 0 → again(1) → again(2) → again(3) → max reached, exit with 3
+    assert_eq!(decode_u32(&result), 3);
+}
+
+#[test]
+fn test_sync_loop_in_chain() {
+    use sayiir_core::workflow::MaxIterationsPolicy;
+
+    let double = stub_node("double", None);
+    let cont = loop_node(
+        "countdown",
+        10,
+        MaxIterationsPolicy::Fail,
+        Some(Box::new(double)),
+    );
+    let input = encode_u32(3);
+
+    let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let val = decode_u32(&input);
+        match id {
+            "countdown" => {
+                if val <= 0 {
+                    Ok(encode_loop_done(0))
+                } else {
+                    Ok(encode_loop_again(val - 1))
+                }
+            }
+            "double" => Ok(encode_u32(val * 2)),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&cont, input, &callback, &JsonCodec).unwrap();
+    // 3 → 2 → 1 → 0 → done(0) → double → 0
+    assert_eq!(decode_u32(&result), 0);
+}
+
+// ========================================================================
+// Loop tests — async
+// ========================================================================
+
+#[tokio::test]
+async fn test_async_loop_done_immediately() {
+    use sayiir_core::LoopResult;
+
+    let body = loop_body_task("body", |val| {
+        Box::pin(async move { Ok(LoopResult::Done(val * 2)) })
+    });
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+    let input = encode_u32(42);
+
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
+    assert_eq!(decode_u32(&result), 84);
+}
+
+#[tokio::test]
+async fn test_async_loop_max_iterations_fail() {
+    use sayiir_core::LoopResult;
+
+    let body = loop_body_task("always_again", |val| {
+        Box::pin(async move { Ok(LoopResult::Again(val + 1)) })
+    });
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 3,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+    let input = encode_u32(0);
+
+    let err = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("max"),
+        "expected MaxIterationsExceeded, got: {err}"
+    );
+}
+
+// ========================================================================
+// Loop inside fork branch — async
+// ========================================================================
+
+#[tokio::test]
+async fn test_async_loop_inside_fork_branch() {
+    use sayiir_core::LoopResult;
+    use sayiir_core::task::{BranchOutputs, to_heterogeneous_join_task};
+
+    // Branch A: a loop that counts down from input to 0
+    let loop_body_a = loop_body_task("countdown", |n| {
+        Box::pin(async move {
+            if n == 0 {
+                Ok(LoopResult::Done(100u32))
+            } else {
+                Ok(LoopResult::Again(n - 1))
+            }
+        })
+    });
+    let branch_a = Arc::new(WorkflowContinuation::Loop {
+        id: "loop_a".into(),
+        body: Box::new(loop_body_a),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    });
+
+    // Branch B: simple doubler
+    let branch_b = Arc::new(task_node("double", |x: u32| async move { Ok(x * 2) }, None));
+
+    // Join sums both branch results
+    let join_fn = to_heterogeneous_join_task(
+        |outputs: BranchOutputs<JsonCodec>| async move {
+            let a: u32 = outputs.get_by_id("loop_a")?;
+            let b: u32 = outputs.get_by_id("double")?;
+            Ok(a + b)
+        },
+        codec(),
+    );
+    let join_cont = WorkflowContinuation::Task {
+        id: "join".to_string(),
+        func: Some(join_fn),
+        timeout: None,
+        retry_policy: None,
+        next: None,
+    };
+
+    let fork = WorkflowContinuation::Fork {
+        id: "fork".into(),
+        branches: vec![branch_a, branch_b].into_boxed_slice(),
+        join: Some(Box::new(join_cont)),
+    };
+    let input = encode_u32(3);
+
+    let result = execute_continuation_async(&fork, input, &JsonCodec)
+        .await
+        .unwrap();
+    // loop_a: countdown 3→2→1→0 → Done(100), double: 3*2=6, join: 100+6=106
+    assert_eq!(decode_u32(&result), 106);
+}

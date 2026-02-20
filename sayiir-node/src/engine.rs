@@ -182,6 +182,8 @@ enum PlannedStep {
     SaveBranchResult { branch_id: String },
     /// Collect all branch results into a JSON object for the join task.
     CollectBranches,
+    /// Save current input before branch key function (restored by `BranchDispatch`).
+    SaveBranchInput,
     /// Dispatch to a branch based on the routing key (current input is the key).
     BranchDispatch {
         branch_id: String,
@@ -224,6 +226,8 @@ pub struct NapiContinuationStepper {
     fork_input_stack: Vec<Bytes>,
     /// Accumulated branch results for the current fork.
     branch_results_stack: Vec<Vec<(String, Bytes)>>,
+    /// Saved input before branch key function (for routing dispatch).
+    branch_input_stack: Vec<Bytes>,
 }
 
 #[napi]
@@ -242,6 +246,7 @@ impl NapiContinuationStepper {
             current_input: input_bytes,
             fork_input_stack: Vec::new(),
             branch_results_stack: Vec::new(),
+            branch_input_stack: Vec::new(),
         };
 
         // Skip past any non-task steps at the start.
@@ -329,6 +334,8 @@ impl NapiContinuationStepper {
                 next,
                 ..
             } => {
+                // Save current input before the key function overwrites it
+                steps.push(PlannedStep::SaveBranchInput);
                 // The key function is registered as "{id}::key_fn"
                 let key_fn_id = sayiir_core::workflow::key_fn_id(id);
                 steps.push(PlannedStep::Task { id: key_fn_id });
@@ -413,6 +420,10 @@ impl NapiContinuationStepper {
                     self.current_input = Self::encode_branch_map(results)?;
                     self.pos += 1;
                 }
+                PlannedStep::SaveBranchInput => {
+                    self.branch_input_stack.push(self.current_input.clone());
+                    self.pos += 1;
+                }
                 PlannedStep::BranchDispatch { .. } | PlannedStep::WrapBranchEnvelope { .. } => {
                     self.handle_branch_step()?;
                 }
@@ -447,6 +458,7 @@ impl NapiContinuationStepper {
                 branches,
                 default,
             } => {
+                // current_input is the key function's output (the routing key)
                 let key: String = serde_json::from_slice(&self.current_input)
                     .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
                 let chosen = branches
@@ -459,6 +471,11 @@ impl NapiContinuationStepper {
                         )
                     })?
                     .clone();
+
+                // Restore the original input from before the key function ran
+                if let Some(saved) = self.branch_input_stack.pop() {
+                    self.current_input = saved;
+                }
 
                 let wrap = PlannedStep::WrapBranchEnvelope { key };
                 let insert_pos = self.pos + 1;

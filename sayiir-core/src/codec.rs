@@ -158,6 +158,21 @@ pub trait EnvelopeCodec: Send + Sync {
     ///
     /// Returns an error if the bytes cannot be decoded as a `LoopResult` envelope.
     fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError>;
+
+    /// Encode a `LoopResult` envelope from a decision tag and pre-encoded inner value bytes.
+    ///
+    /// This is the encoding counterpart of [`decode_loop_result`](Self::decode_loop_result).
+    /// The loop task wrapper calls this after encoding the inner value separately,
+    /// ensuring the envelope format matches what `decode_loop_result` expects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if envelope construction or serialization fails.
+    fn encode_loop_result(
+        &self,
+        decision: LoopDecision,
+        inner_bytes: &[u8],
+    ) -> Result<Bytes, BoxError>;
 }
 
 /// Whether a loop body returned `Again` or `Done`.
@@ -187,6 +202,14 @@ impl<C: EnvelopeCodec> EnvelopeCodec for &C {
     fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
         (**self).decode_loop_result(bytes)
     }
+
+    fn encode_loop_result(
+        &self,
+        decision: LoopDecision,
+        inner_bytes: &[u8],
+    ) -> Result<Bytes, BoxError> {
+        (**self).encode_loop_result(decision, inner_bytes)
+    }
 }
 
 /// Blanket implementation for `Arc<C>` to allow passing Arc-wrapped envelope codecs.
@@ -205,5 +228,13 @@ impl<C: EnvelopeCodec> EnvelopeCodec for std::sync::Arc<C> {
 
     fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
         (**self).decode_loop_result(bytes)
+    }
+
+    fn encode_loop_result(
+        &self,
+        decision: LoopDecision,
+        inner_bytes: &[u8],
+    ) -> Result<Bytes, BoxError> {
+        (**self).encode_loop_result(decision, inner_bytes)
     }
 }
