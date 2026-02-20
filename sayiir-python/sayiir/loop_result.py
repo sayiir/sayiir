@@ -11,6 +11,7 @@ else:
     class StrEnum(str, Enum):  # type: ignore[no-redef]
         """Minimal StrEnum backport for Python <3.11."""
 
+
 T = TypeVar("T")
 
 

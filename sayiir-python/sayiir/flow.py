@@ -286,8 +286,7 @@ class BranchBuilder:
         orphans = branched_keys - declared_set
         if orphans:
             raise ValueError(
-                f"Route: orphan branches for keys: "
-                f"{', '.join(sorted(orphans))}"
+                f"Route: orphan branches for keys: {', '.join(sorted(orphans))}"
             )
 
         # Check for missing branches (when no default)
@@ -295,8 +294,7 @@ class BranchBuilder:
             missing = declared_set - branched_keys
             if missing:
                 raise ValueError(
-                    f"Route: missing branches for keys: "
-                    f"{', '.join(sorted(missing))}"
+                    f"Route: missing branches for keys: {', '.join(sorted(missing))}"
                 )
 
         # Build branch data for the Rust builder
