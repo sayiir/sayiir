@@ -159,9 +159,7 @@ impl NapiDurableEngine {
 
                     finalize_execution(result, &mut snapshot, backend.as_ref()).await
                 })
-                .map_err(|e: sayiir_runtime::RuntimeError| {
-                    exceptions::workflow_error(e.to_string())
-                })?
+                .map_err(exceptions::runtime_err_to_napi)?
         });
 
         tracing::info!(status = %status.as_ref(), "durable workflow execution finished");

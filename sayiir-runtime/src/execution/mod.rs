@@ -28,6 +28,7 @@ pub(crate) use helpers::{
     ResumeParkedPosition, branch_execute_or_skip_task, check_guards, execute_or_skip_task,
     retry_with_checkpoint, set_deadline_if_needed,
 };
+pub(crate) use loop_runner::decode_loop_envelope;
 
 // ── fork ────────────────────────────────────────────────────────────────
 pub use fork::serialize_branch_results;

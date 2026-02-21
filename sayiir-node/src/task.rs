@@ -36,6 +36,7 @@ pub struct NapiTaskMetadata {
     pub timeout_secs: Option<f64>,
     pub retries: Option<NapiRetryPolicy>,
     pub tags: Option<Vec<String>>,
+    pub version: Option<String>,
 }
 
 impl From<NapiTaskMetadata> for TaskMetadata {
@@ -46,6 +47,7 @@ impl From<NapiTaskMetadata> for TaskMetadata {
             timeout: n.timeout_secs.map(Duration::from_secs_f64),
             retries: n.retries.map(Into::into),
             tags: n.tags.unwrap_or_default(),
+            version: n.version,
         }
     }
 }

@@ -7,7 +7,7 @@ use sayiir_persistence::{SignalStore, SnapshotStore};
 use std::future::Future;
 
 use crate::error::RuntimeError;
-use sayiir_core::error::WorkflowError;
+use sayiir_core::error::{CodecError, WorkflowError};
 
 // ── Guards ──────────────────────────────────────────────────────────────
 
@@ -300,9 +300,14 @@ pub(crate) fn resolve_branch<'a, E: sayiir_core::codec::EnvelopeCodec>(
     default: Option<&'a WorkflowContinuation>,
     envelope_codec: &E,
 ) -> Result<(String, &'a WorkflowContinuation), RuntimeError> {
-    let key: String = envelope_codec
-        .decode_string(key_bytes)
-        .map_err(RuntimeError::from)?;
+    let key: String =
+        envelope_codec
+            .decode_string(key_bytes)
+            .map_err(|e| CodecError::DecodeFailed {
+                task_id: branch_id.to_string(),
+                expected_type: "String (branch key)",
+                source: e,
+            })?;
     let chosen = branches
         .get(&key)
         .map(AsRef::as_ref)

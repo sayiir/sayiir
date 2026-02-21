@@ -11,8 +11,8 @@
 //! This module also provides [`TaskMetadata`], [`RetryPolicy`],
 //! [`BranchOutputs`] for fork/join, and the type-erased [`UntypedCoreTask`].
 
-use crate::codec::{Codec, EnvelopeCodec, sealed};
-use crate::error::{BoxError, WorkflowError};
+use crate::codec::{Codec, sealed};
+use crate::error::{BoxError, CodecError, WorkflowError};
 use crate::loop_result::LoopResult;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,10 @@ pub struct TaskMetadata {
     pub retries: Option<RetryPolicy>,
     /// Tags for categorization and filtering.
     pub tags: Vec<String>,
+    /// Schema version string. Included in the definition hash so that
+    /// bumping this value forces a new workflow version, preventing
+    /// in-flight workflows from deserializing stale cached results.
+    pub version: Option<String>,
 }
 
 /// Configuration for retrying failed task executions.
@@ -384,10 +388,20 @@ macro_rules! impl_codec_task {
             fn run(&self, input: Bytes) -> Self::Future {
                 let func = Arc::clone(&self.func);
                 let codec = Arc::clone(&self.codec);
+                let task_id = self.task_id.clone();
                 BytesFuture::new(async move {
-                    let decoded_input = codec.decode::<$input>(input)?;
+                    let decoded_input = codec.decode::<$input>(input)
+                        .map_err(|e| -> BoxError { Box::new(CodecError::DecodeFailed {
+                            task_id: task_id.clone(),
+                            expected_type: std::any::type_name::<$input>(),
+                            source: e,
+                        }) })?;
                     let output = func(decoded_input).await?;
                     codec.encode(&output)
+                        .map_err(|e| -> BoxError { Box::new(CodecError::EncodeFailed {
+                            task_id,
+                            source: e,
+                        }) })
                 })
             }
         }
@@ -398,6 +412,7 @@ macro_rules! impl_codec_task {
 struct UntypedTaskFnWrapper<F, I, O, Fut, C> {
     func: Arc<F>,
     codec: Arc<C>,
+    task_id: String,
     _phantom: std::marker::PhantomData<fn(I) -> (O, Fut)>,
 }
 
@@ -415,7 +430,7 @@ impl_codec_task!(
 /// The function must be Send + Sync + 'static and return a Future that resolves to a Result.
 /// Both input and output types must be Send for type erasure to work.
 /// The codec must be able to decode the input type and encode the output type.
-pub fn to_core_task<F, I, O, Fut, C>(func: F, codec: Arc<C>) -> UntypedCoreTask
+pub fn to_core_task<F, I, O, Fut, C>(id: &str, func: F, codec: Arc<C>) -> UntypedCoreTask
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
@@ -423,14 +438,14 @@ where
     Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
     C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
-    to_core_task_arc(Arc::new(func), codec)
+    to_core_task_arc(id, Arc::new(func), codec)
 }
 
 /// Create a new untyped task from an Arc-wrapped function.
 ///
 /// This variant accepts an already-Arc'd function, avoiding the need
 /// for the function to implement Clone.
-pub fn to_core_task_arc<F, I, O, Fut, C>(func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
+pub fn to_core_task_arc<F, I, O, Fut, C>(id: &str, func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
@@ -441,6 +456,7 @@ where
     Box::new(UntypedTaskFnWrapper {
         func,
         codec,
+        task_id: id.to_string(),
         _phantom: std::marker::PhantomData,
     })
 }
@@ -448,21 +464,27 @@ where
 /// Create an untyped task from a loop body function.
 ///
 /// Unlike [`to_core_task_arc`], this wrapper encodes `LoopResult<O>` via
-/// [`EnvelopeCodec::encode_loop_result`], which first serializes the inner
-/// value `O` then wraps it in a codec-specific envelope. This ensures the
-/// output can be decoded by [`EnvelopeCodec::decode_loop_result`] regardless
-/// of the concrete inner type.
-pub fn to_core_loop_task_arc<F, I, O, Fut, C>(func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
+/// [`codec::encode_loop_envelope`](crate::codec::encode_loop_envelope),
+/// which first serializes the inner value `O` then wraps it in a binary
+/// tag + payload envelope. This ensures the output can be decoded by
+/// [`codec::decode_loop_envelope`](crate::codec::decode_loop_envelope)
+/// regardless of the concrete inner type.
+pub fn to_core_loop_task_arc<F, I, O, Fut, C>(
+    id: &str,
+    func: Arc<F>,
+    codec: Arc<C>,
+) -> UntypedCoreTask
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
     O: Send + 'static,
     Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
-    C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
 {
     struct LoopTaskFnWrapper<F, I, O, Fut, C> {
         func: Arc<F>,
         codec: Arc<C>,
+        task_id: String,
         _phantom: PhantomData<fn(I) -> (O, Fut)>,
     }
 
@@ -472,7 +494,7 @@ where
         I: Send + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
     {
         type Input = Bytes;
         type Output = Bytes;
@@ -481,12 +503,21 @@ where
         fn run(&self, input: Bytes) -> Self::Future {
             let func = Arc::clone(&self.func);
             let codec = Arc::clone(&self.codec);
+            let task_id = self.task_id.clone();
             BytesFuture::new(async move {
-                let decoded_input = codec.decode::<I>(input)?;
+                let decoded_input = codec.decode::<I>(input).map_err(|e| -> BoxError {
+                    Box::new(CodecError::DecodeFailed {
+                        task_id: task_id.clone(),
+                        expected_type: std::any::type_name::<I>(),
+                        source: e,
+                    })
+                })?;
                 let loop_result = func(decoded_input).await?;
                 let (decision, inner) = loop_result.into_decision();
-                let inner_bytes = codec.encode(&inner)?;
-                codec.encode_loop_result(decision, &inner_bytes)
+                let inner_bytes = codec.encode(&inner).map_err(|e| -> BoxError {
+                    Box::new(CodecError::EncodeFailed { task_id, source: e })
+                })?;
+                Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
             })
         }
     }
@@ -494,25 +525,27 @@ where
     Box::new(LoopTaskFnWrapper {
         func,
         codec,
+        task_id: id.to_string(),
         _phantom: PhantomData,
     })
 }
 
 /// Wrap a `CoreTask` whose output is `LoopResult<O>` into an [`UntypedCoreTask`]
-/// that uses [`EnvelopeCodec::encode_loop_result`] for encoding.
+/// that uses [`codec::encode_loop_envelope`](crate::codec::encode_loop_envelope) for encoding.
 ///
 /// This is the loop-aware equivalent of [`wrap_core_task`].
-pub fn wrap_core_loop_task<T, O, C>(task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
+pub fn wrap_core_loop_task<T, O, C>(id: &str, task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
 where
     T: CoreTask<Output = LoopResult<O>> + 'static,
     T::Input: Send + 'static,
     O: Send + 'static,
     T::Future: Send + 'static,
-    C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+    C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
 {
     struct LoopCoreTaskWrapper<T, O, C> {
         task: Arc<T>,
         codec: Arc<C>,
+        task_id: String,
         _phantom: PhantomData<fn() -> O>,
     }
 
@@ -522,7 +555,7 @@ where
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O>,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O>,
     {
         type Input = Bytes;
         type Output = Bytes;
@@ -531,12 +564,21 @@ where
         fn run(&self, input: Bytes) -> Self::Future {
             let task = Arc::clone(&self.task);
             let codec = Arc::clone(&self.codec);
+            let task_id = self.task_id.clone();
             BytesFuture::new(async move {
-                let decoded_input = codec.decode::<T::Input>(input)?;
+                let decoded_input = codec.decode::<T::Input>(input).map_err(|e| -> BoxError {
+                    Box::new(CodecError::DecodeFailed {
+                        task_id: task_id.clone(),
+                        expected_type: std::any::type_name::<T::Input>(),
+                        source: e,
+                    })
+                })?;
                 let loop_result = task.run(decoded_input).await?;
                 let (decision, inner) = loop_result.into_decision();
-                let inner_bytes = codec.encode(&inner)?;
-                codec.encode_loop_result(decision, &inner_bytes)
+                let inner_bytes = codec.encode(&inner).map_err(|e| -> BoxError {
+                    Box::new(CodecError::EncodeFailed { task_id, source: e })
+                })?;
+                Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
             })
         }
     }
@@ -544,6 +586,7 @@ where
     Box::new(LoopCoreTaskWrapper {
         task,
         codec,
+        task_id: id.to_string(),
         _phantom: PhantomData,
     })
 }
@@ -605,11 +648,13 @@ where
     C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
     // Wrap the boxed function in Arc so it can be cloned into the future
+    let id = branch.id.clone();
     let func = Arc::new(branch.func);
 
     struct ArcBranchWrapper<I, O, C> {
         func: Arc<BoxedBranchFn<I, O>>,
         codec: Arc<C>,
+        task_id: String,
         _phantom: PhantomData<fn(I) -> O>,
     }
 
@@ -624,6 +669,7 @@ where
     Box::new(ArcBranchWrapper {
         func,
         codec,
+        task_id: id,
         _phantom: PhantomData,
     })
 }
@@ -636,6 +682,7 @@ where
 struct HeterogeneousJoinTaskWrapper<F, JoinOutput, Fut, C> {
     func: Arc<F>,
     codec: Arc<C>,
+    task_id: String,
     _phantom: PhantomData<fn(BranchOutputs<C>) -> (JoinOutput, Fut)>,
 }
 
@@ -658,12 +705,22 @@ where
     fn run(&self, input: Bytes) -> Self::Future {
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
+        let task_id = self.task_id.clone();
         BytesFuture::new(async move {
-            let named_results: NamedBranchResults = codec.decode(input)?;
+            let named_results: NamedBranchResults =
+                codec.decode(input).map_err(|e| -> BoxError {
+                    Box::new(CodecError::DecodeFailed {
+                        task_id: task_id.clone(),
+                        expected_type: std::any::type_name::<NamedBranchResults>(),
+                        source: e,
+                    })
+                })?;
             let branch_outputs = BranchOutputs::new(named_results.into_map(), codec.clone());
 
             let output = func(branch_outputs).await?;
-            codec.encode(&output)
+            codec.encode(&output).map_err(|e| -> BoxError {
+                Box::new(CodecError::EncodeFailed { task_id, source: e })
+            })
         })
     }
 }
@@ -682,7 +739,11 @@ where
 ///     Ok(format!("{} - {}", name, count))
 /// })
 /// ```
-pub fn to_heterogeneous_join_task<F, JoinOutput, Fut, C>(func: F, codec: Arc<C>) -> UntypedCoreTask
+pub fn to_heterogeneous_join_task<F, JoinOutput, Fut, C>(
+    id: &str,
+    func: F,
+    codec: Arc<C>,
+) -> UntypedCoreTask
 where
     F: Fn(BranchOutputs<C>) -> Fut + Send + Sync + 'static,
     JoinOutput: Send + 'static,
@@ -694,7 +755,7 @@ where
         + Sync
         + 'static,
 {
-    to_heterogeneous_join_task_arc(Arc::new(func), codec)
+    to_heterogeneous_join_task_arc(id, Arc::new(func), codec)
 }
 
 /// Create a join task from an Arc-wrapped function.
@@ -702,6 +763,7 @@ where
 /// This variant accepts an already-Arc'd function, avoiding the need
 /// for the function to implement Clone.
 pub fn to_heterogeneous_join_task_arc<F, JoinOutput, Fut, C>(
+    id: &str,
     func: Arc<F>,
     codec: Arc<C>,
 ) -> UntypedCoreTask
@@ -719,6 +781,7 @@ where
     Box::new(HeterogeneousJoinTaskWrapper {
         func,
         codec,
+        task_id: id.to_string(),
         _phantom: PhantomData,
     })
 }
@@ -728,7 +791,7 @@ where
 /// This is the public equivalent of the registry-internal `TaskWrapper`.
 /// It is used by [`WorkflowBuilder::then_task_with`](crate::builder::WorkflowBuilder::then_task_with)
 /// to create the type-erased task stored in the continuation tree.
-pub fn wrap_core_task<T, C>(task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
+pub fn wrap_core_task<T, C>(id: &str, task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
 where
     T: CoreTask + 'static,
     T::Input: Send + 'static,
@@ -740,6 +803,7 @@ where
     struct CoreTaskWrapper<T, C> {
         task: Arc<T>,
         codec: Arc<C>,
+        task_id: String,
     }
 
     impl<T, C> CoreTask for CoreTaskWrapper<T, C>
@@ -757,13 +821,26 @@ where
         fn run(&self, input: Bytes) -> Self::Future {
             let task = Arc::clone(&self.task);
             let codec = Arc::clone(&self.codec);
+            let task_id = self.task_id.clone();
             BytesFuture::new(async move {
-                let decoded_input = codec.decode::<T::Input>(input)?;
+                let decoded_input = codec.decode::<T::Input>(input).map_err(|e| -> BoxError {
+                    Box::new(CodecError::DecodeFailed {
+                        task_id: task_id.clone(),
+                        expected_type: std::any::type_name::<T::Input>(),
+                        source: e,
+                    })
+                })?;
                 let output = task.run(decoded_input).await?;
-                codec.encode(&output)
+                codec.encode(&output).map_err(|e| -> BoxError {
+                    Box::new(CodecError::EncodeFailed { task_id, source: e })
+                })
             })
         }
     }
 
-    Box::new(CoreTaskWrapper { task, codec })
+    Box::new(CoreTaskWrapper {
+        task,
+        codec,
+        task_id: id.to_string(),
+    })
 }

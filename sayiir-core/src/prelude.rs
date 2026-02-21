@@ -13,7 +13,7 @@ pub use crate::branch_key::BranchKey;
 pub use crate::branch_results::NamedBranchResults;
 pub use crate::codec::{Codec, Decoder, Encoder, EnvelopeCodec};
 pub use crate::context::WorkflowContext;
-pub use crate::error::{BoxError, BuildError, BuildErrors, WorkflowError};
+pub use crate::error::{BoxError, BuildError, BuildErrors, CodecError, WorkflowError};
 pub use crate::registry::TaskRegistry;
 pub use crate::task::{
     BranchEnvelope, BranchOutputs, CoreTask, RegisterableTask, TaskMetadata, fn_task,

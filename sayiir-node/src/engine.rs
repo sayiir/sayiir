@@ -68,7 +68,7 @@ impl NapiWorkflowEngine {
             },
             &sayiir_runtime::serialization::JsonCodec,
         )
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
+        .map_err(crate::exceptions::runtime_err_to_napi)?;
 
         tracing::info!(workflow_id = %workflow.workflow_id, "workflow execution completed");
 

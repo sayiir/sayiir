@@ -8,8 +8,8 @@
 //! For the proc-macro DSL alternative, see the `workflow!` macro in `sayiir-macros`.
 
 use crate::branch_key::BranchKey;
+use crate::codec::Codec;
 use crate::codec::sealed;
-use crate::codec::{Codec, EnvelopeCodec};
 use crate::context::WorkflowContext;
 use crate::error::{BuildError, BuildErrors};
 use crate::loop_result::LoopResult;
@@ -85,7 +85,7 @@ pub trait RegistryBehavior {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static;
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static;
 
     /// Register a loop body task with two-step encoding (no-op for `NoRegistry`).
     fn maybe_register_loop<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
@@ -96,7 +96,7 @@ pub trait RegistryBehavior {
         Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
 
     /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
     fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
@@ -151,7 +151,7 @@ impl RegistryBehavior for NoRegistry {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
     {
         // No-op for non-serializable workflows
     }
@@ -164,7 +164,7 @@ impl RegistryBehavior for NoRegistry {
         Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         // No-op for non-serializable workflows
     }
@@ -225,7 +225,7 @@ impl RegistryBehavior for TaskRegistry {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
     {
         self.register_loop_task_arc(id, codec, task, metadata);
     }
@@ -238,7 +238,7 @@ impl RegistryBehavior for TaskRegistry {
         Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         use crate::task::TaskMetadata;
         self.register_loop_fn_arc(id, codec, Arc::clone(func), TaskMetadata::default());
@@ -445,13 +445,14 @@ where
         self.registry
             .maybe_register::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_task_arc(func, codec);
+        let task = to_core_task_arc(id, func, codec);
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(task),
             timeout: None,
             retry_policy: None,
+            version: None,
             next: None,
         };
 
@@ -515,11 +516,7 @@ where
         Fut: std::future::Future<Output = Result<LoopResult<NewOutput>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         self.loop_task_with_policy(id, func, max_iterations, MaxIterationsPolicy::Fail)
     }
@@ -543,11 +540,7 @@ where
         Fut: std::future::Future<Output = Result<LoopResult<NewOutput>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         if max_iterations == 0 {
             self.errors
@@ -559,7 +552,7 @@ where
         self.registry
             .maybe_register_loop::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_loop_task_arc(func, codec);
+        let task = to_core_loop_task_arc(id, func, codec);
         let loop_id = crate::workflow::loop_node_id(self.loop_counter);
         self.loop_counter += 1;
 
@@ -568,6 +561,7 @@ where
             func: Some(task),
             timeout: None,
             retry_policy: None,
+            version: None,
             next: None,
         };
 
@@ -672,15 +666,17 @@ where
             metadata.clone(),
         );
 
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_task(id, task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
+        let version = metadata.version;
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(untyped),
             timeout,
             retry_policy,
+            version,
             next: None,
         };
 
@@ -711,11 +707,7 @@ where
         Output: Send + 'static,
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         self.loop_task_struct_with_policy(T::default(), max_iterations, MaxIterationsPolicy::Fail)
     }
@@ -734,11 +726,7 @@ where
         Output: Send + 'static,
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         self.loop_task_struct_with_policy(task, max_iterations, MaxIterationsPolicy::Fail)
     }
@@ -758,11 +746,7 @@ where
         Output: Send + 'static,
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         let id = T::task_id();
         if max_iterations == 0 {
@@ -782,9 +766,10 @@ where
                 metadata.clone(),
             );
 
-        let untyped = wrap_core_loop_task(task, codec);
+        let untyped = wrap_core_loop_task(id, task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
+        let version = metadata.version;
 
         let loop_id = crate::workflow::loop_node_id(self.loop_counter);
         self.loop_counter += 1;
@@ -794,6 +779,7 @@ where
             func: Some(untyped),
             timeout,
             retry_policy,
+            version,
             next: None,
         };
 
@@ -955,12 +941,17 @@ where
             .registry
             .get_metadata(id)
             .and_then(|m| m.retries.clone());
+        let version = self
+            .registry
+            .get_metadata(id)
+            .and_then(|m| m.version.clone());
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func,
             timeout,
             retry_policy,
+            version,
             next: None,
         };
 
@@ -1010,12 +1001,17 @@ where
             .registry
             .get_metadata(body_task_id)
             .and_then(|m| m.retries.clone());
+        let version = self
+            .registry
+            .get_metadata(body_task_id)
+            .and_then(|m| m.version.clone());
 
         let body = WorkflowContinuation::Task {
             id: body_task_id.to_string(),
             func,
             timeout,
             retry_policy,
+            version,
             next: None,
         };
 
@@ -1092,11 +1088,13 @@ impl<C, Input, Output, M> WorkflowBuilder<C, Input, Output, M, WorkflowContinuat
         if let Some(ref id) = self.last_task_id {
             let timeout = metadata.timeout;
             let retry_policy = metadata.retries.clone();
+            let version = metadata.version.clone();
             self.registry.set_metadata(id, metadata);
-            // Also update the timeout and retry policy on the continuation node
+            // Also update the timeout, retry policy, and version on the continuation node
             // so they're available for direct execution (not just the serializable roundtrip path).
             self.continuation.set_task_timeout(id, timeout);
             self.continuation.set_task_retry_policy(id, retry_policy);
+            self.continuation.set_task_version(id, version);
         }
         self
     }
@@ -1310,7 +1308,7 @@ impl<C, Input> BranchCollector<C, Input> {
         let id = T::task_id();
         let codec = Arc::clone(&self.codec);
         let task = Arc::new(task);
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_task(id, task, codec);
         self.branches.push(ErasedBranch {
             id: id.to_string(),
             task: untyped,
@@ -1405,7 +1403,7 @@ where
             metadata,
         );
 
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_task(id, task, codec);
         self.branches.push(ErasedBranch {
             id: id.to_string(),
             task: untyped,
@@ -1439,7 +1437,7 @@ where
         self.registry
             .maybe_register_join::<JoinOutput, _, _, _>(id, codec.clone(), &func);
 
-        let join_task_fn = to_heterogeneous_join_task_arc(func, codec);
+        let join_task_fn = to_heterogeneous_join_task_arc(id, func, codec);
 
         let fork_id = WorkflowContinuation::derive_fork_id(
             &self
@@ -1458,6 +1456,7 @@ where
                     func: Some(b.task),
                     timeout: None,
                     retry_policy: None,
+                    version: None,
                     next: None,
                 })
             })
@@ -1470,6 +1469,7 @@ where
             func: Some(join_task_fn),
             timeout: None,
             retry_policy: None,
+            version: None,
             next: None,
         };
 
@@ -1558,11 +1558,16 @@ where
                     .registry
                     .get_metadata(&b.id)
                     .and_then(|m| m.retries.clone());
+                let version = self
+                    .registry
+                    .get_metadata(&b.id)
+                    .and_then(|m| m.version.clone());
                 Arc::new(WorkflowContinuation::Task {
                     id: b.id,
                     func: Some(b.task),
                     timeout,
                     retry_policy,
+                    version,
                     next: None,
                 })
             })
@@ -1572,11 +1577,16 @@ where
             .registry
             .get_metadata(id)
             .and_then(|m| m.retries.clone());
+        let join_version = self
+            .registry
+            .get_metadata(id)
+            .and_then(|m| m.version.clone());
         let join_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: join_task_fn,
             timeout: join_timeout,
             retry_policy: join_retry_policy,
+            version: join_version,
             next: None,
         };
 
@@ -1642,13 +1652,14 @@ where
         self.registry
             .maybe_register::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_task_arc(func, codec);
+        let task = to_core_task_arc(id, func, codec);
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
             func: Some(task),
             timeout: None,
             retry_policy: None,
+            version: None,
             next: None,
         };
 
@@ -1813,7 +1824,7 @@ where
             &key_fn_string,
         );
 
-        let key_fn_task = to_core_task_arc(key_fn_string, codec);
+        let key_fn_task = to_core_task_arc(&key_fn_id, key_fn_string, codec);
 
         RouteBuilder {
             context: self.context,
@@ -1914,11 +1925,13 @@ where
             let meta = registry.get_metadata(id);
             let timeout = meta.and_then(|m| m.timeout);
             let retry_policy = registry.get_metadata(id).and_then(|m| m.retries.clone());
+            let version = registry.get_metadata(id).and_then(|m| m.version.clone());
             current = Some(WorkflowContinuation::Task {
                 id: (*id).to_string(),
                 func,
                 timeout,
                 retry_policy,
+                version,
                 next: current.map(Box::new),
             });
         }

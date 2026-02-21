@@ -593,3 +593,168 @@ async fn definition_hash_mismatch_on_resume() {
         "Expected 'mismatch' in error, got: {err_msg}"
     );
 }
+
+// ─── 11. task_version_change_causes_hash_mismatch ────────────────────────────
+
+#[tokio::test]
+async fn task_version_change_causes_hash_mismatch() {
+    use sayiir_core::task::TaskMetadata;
+
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // v1: task with version "1.0"
+    let workflow_v1 = WorkflowBuilder::new(ctx())
+        .with_registry()
+        .then("process", |i: u32| async move { Ok(i + 1) })
+        .with_metadata(TaskMetadata {
+            version: Some("1.0".into()),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+
+    // Create an in-progress snapshot with v1's hash
+    let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
+    let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
+        "inst-version".into(),
+        workflow_v1.definition_hash().to_string(),
+        input_bytes,
+    );
+    snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
+        task_id: "process".into(),
+    });
+    runner.backend().save_snapshot(&snapshot).await.unwrap();
+
+    // v2: same structure, same task ID, but different version
+    let workflow_v2 = WorkflowBuilder::new(ctx())
+        .with_registry()
+        .then("process", |i: u32| async move { Ok(i + 1) })
+        .with_metadata(TaskMetadata {
+            version: Some("2.0".into()),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+
+    // Hashes must differ
+    assert_ne!(
+        workflow_v1.definition_hash(),
+        workflow_v2.definition_hash(),
+        "Changing task version should change the definition hash"
+    );
+
+    // Resume with v2 against v1's snapshot → hash mismatch
+    let result = runner.resume(workflow_v2.workflow(), "inst-version").await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("mismatch"),
+        "Expected 'mismatch' in error, got: {err_msg}"
+    );
+}
+
+// ─── 12. task_version_none_vs_some_causes_hash_mismatch ──────────────────────
+
+#[tokio::test]
+async fn task_version_none_vs_some_causes_hash_mismatch() {
+    use sayiir_core::task::TaskMetadata;
+
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // v1: no version set
+    let workflow_v1 = WorkflowBuilder::new(ctx())
+        .then("process", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // v2: same structure but version added
+    let workflow_v2 = WorkflowBuilder::new(ctx())
+        .with_registry()
+        .then("process", |i: u32| async move { Ok(i + 1) })
+        .with_metadata(TaskMetadata {
+            version: Some("1.0".into()),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+
+    assert_ne!(
+        workflow_v1.definition_hash(),
+        workflow_v2.definition_hash(),
+        "Adding a version where there was none should change the hash"
+    );
+
+    // Create snapshot with v1
+    let input_bytes = Arc::new(JsonCodec).encode(&5u32).unwrap();
+    let mut snapshot = sayiir_core::snapshot::WorkflowSnapshot::with_initial_input(
+        "inst-version-none".into(),
+        workflow_v1.definition_hash().to_string(),
+        input_bytes,
+    );
+    snapshot.update_position(sayiir_core::snapshot::ExecutionPosition::AtTask {
+        task_id: "process".into(),
+    });
+    runner.backend().save_snapshot(&snapshot).await.unwrap();
+
+    // Resume with v2 → mismatch
+    let result = runner
+        .resume(workflow_v2.workflow(), "inst-version-none")
+        .await;
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("mismatch"),
+        "Expected definition mismatch error"
+    );
+}
+
+// ─── 13. same_task_version_allows_resume ─────────────────────────────────────
+
+#[tokio::test]
+async fn same_task_version_allows_resume() {
+    use sayiir_core::task::TaskMetadata;
+
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // Run workflow to completion with version "1.0"
+    let workflow = WorkflowBuilder::new(ctx())
+        .with_registry()
+        .then("process", |i: u32| async move { Ok(i + 1) })
+        .with_metadata(TaskMetadata {
+            version: Some("1.0".into()),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+
+    let status = runner
+        .run(workflow.workflow(), "inst-same-ver", 10u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Resume with same version — should succeed (already completed)
+    let workflow_same = WorkflowBuilder::new(ctx())
+        .with_registry()
+        .then("process", |i: u32| async move { Ok(i + 1) })
+        .with_metadata(TaskMetadata {
+            version: Some("1.0".into()),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        workflow.definition_hash(),
+        workflow_same.definition_hash(),
+        "Same version should produce same hash"
+    );
+
+    let status = runner
+        .resume(workflow_same.workflow(), "inst-same-ver")
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}

@@ -1,6 +1,5 @@
 use bytes::Bytes;
-use sayiir_core::branch_results::NamedBranchResults;
-use sayiir_core::codec::{Decoder, Encoder, EnvelopeCodec, LoopDecision, sealed};
+use sayiir_core::codec::{Decoder, Encoder, sealed};
 use sayiir_core::error::BoxError;
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +44,7 @@ where
     }
 }
 
-impl EnvelopeCodec for JsonCodec {
+impl sayiir_core::codec::EnvelopeCodec for JsonCodec {
     fn decode_string(&self, bytes: &[u8]) -> Result<String, BoxError> {
         Ok(serde_json::from_slice(bytes)?)
     }
@@ -58,29 +57,7 @@ impl EnvelopeCodec for JsonCodec {
     }
 
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
-        let nbr = NamedBranchResults::new(results.to_vec());
+        let nbr = sayiir_core::branch_results::NamedBranchResults::new(results.to_vec());
         Ok(Bytes::from(serde_json::to_vec(&nbr)?))
-    }
-
-    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
-        use sayiir_core::LoopResult;
-
-        let result: LoopResult<serde_json::Value> = serde_json::from_slice(bytes)?;
-        let (decision, inner) = result.into_decision();
-        Ok((decision, Bytes::from(serde_json::to_vec(&inner)?)))
-    }
-
-    fn encode_loop_result(
-        &self,
-        decision: LoopDecision,
-        inner_bytes: &[u8],
-    ) -> Result<Bytes, BoxError> {
-        let inner: serde_json::Value = serde_json::from_slice(inner_bytes)?;
-        let tag = match decision {
-            LoopDecision::Again => "again",
-            LoopDecision::Done => "done",
-        };
-        let envelope = serde_json::json!({"_loop": tag, "value": inner});
-        Ok(Bytes::from(serde_json::to_vec(&envelope)?))
     }
 }

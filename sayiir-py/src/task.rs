@@ -56,18 +56,21 @@ pub struct PyTaskMetadata {
     pub retries: Option<PyRetryPolicy>,
     #[pyo3(get, set)]
     pub tags: Option<Vec<String>>,
+    #[pyo3(get, set)]
+    pub version: Option<String>,
 }
 
 #[pymethods]
 impl PyTaskMetadata {
     #[new]
-    #[pyo3(signature = (display_name=None, description=None, timeout_secs=None, retries=None, tags=None))]
+    #[pyo3(signature = (display_name=None, description=None, timeout_secs=None, retries=None, tags=None, version=None))]
     fn new(
         display_name: Option<String>,
         description: Option<String>,
         timeout_secs: Option<f64>,
         retries: Option<PyRetryPolicy>,
         tags: Option<Vec<String>>,
+        version: Option<String>,
     ) -> Self {
         Self {
             display_name,
@@ -75,6 +78,7 @@ impl PyTaskMetadata {
             timeout_secs,
             retries,
             tags,
+            version,
         }
     }
 }
@@ -87,6 +91,7 @@ impl From<PyTaskMetadata> for TaskMetadata {
             timeout: py.timeout_secs.map(Duration::from_secs_f64),
             retries: py.retries.map(Into::into),
             tags: py.tags.unwrap_or_default(),
+            version: py.version,
         }
     }
 }

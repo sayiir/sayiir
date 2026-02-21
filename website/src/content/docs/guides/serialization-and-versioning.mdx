@@ -1,6 +1,6 @@
 ---
-title: Serialization & Versioning
-description: Choose a codec, make types serializable, and deploy workflow changes safely
+title: Serialization & Migration
+description: Choose a codec, make types serializable, and deploy workflow changes safely with version-pinning and draining
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -122,6 +122,7 @@ The hash covers the **structure** of the workflow:
 - Task IDs and their sequential order
 - Timeout values
 - Retry policies (max retries, initial delay, backoff multiplier)
+- Task `version` strings (from metadata)
 - Fork IDs and branch structure
 - Branch IDs, keys, and default handlers
 - Loop IDs, max iterations, and on_max policy
@@ -133,7 +134,7 @@ The hash covers the **structure** of the workflow:
 - Task **implementations** (the function body)
 - The codec used
 - The backend used
-- Task metadata (tags, descriptions, display names)
+- Other task metadata (tags, descriptions, display names)
 
 ### Breaking vs Non-Breaking Changes
 
@@ -152,8 +153,59 @@ The hash covers the **structure** of the workflow:
 | Change loop max_iterations or on_max | **Changes** | No |
 | Rename a task ID | **Changes** | No |
 | Change a signal name | **Changes** | No |
+| Bump task `version` | **Changes** | No |
 
 \* Switching codecs is hash-safe but existing serialized bytes must still be decodable by the new codec. In practice, switching codecs on a live system with in-flight data requires a drain first.
+
+### Task Version — Opting In to Schema Change Detection
+
+The definition hash does not cover task input/output types. If you change the shape of a task's data types, the hash stays the same — and in-flight workflows may fail at runtime when they try to deserialize old cached results with the new type.
+
+To make the engine **detect** these schema changes, set the `version` field in your task metadata. The version string is included in the definition hash, so bumping it forces a new workflow version and prevents in-flight workflows from resuming with the old schema.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task, TaskMetadata
+
+@task(metadata=TaskMetadata(version="2.0"))
+def process_order(order: dict) -> dict:
+    return {"status": "processed", "total": order["total"]}
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task } from "sayiir";
+
+const processOrder = task("process_order", (order) => {
+    return { status: "processed", total: order.total };
+}, { version: "2.0" });
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_core::task::TaskMetadata;
+
+let workflow = WorkflowBuilder::new(ctx)
+    .then("process_order", |order: Order| async move {
+        Ok(ProcessedOrder { status: "processed".into(), total: order.total })
+    })
+    .with_metadata(TaskMetadata {
+        version: Some("2.0".into()),
+        ..Default::default()
+    })
+    .build()?;
+```
+
+</TabItem>
+</Tabs>
+
+When you change a task's input or output type in a breaking way, bump the version string. The engine will reject resuming in-flight workflows that were started with the old version, and you can drain them before deploying.
 
 ### The Error
 
@@ -219,7 +271,14 @@ struct OrderInput {
 - **Adding** a variant is safe — existing data won't contain it.
 - **Removing** a variant breaks deserialization for in-flight workflows that stored it.
 
-## Deploying Workflow Changes
+## Migration Strategy
+
+Sayiir separates two concerns when deploying changes:
+
+1. **Structural changes** (adding/removing tasks, changing timeouts, reordering steps) — automatically gated by the [definition hash](#definition-hash--what-breaks-resumability). The engine rejects mismatches; you cannot accidentally resume an old workflow with a new structure.
+2. **Schema changes** (modifying the shape of task inputs or outputs) — your responsibility. The definition hash does not cover data types, so the engine won't catch a schema mismatch until deserialization fails at runtime.
+
+The recommended approach for both is **version-pinning with draining**: pin running workflow instances to their original definition, let them finish, and deploy the new version for new instances.
 
 ### Safe Deployments (No Hash Change)
 
@@ -227,14 +286,24 @@ These changes can be deployed at any time, even with in-flight workflows:
 
 - **Bug fixes in task logic** — the function body isn't hashed
 - **Infrastructure swaps** — changing backends, scaling workers
-- **Codec switches** — only if you drain first (see note above)
 - **Metadata updates** — tags, descriptions
+- **Backward-compatible schema changes** — see [Schema Evolution](#schema-evolution-for-task-inputsoutputs) above
 
 Just deploy as usual. In-flight workflows resume normally.
 
-### Breaking Deployments (Hash Changes)
+### Structural Changes (Hash Changes)
 
-When you need to change the workflow structure (add/remove tasks, change timeouts, etc.):
+When you change the workflow structure (add/remove tasks, change timeouts, reorder steps, etc.), the definition hash changes. In-flight workflows **cannot** resume with the new definition — the engine enforces this automatically.
+
+**Simplest approach: use a new instance ID.** If your application controls instance IDs, the easiest migration path is to start new workflow instances with fresh IDs under the new definition. Old instances tied to the old definition will either drain naturally or can be cancelled. This avoids any coordination between old and new workers.
+
+```
+# Old definition — instances "order-100", "order-101" still running
+# New definition — new instances get "order-102", "order-103", ...
+# Old instances drain on their own; no conflict.
+```
+
+**Drain-and-restart approach:** If you need the same instance IDs to carry over:
 
 1. **Stop starting new workflow instances** with the old definition
 2. **Wait for in-flight workflows to complete** (drain)
@@ -248,17 +317,43 @@ graph LR
     C --> D[Resume traffic]
 ```
 
+### Breaking Schema Changes
+
+A schema change is **breaking** when old serialized data cannot be deserialized into the new type — for example, renaming a field without an alias, changing a field's type, or removing a required field.
+
+Because the definition hash does not cover data types, the engine won't prevent you from deploying a breaking schema change. Instead, tasks will fail at runtime with a `DeserializationError` (Python), `CODEC_ERROR` (Node.js), or `RuntimeError::Codec` (Rust) when they try to decode a cached result that no longer matches the new type.
+
+**Recommended approach: drain before deploying breaking schema changes.**
+
+1. Stop starting new instances
+2. Let in-flight workflows complete (they still use the old schema)
+3. Deploy the new code with the updated types
+4. Start new instances — only new data flows through the new schema
+
+For gradual migrations, you can also run **old and new workers side by side**: old workers continue processing old instances while new workers handle new ones. In distributed mode, workers already skip tasks whose definition hash they don't recognize, so this works naturally.
+
+:::tip[Keep schema changes backward-compatible when possible]
+Use `#[serde(default)]`, `#[serde(alias)]`, and `Option<T>` fields (see [Schema Evolution](#schema-evolution-for-task-inputsoutputs)) to make schema changes backward-compatible. This lets you deploy without draining.
+:::
+
 ### Distributed Workers
 
-When running multiple workers, **all workers must agree on the definition hash**. During a rolling deployment:
+When running multiple workers, **all workers must agree on the definition hash** for workflows they process. During a rolling deployment:
 
-1. Workers with the **old** definition will reject snapshots created with the new definition
-2. Workers with the **new** definition will reject snapshots created with the old definition
+1. Workers with the **old** definition will skip tasks created with the new definition
+2. Workers with the **new** definition will skip tasks created with the old definition
 
-This means you should either:
-- **Drain, then deploy all workers at once** (simplest)
-- **Blue/green deploy** — bring up new workers, shift traffic, shut down old workers
+This means you can:
+- **Blue/green deploy** — bring up new workers alongside old ones. Old workers drain old instances, new workers handle new instances. Shut down old workers once all old instances complete.
+- **Drain, then deploy all workers at once** — simplest if you can tolerate a brief pause in processing.
 
-### Future: Version Routing
+### Summary
 
-Automatic version routing (running multiple workflow versions side-by-side) is on the [roadmap](/roadmap). Until then, use the drain-and-restart strategy above.
+| Scenario | Hash changes? | Automatic protection? | Recommended strategy |
+|----------|--------------|----------------------|---------------------|
+| Bug fix in task logic | No | N/A (safe) | Deploy normally |
+| Add `#[serde(default)]` field | No | N/A (safe) | Deploy normally |
+| Add/remove/reorder a task | **Yes** | Engine rejects mismatch | New instance IDs, or drain first |
+| Change timeout or retry policy | **Yes** | Engine rejects mismatch | New instance IDs, or drain first |
+| Rename a field without alias | No | **No** — fails at runtime | Drain first |
+| Change a field's type | No | **No** — fails at runtime | Drain first |

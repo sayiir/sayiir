@@ -489,7 +489,6 @@ where
                     let output = run_loop_async(
                         &cfg,
                         current_input.clone(),
-                        envelope_codec,
                         |input| {
                             Box::pin(execute_branch_with_checkpointing(
                                 body,

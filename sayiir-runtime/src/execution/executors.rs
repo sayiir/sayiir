@@ -178,7 +178,7 @@ where
                         execute_task,
                         envelope_codec,
                     )?;
-                    match resolve_loop_iteration(&output, iteration, &cfg, envelope_codec)? {
+                    match resolve_loop_iteration(&output, iteration, &cfg)? {
                         ControlFlow::Break(LoopExit(inner)) => match next {
                             Some(next_cont) => {
                                 current = next_cont;
@@ -298,6 +298,7 @@ fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
                     timeout,
                     retry_policy,
                     next,
+                    ..
                 } => {
                     let output = run_task_with_retry(
                         id,
@@ -393,7 +394,6 @@ fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
                     let output = run_loop_async(
                         &cfg,
                         current_input.clone(),
-                        envelope_codec,
                         |input| execute_async_inner(body, input, false, envelope_codec),
                         &mut NoHooks,
                     )
@@ -695,7 +695,7 @@ where
                             snapshot.remove_task_result(tid);
                         }
 
-                        match resolve_loop_iteration(&output, iteration, &cfg, envelope_codec)? {
+                        match resolve_loop_iteration(&output, iteration, &cfg)? {
                             ControlFlow::Break(LoopExit(inner)) => {
                                 snapshot.clear_loop_iteration(id);
                                 snapshot.mark_task_completed(id.clone(), inner.clone());
