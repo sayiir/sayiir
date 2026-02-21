@@ -12,7 +12,7 @@ import httpx
 from ddgs import DDGS
 from ollama import chat
 
-from sayiir import RetryPolicy, task
+from sayiir import LoopResult, RetryPolicy, task
 
 from models import QualityAssessment, ResearchFindings, ResearchQuery, ResearchReport, SourceResult
 
@@ -142,7 +142,7 @@ def search_arxiv(query: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Join + synthesis tasks
+# Join task + helper functions
 # ---------------------------------------------------------------------------
 
 
@@ -168,13 +168,7 @@ def merge_sources(branches: dict) -> dict:
     ).model_dump()
 
 
-@task(
-    timeout="2m",
-    retries=RetryPolicy(max_retries=2, initial_delay_secs=2.0),
-    tags=["llm"],
-    description="Synthesize sources into a research report using a local LLM",
-)
-def synthesize(findings_dict: dict) -> dict:
+def _synthesize(findings_dict: dict) -> dict:
     """Call a local LLM via Ollama to synthesize all sources into a report.
 
     Also saves a draft JSON file so the approval sender can reference it.
@@ -207,14 +201,14 @@ def synthesize(findings_dict: dict) -> dict:
 
     report = ResearchReport(
         topic=findings.topic,
-        report_markdown=response.message.content,
+        report_markdown=response.message.content or "",
         sources=findings.sources,
         generated_at=datetime.now(timezone.utc),
     )
     return report.model_dump(mode="json")
 
 
-# Quality gate — LLM self-assessment for conditional branching
+# Quality gate — LLM self-assessment
 
 QUALITY_PROMPT = """\
 You are a research quality reviewer. Given the report below, assess its quality.
@@ -228,13 +222,7 @@ Rules:
 - "insufficient": fewer than 3 sources or the report is too superficial to be useful"""
 
 
-@task(
-    timeout="60s",
-    retries=RetryPolicy(max_retries=2, initial_delay_secs=2.0),
-    tags=["llm", "quality"],
-    description="LLM self-assessment of report quality for routing",
-)
-def assess_quality(report_dict: dict) -> dict:
+def _assess_quality(report_dict: dict) -> dict:
     """Ask the LLM to evaluate its own report and return a routing verdict."""
     report = ResearchReport.model_validate(report_dict)
 
@@ -246,7 +234,7 @@ def assess_quality(report_dict: dict) -> dict:
         ],
     )
 
-    raw = json.loads(response.message.content)
+    raw = json.loads(response.message.content or "{}")
     assessment = QualityAssessment(
         verdict=raw["verdict"],
         confidence=raw.get("confidence", 0.5),
@@ -260,20 +248,9 @@ def assess_quality(report_dict: dict) -> dict:
     return assessment.model_dump(mode="json")
 
 
-@task(description="Route based on quality verdict")
-def extract_verdict(assessment: dict) -> str:
-    return assessment["verdict"]
-
-
-@task(
-    timeout="2m",
-    retries=RetryPolicy(max_retries=2, initial_delay_secs=2.0),
-    tags=["llm"],
-    description="Revise the report based on quality feedback",
-)
-def revise_report(assessment: dict) -> dict:
+def _revise_report(report_dict: dict, reason: str) -> dict:
     """Ask the LLM to improve the report based on the quality feedback."""
-    a = QualityAssessment.model_validate(assessment)
+    report = ResearchReport.model_validate(report_dict)
 
     response = chat(
         model="llama3.2",
@@ -282,9 +259,9 @@ def revise_report(assessment: dict) -> dict:
             {
                 "role": "user",
                 "content": (
-                    f"Your previous report on '{a.report.topic}' received this feedback:\n"
-                    f"  {a.reason}\n\n"
-                    f"Here is the original report:\n{a.report.report_markdown}\n\n"
+                    f"Your previous report on '{report.topic}' received this feedback:\n"
+                    f"  {reason}\n\n"
+                    f"Here is the original report:\n{report.report_markdown}\n\n"
                     f"Please revise and improve the report, addressing the feedback."
                 ),
             },
@@ -292,49 +269,74 @@ def revise_report(assessment: dict) -> dict:
     )
 
     revised = ResearchReport(
-        topic=a.report.topic,
-        report_markdown=response.message.content,
-        sources=a.report.sources,
+        topic=report.topic,
+        report_markdown=response.message.content or "",
+        sources=report.sources,
     )
     print("\n  Report revised based on quality feedback.")
     return revised.model_dump(mode="json")
 
 
-@task(description="Pass through a report that's ready to publish")
-def pass_through(assessment: dict) -> dict:
-    """Extract the report from a publish-quality assessment."""
-    return assessment["report"]
-
-
-@task(description="Flag report as insufficient and return with warning")
-def flag_insufficient(assessment: dict) -> dict:
+def _flag_insufficient(report_dict: dict, assessment: dict) -> dict:
     """Mark the report as insufficient — still saves but with a warning header."""
-    a = QualityAssessment.model_validate(assessment)
+    report = ResearchReport.model_validate(report_dict)
     warning = (
         f"> **Warning:** This report was flagged as insufficient "
-        f"({a.confidence:.0%} confidence). Reason: {a.reason}\n\n"
+        f"({assessment['confidence']:.0%} confidence). Reason: {assessment['reason']}\n\n"
     )
     flagged = ResearchReport(
-        topic=a.report.topic,
-        report_markdown=warning + a.report.report_markdown,
-        sources=a.report.sources,
+        topic=report.topic,
+        report_markdown=warning + report.report_markdown,
+        sources=report.sources,
     )
-    print(f"\n  Report flagged as insufficient: {a.reason}")
+    print(f"\n  Report flagged as insufficient: {assessment['reason']}")
     return flagged.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------
-# Draft saving — runs after quality routing, before human approval
+# Refine loop body — replaces synthesize → assess → route
 # ---------------------------------------------------------------------------
 
 
-@task(description="Save the post-routing draft for human review")
-def save_draft(envelope: dict) -> dict:
-    """Save the routed report as a draft JSON for the approval sender.
+@task(
+    timeout="3m",
+    retries=RetryPolicy(max_retries=2, initial_delay_secs=2.0),
+    tags=["llm", "loop"],
+    description="Synthesize or revise report, assess quality, loop until publishable",
+)
+def refine_report(input_dict: dict) -> LoopResult:
+    """Loop body: synthesize (first pass) or revise, then assess quality.
 
-    Receives a BranchEnvelope: {"branch": "<verdict>", "result": <report_dict>}.
+    Returns LoopResult.done() when publishable/insufficient, or
+    LoopResult.again() to request another revision pass.
     """
-    report_dict = envelope["result"]
+    # First iteration: input is ResearchFindings (has "sources" key but no "report_markdown")
+    if "sources" in input_dict and "report_markdown" not in input_dict:
+        report_dict = _synthesize(input_dict)
+    else:
+        # Subsequent iterations: input is a report dict
+        report_dict = _revise_report(input_dict, input_dict.get("_feedback", "Improve the report"))
+
+    assessment = _assess_quality(report_dict)
+
+    if assessment["verdict"] == "publish":
+        return LoopResult.done(report_dict)
+    if assessment["verdict"] == "insufficient":
+        return LoopResult.done(_flag_insufficient(report_dict, assessment))
+
+    # "revise" — feed the report back with assessment context for next iteration
+    report_dict["_feedback"] = assessment["reason"]
+    return LoopResult.again(report_dict)
+
+
+# ---------------------------------------------------------------------------
+# Draft saving — runs after refine loop, before human approval
+# ---------------------------------------------------------------------------
+
+
+@task(description="Save the refined draft for human review")
+def save_draft(report_dict: dict) -> dict:
+    """Save the report produced by the refine loop as a draft JSON."""
     report = ResearchReport.model_validate(report_dict)
 
     DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -343,9 +345,8 @@ def save_draft(envelope: dict) -> dict:
     draft_path = DRAFTS_DIR / f"{slug}.json"
     draft_path.write_text(json.dumps(report_dict, indent=2))
 
-    quality_route = envelope["branch"]
     print("\n" + "=" * 60)
-    print(f"DRAFT REPORT (quality: {quality_route}) — review and approve to save")
+    print("DRAFT REPORT — review and approve to save")
     print("=" * 60)
     print(report.report_markdown)
     print("=" * 60)

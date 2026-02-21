@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
-use sayiir_core::workflow::WorkflowStatus;
+use sayiir_core::workflow::{FlatWorkflowStatus, WorkflowStatus, WorkflowStatusKind};
 use sayiir_runtime::execute_continuation_sync;
 
 use crate::codec::{decode_to_pyobject, encode_pyobject};
@@ -48,53 +48,55 @@ pub struct PyWorkflowStatus {
 #[pymethods]
 impl PyWorkflowStatus {
     fn is_completed(&self) -> bool {
-        self.status == "completed"
+        self.status == WorkflowStatusKind::Completed.as_ref()
     }
 
     fn is_failed(&self) -> bool {
-        self.status == "failed"
+        self.status == WorkflowStatusKind::Failed.as_ref()
     }
 
     fn is_cancelled(&self) -> bool {
-        self.status == "cancelled"
+        self.status == WorkflowStatusKind::Cancelled.as_ref()
     }
 
     fn is_in_progress(&self) -> bool {
-        self.status == "in_progress"
+        self.status == WorkflowStatusKind::InProgress.as_ref()
     }
 
     fn is_paused(&self) -> bool {
-        self.status == "paused"
+        self.status == WorkflowStatusKind::Paused.as_ref()
     }
 
     fn is_waiting(&self) -> bool {
-        self.status == "waiting"
+        self.status == WorkflowStatusKind::Waiting.as_ref()
     }
 
     fn is_awaiting_signal(&self) -> bool {
-        self.status == "awaiting_signal"
+        self.status == WorkflowStatusKind::AwaitingSignal.as_ref()
     }
 
     fn __repr__(&self) -> String {
         match self.status.as_str() {
-            "completed" => "WorkflowStatus::Completed".to_string(),
-            "failed" => format!(
+            s if s == WorkflowStatusKind::Completed.as_ref() => {
+                "WorkflowStatus::Completed".to_string()
+            }
+            s if s == WorkflowStatusKind::Failed.as_ref() => format!(
                 "WorkflowStatus::Failed({})",
                 self.error.as_deref().unwrap_or("unknown")
             ),
-            "cancelled" => format!(
+            s if s == WorkflowStatusKind::Cancelled.as_ref() => format!(
                 "WorkflowStatus::Cancelled(reason={:?}, by={:?})",
                 self.reason, self.cancelled_by
             ),
-            "paused" => format!(
+            s if s == WorkflowStatusKind::Paused.as_ref() => format!(
                 "WorkflowStatus::Paused(reason={:?}, by={:?})",
                 self.reason, self.paused_by
             ),
-            "waiting" => format!(
+            s if s == WorkflowStatusKind::Waiting.as_ref() => format!(
                 "WorkflowStatus::Waiting(delay_id={:?}, wake_at={:?})",
                 self.delay_id, self.wake_at
             ),
-            "awaiting_signal" => format!(
+            s if s == WorkflowStatusKind::AwaitingSignal.as_ref() => format!(
                 "WorkflowStatus::AwaitingSignal(signal_name={:?}, signal_id={:?}, wake_at={:?})",
                 self.signal_name, self.signal_id, self.wake_at
             ),
@@ -105,98 +107,18 @@ impl PyWorkflowStatus {
 
 impl From<WorkflowStatus> for PyWorkflowStatus {
     fn from(status: WorkflowStatus) -> Self {
-        match status {
-            WorkflowStatus::Completed => PyWorkflowStatus {
-                status: "completed".to_string(),
-                error: None,
-                reason: None,
-                cancelled_by: None,
-                paused_by: None,
-                output: None,
-                wake_at: None,
-                delay_id: None,
-                signal_id: None,
-                signal_name: None,
-            },
-            WorkflowStatus::InProgress => PyWorkflowStatus {
-                status: "in_progress".to_string(),
-                error: None,
-                reason: None,
-                cancelled_by: None,
-                paused_by: None,
-                output: None,
-                wake_at: None,
-                delay_id: None,
-                signal_id: None,
-                signal_name: None,
-            },
-            WorkflowStatus::Failed(e) => PyWorkflowStatus {
-                status: "failed".to_string(),
-                error: Some(e.clone()),
-                reason: None,
-                cancelled_by: None,
-                paused_by: None,
-                output: None,
-                wake_at: None,
-                delay_id: None,
-                signal_id: None,
-                signal_name: None,
-            },
-            WorkflowStatus::Cancelled {
-                reason,
-                cancelled_by,
-            } => PyWorkflowStatus {
-                status: "cancelled".to_string(),
-                error: None,
-                reason,
-                cancelled_by,
-                paused_by: None,
-                output: None,
-                wake_at: None,
-                delay_id: None,
-                signal_id: None,
-                signal_name: None,
-            },
-            WorkflowStatus::Paused { reason, paused_by } => PyWorkflowStatus {
-                status: "paused".to_string(),
-                error: None,
-                reason,
-                cancelled_by: None,
-                paused_by,
-                output: None,
-                wake_at: None,
-                delay_id: None,
-                signal_id: None,
-                signal_name: None,
-            },
-            WorkflowStatus::Waiting { wake_at, delay_id } => PyWorkflowStatus {
-                status: "waiting".to_string(),
-                error: None,
-                reason: None,
-                cancelled_by: None,
-                paused_by: None,
-                output: None,
-                wake_at: Some(wake_at.to_rfc3339()),
-                delay_id: Some(delay_id),
-                signal_id: None,
-                signal_name: None,
-            },
-            WorkflowStatus::AwaitingSignal {
-                signal_id,
-                signal_name,
-                wake_at,
-            } => PyWorkflowStatus {
-                status: "awaiting_signal".to_string(),
-                error: None,
-                reason: None,
-                cancelled_by: None,
-                paused_by: None,
-                output: None,
-                wake_at: wake_at.map(|t| t.to_rfc3339()),
-                delay_id: None,
-                signal_id: Some(signal_id),
-                signal_name: Some(signal_name),
-            },
+        let flat = FlatWorkflowStatus::from(status);
+        Self {
+            status: flat.status,
+            error: flat.error,
+            reason: flat.reason,
+            cancelled_by: flat.cancelled_by,
+            paused_by: flat.paused_by,
+            output: None,
+            wake_at: flat.wake_at,
+            delay_id: flat.delay_id,
+            signal_id: flat.signal_id,
+            signal_name: flat.signal_name,
         }
     }
 }

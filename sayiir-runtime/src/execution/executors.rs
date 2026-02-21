@@ -22,7 +22,12 @@ use super::fork::{
     JoinResolution, collect_cached_branches, execute_fork_branches_sequential, resolve_join,
     settle_fork_outcome,
 };
-use super::helpers::{check_guards, execute_task_step, policy_to_backoff, resolve_branch};
+use super::helpers::{
+    TaskStepParams, check_guards, execute_task_step, policy_to_backoff, resolve_branch,
+};
+use super::loop_runner::{
+    LoopConfig, LoopExit, LoopNext, NoHooks, resolve_loop_iteration, run_loop_async,
+};
 
 // ── Sync ────────────────────────────────────────────────────────────────
 
@@ -148,6 +153,56 @@ where
                         current_input = envelope_bytes;
                     }
                     None => return Ok(envelope_bytes),
+                }
+            }
+            WorkflowContinuation::Loop {
+                id,
+                body,
+                max_iterations,
+                on_max,
+                next,
+            } => {
+                let cfg = LoopConfig {
+                    id,
+                    body,
+                    max_iterations: *max_iterations,
+                    on_max: *on_max,
+                    start_iteration: 0,
+                };
+                let mut loop_input = current_input.clone();
+                let mut exited = false;
+                for iteration in 0..cfg.max_iterations {
+                    let output = execute_continuation_sync(
+                        body,
+                        loop_input.clone(),
+                        execute_task,
+                        envelope_codec,
+                    )?;
+                    match resolve_loop_iteration(&output, iteration, &cfg, envelope_codec)? {
+                        ControlFlow::Break(LoopExit(inner)) => match next {
+                            Some(next_cont) => {
+                                current = next_cont;
+                                current_input = inner;
+                                exited = true;
+                                break;
+                            }
+                            None => return Ok(inner),
+                        },
+                        ControlFlow::Continue(LoopNext(inner)) => {
+                            loop_input = inner;
+                        }
+                    }
+                }
+                if !exited {
+                    // Safety net: if the for-loop exhausts without breaking,
+                    // max iterations was exceeded (resolve_loop_iteration
+                    // prevents this today, but the guard keeps the code
+                    // structurally sound — matching run_loop_async).
+                    return Err(WorkflowError::MaxIterationsExceeded {
+                        loop_id: id.clone(),
+                        max_iterations: *max_iterations,
+                    }
+                    .into());
                 }
             }
         }
@@ -321,6 +376,36 @@ fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
                     )
                     .into());
                 }
+                WorkflowContinuation::Loop {
+                    id,
+                    body,
+                    max_iterations,
+                    on_max,
+                    next,
+                } => {
+                    let cfg = LoopConfig {
+                        id,
+                        body,
+                        max_iterations: *max_iterations,
+                        on_max: *on_max,
+                        start_iteration: 0,
+                    };
+                    let output = run_loop_async(
+                        &cfg,
+                        current_input.clone(),
+                        envelope_codec,
+                        |input| execute_async_inner(body, input, false, envelope_codec),
+                        &mut NoHooks,
+                    )
+                    .await?;
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = output;
+                        }
+                        None => return Ok(output),
+                    }
+                }
                 WorkflowContinuation::Fork { branches, join, .. } => {
                     let branch_results = if parallel_branches && branches.len() > 1 {
                         // Multiple branches: spawn each as a tokio task for parallelism.
@@ -420,11 +505,14 @@ where
                 next,
                 ..
             } => {
-                let output = execute_task_step(
+                let task_params = TaskStepParams {
                     id,
-                    timeout.as_ref(),
-                    retry_policy.as_ref(),
-                    next.as_deref(),
+                    timeout: timeout.as_ref(),
+                    retry_policy: retry_policy.as_ref(),
+                    next: next.as_deref(),
+                };
+                let output = execute_task_step(
+                    &task_params,
                     current_input.clone(),
                     snapshot,
                     backend,
@@ -565,6 +653,76 @@ where
                     backend.save_snapshot(snapshot).await?;
 
                     Ok(ControlFlow::Continue(envelope_bytes))
+                }
+            }
+            WorkflowContinuation::Loop {
+                id,
+                body,
+                max_iterations,
+                on_max,
+                ..
+            } => {
+                check_guards(backend, &snapshot.instance_id, Some(id)).await?;
+
+                // Short-circuit: if the loop already completed (cached from a
+                // previous run), skip re-execution entirely.
+                if let Some(result) = snapshot.get_task_result(id) {
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let cfg = LoopConfig {
+                        id,
+                        body,
+                        max_iterations: *max_iterations,
+                        on_max: *on_max,
+                        start_iteration: snapshot.loop_iteration(id),
+                    };
+                    let mut loop_input = current_input.clone();
+                    let mut final_output = None;
+
+                    for iteration in cfg.start_iteration..cfg.max_iterations {
+                        let output = Box::pin(execute_continuation_with_checkpointing(
+                            body,
+                            loop_input.clone(),
+                            snapshot,
+                            backend,
+                            execute_task,
+                            envelope_codec,
+                        ))
+                        .await?;
+
+                        let body_ser = body.to_serializable();
+                        for tid in &body_ser.task_ids() {
+                            snapshot.remove_task_result(tid);
+                        }
+
+                        match resolve_loop_iteration(&output, iteration, &cfg, envelope_codec)? {
+                            ControlFlow::Break(LoopExit(inner)) => {
+                                snapshot.clear_loop_iteration(id);
+                                snapshot.mark_task_completed(id.clone(), inner.clone());
+                                backend.save_snapshot(snapshot).await?;
+                                final_output = Some(inner);
+                                break;
+                            }
+                            ControlFlow::Continue(LoopNext(inner)) => {
+                                snapshot.set_loop_iteration(id, iteration + 1);
+                                snapshot.update_position(ExecutionPosition::InLoop {
+                                    loop_id: id.clone(),
+                                    iteration: iteration + 1,
+                                    next_task_id: Some(body.first_task_id().to_string()),
+                                });
+                                backend.save_snapshot(snapshot).await?;
+                                loop_input = inner;
+                            }
+                        }
+                    }
+
+                    match final_output {
+                        Some(output) => Ok(ControlFlow::Continue(output)),
+                        None => Err(RuntimeError::from(WorkflowError::MaxIterationsExceeded {
+                            loop_id: id.clone(),
+                            max_iterations: *max_iterations,
+                        })),
+                    }
                 }
             }
         };

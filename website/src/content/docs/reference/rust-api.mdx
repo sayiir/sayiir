@@ -347,9 +347,41 @@ let workflow = WorkflowBuilder::new(context)
     .build()?;
 ```
 
+:::tip[Static vs dynamic]
+For statically-defined workflows, prefer the `workflow!` macro or the type-safe `.then_task::<T>()` methods. Use `WorkflowBuilder` with `.then("id", closure)` or `.then_registered("id")` when composing dynamic workflows where task IDs are determined at runtime.
+:::
+
 ### Key Methods
 
-#### then(name, closure)
+#### Composing from `#[task]` structs (recommended)
+
+##### `then_task::<T>()`
+
+Add a `#[task]` struct to the workflow. The task ID, output type, timeout, and retry
+policy are all derived from the type — no strings needed.
+
+```rust
+// Given:  #[task] async fn add_ten(input: u32) -> Result<u32, BoxError> { … }
+// Given:  #[task(timeout = "5s")] async fn double(input: u32) -> Result<u32, BoxError> { … }
+
+let workflow = WorkflowBuilder::new(ctx)
+    .with_registry()
+    .then_task::<AddTenTask>()
+    .then_task::<DoubleTask>()
+    .build()?;
+```
+
+##### `then_task_with(instance)`
+
+Same as `then_task`, but for tasks with `#[inject]` dependencies that don't implement `Default`.
+
+```rust
+.then_task_with(FetchTask::new(http_client.clone()))
+```
+
+#### Inline closures
+
+##### then(name, closure)
 
 Add a sequential task with an inline closure.
 
@@ -357,17 +389,37 @@ Add a sequential task with an inline closure.
 .then("double", |x: i32| async move { Ok(x * 2) })
 ```
 
-#### `then_registered::<T>(name)`
+#### Dynamic workflows
 
-Use a task from the registry.
+##### `then_registered::<T>(name)`
+
+Reference a pre-registered task by its string ID. Use this when task IDs are
+determined at runtime (e.g. loaded from config or a database).
+
+Prefer `.then_task::<T>()` when the task is a `#[task]` struct known at compile time.
 
 ```rust
-.then_registered::<Validate>("validate")
+.then_registered::<u32>("validate")
 ```
 
 #### branches(closure) / fork()
 
-Start parallel branches.
+Start parallel branches. When branches are `#[task]` structs, use `add_task` for type safety:
+
+```rust
+// Using #[task] structs (recommended)
+.branches(|b| {
+    b.add_task::<SendEmailTask>();
+    b.add_task::<UpdateInventoryTask>();
+})
+.join("finalize", |outputs: BranchOutputs<_>| async move {
+    let email = outputs.get::<SendEmailTask>()?;
+    let inv = outputs.get::<UpdateInventoryTask>()?;
+    Ok(Summary { email, inv })
+})
+```
+
+Or with inline closures:
 
 ```rust
 .branches(|b| {
@@ -409,14 +461,18 @@ enum Route {
 }
 
 let wf = WorkflowBuilder::new(ctx)
-    .then("classify", classify_fn)
+    .with_registry()
+    .then_task::<ClassifyTask>()
     .route::<_, Route, _, _>( |input: ClassifyOutput| async move {
-        Ok(if input.intent == "billing" { Route::Billing } else { Route::Tech })
+        Ok(match input.intent {
+            Intent::Billing => Route::Billing,
+            Intent::Tech => Route::Tech,
+        })
     })
-        .branch(Route::Billing, |sub| sub.then("handle_billing", billing_fn))?
-        .branch(Route::Tech, |sub| sub.then("handle_tech", tech_fn))?
-        .default_branch(|sub| sub.then("fallback", fallback_fn))?
-    .done()?  // Returns Err(BuildError::MissingBranches) if a Route variant is unhandled
+        .branch(Route::Billing, |sub| sub.then_task::<HandleBillingTask>())
+        .branch(Route::Tech, |sub| sub.then_task::<HandleTechTask>())
+        .default_branch(|sub| sub.then_task::<FallbackTask>())
+    .done()
     .build()?;
 ```
 
@@ -425,6 +481,49 @@ After `.done()`, the output type is `BranchEnvelope<BranchOut>` containing `bran
 :::note
 The `workflow!` macro also supports typed keys via `route key_fn -> EnumType { Variant => [...] }`. It generates compile-time match exhaustiveness checks using the `BranchKey` enum. String-based keys (`"key" => [...]`) remain supported for simpler cases.
 :::
+
+#### loop_task(id, closure, max_iterations)
+
+Add a loop whose body repeats until it returns `LoopResult::Done`.
+
+```rust
+use sayiir_core::LoopResult;
+
+let wf = WorkflowBuilder::new(ctx)
+    .then("setup", setup_fn)
+    .loop_task("refine", |draft: String| async move {
+        let improved = improve(&draft);
+        if is_good_enough(&improved) {
+            Ok(LoopResult::Done(improved))
+        } else {
+            Ok(LoopResult::Again(improved))
+        }
+    }, 5)
+    .then("finalize", finalize_fn)
+    .build()?;
+```
+
+**Parameters:**
+- `id` (&str) — Body task identifier. The loop node gets an auto-generated ID (`loop_0`, `loop_1`, …).
+- `func` — Closure returning `Result<LoopResult<NewOutput>, BoxError>`
+- `max_iterations` (u32) — Maximum iterations before failing (must be ≥ 1)
+
+Use `loop_task_with_policy` for custom `MaxIterationsPolicy`:
+
+```rust
+use sayiir_core::MaxIterationsPolicy;
+
+.loop_task_with_policy("poll", poll_fn, 100, MaxIterationsPolicy::ExitWithLast)
+```
+
+**LoopResult\<T\>:**
+- `LoopResult::Again(value)` — Continue iterating with `value`
+- `LoopResult::Done(value)` — Exit the loop with `value`
+- Serde format: `{"_loop": "again"|"done", "value": ...}`
+
+**MaxIterationsPolicy:**
+- `Fail` (default) — Return an error when max iterations is reached
+- `ExitWithLast` — Exit with the last iteration's output
 
 #### delay(name, duration)
 

@@ -129,8 +129,8 @@ mod tests {
                 b.add("add_ten", |i: u32| async move { Ok(i + 10) });
             })
             .join("combine", |outputs: BranchOutputs<JsonCodec>| async move {
-                let doubled: u32 = outputs.get("double")?;
-                let added: u32 = outputs.get("add_ten")?;
+                let doubled: u32 = outputs.get_by_id("double")?;
+                let added: u32 = outputs.get_by_id("add_ten")?;
                 Ok(doubled + added)
             })
             .build()

@@ -33,6 +33,7 @@ export interface NapiBranchEntry {
 }
 
 export interface NapiFlowBuilder {
+  nextLambdaId(): string;
   then(taskId: string, metadata?: NapiTaskMetadata): void;
   addFork(
     branches: NapiBranchTask[][],
@@ -40,16 +41,21 @@ export interface NapiFlowBuilder {
     joinMetadata?: NapiTaskMetadata,
   ): void;
   addBranch(
-    branchId: string,
     branches: NapiBranchEntry[],
     defaultBranch?: NapiBranchTask[],
-  ): void;
+  ): string;
   waitForSignal(
     signalId: string,
     signalName: string,
     timeoutSecs?: number,
   ): void;
   delay(delayId: string, seconds: number): void;
+  addLoop(
+    bodyTaskId: string,
+    bodyMetadata?: NapiTaskMetadata,
+    maxIterations?: number,
+    onMax?: string,
+  ): string;
   setMetadataJson(json: string): void;
   build(): NapiWorkflow;
 }

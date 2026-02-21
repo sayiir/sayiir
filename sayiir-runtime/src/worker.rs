@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use chrono;
 use futures::FutureExt;
-use sayiir_core::codec::Codec;
 use sayiir_core::codec::sealed;
+use sayiir_core::codec::{Codec, EnvelopeCodec, LoopDecision};
 use sayiir_core::context::with_context;
 use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::registry::TaskRegistry;
@@ -416,7 +416,11 @@ where
     where
         Input: Send + Sync + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
     {
         let (tx, rx) = mpsc::channel(1);
         let backend = Arc::clone(&self.backend);
@@ -733,7 +737,11 @@ where
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
     {
         let mut interval = time::interval(poll_interval);
 
@@ -852,7 +860,11 @@ where
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
     {
         // 1. Load snapshot + pure validation
         let mut snapshot = self
@@ -915,7 +927,11 @@ where
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
     {
         let continuation = workflow.continuation();
         let task_id = available_task.task_id.clone();
@@ -1010,7 +1026,11 @@ where
     where
         Input: Send + 'static,
         M: Send + Sync + 'static,
-        C: Codec + sealed::DecodeValue<Input> + sealed::EncodeValue<Input> + 'static,
+        C: Codec
+            + EnvelopeCodec
+            + sealed::DecodeValue<Input>
+            + sealed::EncodeValue<Input>
+            + 'static,
     {
         match outcome {
             ExecutionOutcome::Timeout(err) => {
@@ -1094,6 +1114,15 @@ where
                     snapshot,
                     output.clone(),
                     claim,
+                )
+                .await?;
+                // After saving the body task result, resolve any parent loop
+                // nodes so that is_workflow_complete() can detect loop completion.
+                Self::resolve_loop_completions(
+                    workflow.continuation(),
+                    snapshot,
+                    self.backend.as_ref(),
+                    workflow.context().codec.as_ref(),
                 )
                 .await?;
                 self.determine_post_task_status(
@@ -1432,6 +1461,13 @@ where
                 next.as_ref()
                     .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
             }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                if Self::find_task_id_in_continuation(body, task_id) {
+                    return true;
+                }
+                next.as_ref()
+                    .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
+            }
         }
     }
 
@@ -1519,6 +1555,17 @@ where
                             return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
+                    WorkflowContinuation::Loop { body, next, .. } => {
+                        if Self::find_task_id_in_continuation(body, task_id) {
+                            current = body;
+                            continue;
+                        }
+                        if let Some(next_cont) = next {
+                            current = next_cont;
+                        } else {
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
+                        }
+                    }
                 }
             }
         }
@@ -1570,6 +1617,12 @@ where
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
                 }
             }
+            WorkflowContinuation::Loop { body, next, .. } => {
+                Self::update_position_after_task(body, completed_task_id, snapshot);
+                if let Some(next_cont) = next {
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                }
+            }
         }
     }
 
@@ -1601,6 +1654,117 @@ where
             claim_ttl: Some(Duration::from_secs(5 * 60)),
             batch_size: NonZeroUsize::MIN,
         }
+    }
+
+    /// Walk the continuation tree and resolve any Loop nodes whose body has
+    /// completed. When the terminal body task's output decodes to
+    /// `LoopDecision::Done`, the loop node is marked as completed in the
+    /// snapshot. For `Again`, body task results are cleared and the iteration
+    /// counter is advanced so the body becomes available for re-execution.
+    async fn resolve_loop_completions(
+        continuation: &WorkflowContinuation,
+        snapshot: &mut WorkflowSnapshot,
+        backend: &B,
+        codec: &impl EnvelopeCodec,
+    ) -> Result<(), crate::error::RuntimeError> {
+        Self::resolve_loops_recursive(continuation, snapshot, backend, codec).await
+    }
+
+    fn resolve_loops_recursive<'a>(
+        continuation: &'a WorkflowContinuation,
+        snapshot: &'a mut WorkflowSnapshot,
+        backend: &'a B,
+        codec: &'a (impl EnvelopeCodec + 'a),
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = Result<(), crate::error::RuntimeError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            match continuation {
+                WorkflowContinuation::Loop {
+                    id,
+                    body,
+                    max_iterations,
+                    on_max,
+                    next,
+                } => {
+                    // Only resolve if the loop isn't already marked complete.
+                    if snapshot.get_task_result(id).is_none() {
+                        let terminal_id = body.terminal_task_id();
+                        if let Some(result) = snapshot.get_task_result(terminal_id) {
+                            let output = result.output.clone();
+                            match codec.decode_loop_result(&output) {
+                                Ok((LoopDecision::Done, inner)) => {
+                                    snapshot.clear_loop_iteration(id);
+                                    snapshot.mark_task_completed(id.clone(), inner);
+                                    backend.save_snapshot(snapshot).await?;
+                                }
+                                Ok((LoopDecision::Again, again_value)) => {
+                                    let current_iter = snapshot.loop_iteration(id);
+                                    let next_iter = current_iter + 1;
+                                    if next_iter >= *max_iterations {
+                                        match on_max {
+                                            sayiir_core::workflow::MaxIterationsPolicy::Fail => {
+                                                return Err(WorkflowError::MaxIterationsExceeded {
+                                                    loop_id: id.clone(),
+                                                    max_iterations: *max_iterations,
+                                                }
+                                                .into());
+                                            }
+                                            sayiir_core::workflow::MaxIterationsPolicy::ExitWithLast => {
+                                                snapshot.clear_loop_iteration(id);
+                                                snapshot.mark_task_completed(
+                                                    id.clone(),
+                                                    again_value,
+                                                );
+                                                backend.save_snapshot(snapshot).await?;
+                                            }
+                                        }
+                                    } else {
+                                        // Clear body task results so the body becomes
+                                        // available for re-execution on the next poll.
+                                        let body_ser = body.to_serializable();
+                                        for tid in &body_ser.task_ids() {
+                                            snapshot.remove_task_result(tid);
+                                        }
+                                        snapshot.set_loop_iteration(id, next_iter);
+                                        backend.save_snapshot(snapshot).await?;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        loop_id = %id,
+                                        error = %e,
+                                        "Failed to decode loop result in worker"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Recurse into body and next.
+                    Self::resolve_loops_recursive(body, snapshot, backend, codec).await?;
+                    if let Some(next) = next {
+                        Self::resolve_loops_recursive(next, snapshot, backend, codec).await?;
+                    }
+                }
+                WorkflowContinuation::Task { next, .. }
+                | WorkflowContinuation::Delay { next, .. }
+                | WorkflowContinuation::AwaitSignal { next, .. }
+                | WorkflowContinuation::Branch { next, .. } => {
+                    if let Some(next) = next {
+                        Self::resolve_loops_recursive(next, snapshot, backend, codec).await?;
+                    }
+                }
+                WorkflowContinuation::Fork { branches, join, .. } => {
+                    for branch in branches {
+                        Self::resolve_loops_recursive(branch, snapshot, backend, codec).await?;
+                    }
+                    if let Some(join) = join {
+                        Self::resolve_loops_recursive(join, snapshot, backend, codec).await?;
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Check if the workflow is complete based on the snapshot.
@@ -1644,6 +1808,14 @@ where
             }
             WorkflowContinuation::Branch { id, next, .. } => {
                 // Branch is complete when the branch node itself has a cached result
+                if snapshot.get_task_result(id).is_none() {
+                    return false;
+                }
+                next.as_ref()
+                    .is_none_or(|n| Self::is_workflow_complete(n, snapshot))
+            }
+            WorkflowContinuation::Loop { id, next, .. } => {
+                // Loop is complete when the loop node itself has a cached result
                 if snapshot.get_task_result(id).is_none() {
                     return false;
                 }

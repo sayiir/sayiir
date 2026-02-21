@@ -68,6 +68,18 @@ pub enum WorkflowStep {
         span: Span,
     },
 
+    /// Loop node whose body repeats until the task returns `LoopResult::Done`.
+    /// e.g. `loop refine_task 10` or `loop refine_task 10 exit_with_last`
+    Loop {
+        /// Body task reference (struct name, PascalCase).
+        body: Ident,
+        /// Maximum number of iterations.
+        max_iterations: syn::LitInt,
+        /// What to do when `max_iterations` is reached (defaults to `Fail`).
+        on_max: Option<Ident>,
+        span: Span,
+    },
+
     /// Conditional branch based on a routing key.
     /// e.g. `route classify_key { "billing" => [handle_billing], _ => [fallback] }`
     /// or   `route classify_key -> Intent { Billing => [handle_billing], _ => [fallback] }`

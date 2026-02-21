@@ -555,15 +555,19 @@ where
 
 /// Execute one checkpointed task with the full guard/deadline/retry/save lifecycle.
 ///
+/// Task parameters extracted from [`WorkflowContinuation::Task`].
+pub(crate) struct TaskStepParams<'a> {
+    pub id: &'a str,
+    pub timeout: Option<&'a std::time::Duration>,
+    pub retry_policy: Option<&'a sayiir_core::task::RetryPolicy>,
+    pub next: Option<&'a WorkflowContinuation>,
+}
+
 /// Runs pre-guards, sets the deadline, retries via [`retry_with_checkpoint`],
 /// updates the snapshot position to the next task, saves the snapshot, and
 /// runs post-guards.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_task_step<B, ExecFn, ExecFut, E>(
-    id: &str,
-    timeout: Option<&std::time::Duration>,
-    retry_policy: Option<&sayiir_core::task::RetryPolicy>,
-    next: Option<&WorkflowContinuation>,
+    params: &TaskStepParams<'_>,
     current_input: Bytes,
     snapshot: &mut WorkflowSnapshot,
     backend: &B,
@@ -575,20 +579,20 @@ where
     ExecFut: Future<Output = Result<Bytes, E>> + Send,
     E: Into<RuntimeError>,
 {
-    check_guards(backend, &snapshot.instance_id, Some(id)).await?;
-    set_deadline_if_needed(id, timeout, snapshot, backend).await?;
+    check_guards(backend, &snapshot.instance_id, Some(params.id)).await?;
+    set_deadline_if_needed(params.id, params.timeout, snapshot, backend).await?;
 
     let output = retry_with_checkpoint(
-        id,
-        retry_policy,
-        timeout,
+        params.id,
+        params.retry_policy,
+        params.timeout,
         snapshot,
         Some(backend),
-        async |snap| execute_or_skip_task(id, current_input.clone(), &execute, snap).await,
+        async |snap| execute_or_skip_task(params.id, current_input.clone(), &execute, snap).await,
     )
     .await?;
 
-    if let Some(next_cont) = next {
+    if let Some(next_cont) = params.next {
         snapshot.update_position(ExecutionPosition::AtTask {
             task_id: next_cont.first_task_id().to_string(),
         });

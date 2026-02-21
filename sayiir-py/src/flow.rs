@@ -8,7 +8,7 @@
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-use sayiir_core::continuation_builder::BuilderTask;
+use sayiir_core::continuation_builder::FlowBuilder;
 use sayiir_core::workflow::WorkflowContinuation;
 
 use crate::task::PyTaskMetadata;
@@ -44,7 +44,7 @@ impl PyWorkflow {
 #[pyclass]
 pub struct PyFlowBuilder {
     workflow_id: String,
-    tasks: Vec<BuilderTask>,
+    inner: FlowBuilder,
     metadata_json: Option<String>,
 }
 
@@ -54,9 +54,14 @@ impl PyFlowBuilder {
     fn new(name: String) -> Self {
         Self {
             workflow_id: name,
-            tasks: Vec::new(),
+            inner: FlowBuilder::new(),
             metadata_json: None,
         }
+    }
+
+    /// Generate the next lambda ID (`lambda_0`, `lambda_1`, …).
+    fn next_lambda_id(&mut self) -> String {
+        self.inner.next_lambda_id()
     }
 
     /// Set workflow-level metadata as a JSON string.
@@ -68,10 +73,8 @@ impl PyFlowBuilder {
     #[pyo3(signature = (task_id, metadata=None))]
     fn then(&mut self, task_id: String, metadata: Option<PyTaskMetadata>) {
         tracing::trace!(workflow_id = %self.workflow_id, %task_id, "adding sequential task");
-        self.tasks.push(BuilderTask::Sequential {
-            task_id,
-            metadata: metadata.map(Into::into).unwrap_or_default(),
-        });
+        self.inner
+            .add_sequential(task_id, metadata.map(Into::into).unwrap_or_default());
     }
 
     /// Wait for an external signal before continuing.
@@ -82,33 +85,16 @@ impl PyFlowBuilder {
         signal_name: String,
         timeout_secs: Option<f64>,
     ) -> PyResult<()> {
-        if let Some(t) = timeout_secs
-            && (!t.is_finite() || t < 0.0)
-        {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "timeout must be a finite non-negative number",
-            ));
-        }
-        self.tasks.push(BuilderTask::AwaitSignal {
-            signal_id,
-            signal_name,
-            timeout_secs,
-        });
-        Ok(())
+        self.inner
+            .add_signal(signal_id, signal_name, timeout_secs)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     /// Add a durable delay.
     fn delay(&mut self, delay_id: String, seconds: f64) -> PyResult<()> {
-        if !seconds.is_finite() || seconds < 0.0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "delay duration must be a finite non-negative number",
-            ));
-        }
-        self.tasks.push(BuilderTask::Delay {
-            delay_id,
-            duration_secs: seconds,
-        });
-        Ok(())
+        self.inner
+            .add_delay(delay_id, seconds)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     /// Add a fork with branches (each branch is a chain of tasks) and a join.
@@ -119,24 +105,12 @@ impl PyFlowBuilder {
         join_id: String,
         join_metadata: Option<PyTaskMetadata>,
     ) -> PyResult<()> {
-        if branches.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Fork must have at least one branch",
-            ));
-        }
         tracing::trace!(
             workflow_id = %self.workflow_id,
             branch_count = branches.len(),
             %join_id,
             "adding fork"
         );
-        for (i, branch) in branches.iter().enumerate() {
-            if branch.is_empty() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Branch {i} must have at least one task"
-                )));
-            }
-        }
         let branches = branches
             .into_iter()
             .map(|chain| {
@@ -146,40 +120,30 @@ impl PyFlowBuilder {
                     .collect()
             })
             .collect();
-        self.tasks.push(BuilderTask::Fork {
-            branches,
-            join_id,
-            join_metadata: join_metadata.map(Into::into).unwrap_or_default(),
-        });
-        Ok(())
+        self.inner
+            .add_fork(
+                branches,
+                join_id,
+                join_metadata.map(Into::into).unwrap_or_default(),
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     /// Add a conditional branch node.
     ///
-    /// `branch_id` is the node ID. The key function is registered in the Python
-    /// registry as `"{branch_id}::key_fn"`.
+    /// The branch ID is auto-generated internally. The key function is
+    /// registered in the Python registry as `"{branch_id}::key_fn"`.
     /// `branches` is a list of `(key, [(task_id, metadata), ...])` pairs.
     /// `default` is an optional chain for unmatched keys.
-    #[pyo3(signature = (branch_id, branches, default=None))]
+    ///
+    /// Returns the generated branch ID.
+    #[pyo3(signature = (branches, default=None))]
     #[allow(clippy::type_complexity)]
     fn add_branch(
         &mut self,
-        branch_id: String,
         branches: Vec<(String, Vec<(String, Option<PyTaskMetadata>)>)>,
         default: Option<Vec<(String, Option<PyTaskMetadata>)>>,
-    ) -> PyResult<()> {
-        if branches.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "route must have at least one branch",
-            ));
-        }
-        for (key, chain) in &branches {
-            if chain.is_empty() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Branch '{key}' must have at least one task"
-                )));
-            }
-        }
+    ) -> PyResult<String> {
         let branches = branches
             .into_iter()
             .map(|(key, chain)| {
@@ -196,22 +160,49 @@ impl PyFlowBuilder {
                 .map(|(id, meta)| (id, meta.map(Into::into).unwrap_or_default()))
                 .collect()
         });
-        self.tasks.push(BuilderTask::Branch {
-            branch_id,
-            branches,
-            default,
-        });
-        Ok(())
+        self.inner
+            .add_branch(branches, default)
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+    }
+
+    /// Add a loop node.
+    ///
+    /// The loop ID is auto-generated internally.
+    /// `body_task_id` is the task that runs each iteration.
+    /// `max_iterations` caps the iteration count.
+    /// `on_max` is `"fail"` (default) or `"exit_with_last"`.
+    ///
+    /// Returns the generated loop ID.
+    #[pyo3(signature = (body_task_id, body_metadata=None, max_iterations=10, on_max="fail"))]
+    fn add_loop(
+        &mut self,
+        body_task_id: String,
+        body_metadata: Option<PyTaskMetadata>,
+        max_iterations: u32,
+        on_max: &str,
+    ) -> PyResult<String> {
+        let on_max: sayiir_core::workflow::MaxIterationsPolicy = on_max.parse().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid on_max policy: '{on_max}'. Use 'fail' or 'exit_with_last'."
+            ))
+        })?;
+        self.inner
+            .add_loop(
+                body_task_id,
+                body_metadata.map(Into::into).unwrap_or_default(),
+                max_iterations,
+                on_max,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
     /// Build the workflow.
     fn build(&self) -> PyResult<PyWorkflow> {
-        tracing::debug!(
-            workflow_id = %self.workflow_id,
-            task_count = self.tasks.len(),
-            "building workflow"
-        );
-        let continuation = self.build_continuation()?;
+        tracing::debug!(workflow_id = %self.workflow_id, "building workflow");
+        let continuation = self
+            .inner
+            .build()
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         let serializable = continuation.to_serializable();
         let definition_hash = serializable.compute_definition_hash();
 
@@ -227,12 +218,5 @@ impl PyFlowBuilder {
             continuation: Arc::new(continuation),
             metadata_json: self.metadata_json.clone(),
         })
-    }
-}
-
-impl PyFlowBuilder {
-    fn build_continuation(&self) -> PyResult<WorkflowContinuation> {
-        sayiir_core::continuation_builder::build_continuation(&self.tasks)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 }

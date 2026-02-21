@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use sayiir_core::LoopResult;
 use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::BoxError;
 use sayiir_core::registry::TaskRegistry;
@@ -227,25 +228,17 @@ fn task_register_into_registry() {
     assert!(meta.timeout.is_some());
 }
 
-// ─── 3. End-to-end with CheckpointingRunner ─────────────────────────────────
-
 #[tokio::test]
-async fn task_macro_with_checkpointing_runner() {
+async fn task_macro_with_then_task() {
     let (_c, backend) = setup().await;
     let runner = CheckpointingRunner::new(backend);
 
     let codec = Arc::new(JsonCodec);
-    let mut registry = TaskRegistry::new();
-    AddTenTask::register(&mut registry, codec.clone(), AddTenTask::new());
-    DoubleTask::register(&mut registry, codec.clone(), DoubleTask::new());
-
     let ctx = WorkflowContext::new("macro-test", codec, Arc::new(()));
     let workflow = WorkflowBuilder::new(ctx)
-        .with_existing_registry(registry)
-        .then_registered::<<AddTenTask as CoreTask>::Output>(AddTenTask::task_id())
-        .unwrap()
-        .then_registered::<<DoubleTask as CoreTask>::Output>(DoubleTask::task_id())
-        .unwrap()
+        .with_registry()
+        .then_task::<AddTenTask>()
+        .then_task::<DoubleTask>()
         .build()
         .unwrap();
 
@@ -262,6 +255,36 @@ async fn task_macro_with_checkpointing_runner() {
         .await
         .unwrap();
     assert!(snapshot.state.is_completed());
+}
+
+// ─── 3b. Dynamic pattern: then_registered (for runtime-determined task IDs) ──
+
+#[tokio::test]
+async fn task_macro_with_then_registered() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // Use then_registered when task IDs are determined at runtime,
+    // e.g. loaded from config, or when composing from a shared registry.
+    let codec = Arc::new(JsonCodec);
+    let mut registry = TaskRegistry::new();
+    AddTenTask::register(&mut registry, codec.clone(), AddTenTask::new());
+    DoubleTask::register(&mut registry, codec.clone(), DoubleTask::new());
+
+    let ctx = WorkflowContext::new("macro-test-dyn", codec, Arc::new(()));
+    let workflow = WorkflowBuilder::new(ctx)
+        .with_existing_registry(registry)
+        .then_registered::<<AddTenTask as CoreTask>::Output>(AddTenTask::task_id())
+        .then_registered::<<DoubleTask as CoreTask>::Output>(DoubleTask::task_id())
+        .build()
+        .unwrap();
+
+    // 5 + 10 = 15, 15 * 2 = 30
+    let status = runner
+        .run(workflow.workflow(), "macro-inst-dyn-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
 }
 
 // ─── 4. workflow! macro — linear pipeline ────────────────────────────────────
@@ -542,6 +565,79 @@ async fn workflow_macro_typed_route_then_next() {
     // → unwrap_envelope → 150 → double → 300
     let status = runner
         .run(workflow.workflow(), "typed-route-next-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── 10. workflow! macro — loop ───────────────────────────────────────────
+
+#[task]
+async fn accumulate(input: u32) -> Result<LoopResult<u32>, BoxError> {
+    let next = input + 1;
+    if next >= 5 {
+        Ok(LoopResult::Done(next))
+    } else {
+        Ok(LoopResult::Again(next))
+    }
+}
+
+#[tokio::test]
+async fn workflow_macro_loop() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow! {
+        name: "loop-test",
+        codec: JsonCodec,
+        steps: [loop accumulate 10]
+    }
+    .unwrap();
+
+    // Input 0 → accumulate → Again(1) → Again(2) → … → Done(5)
+    let status = runner
+        .run(workflow.workflow(), "loop-inst-1", 0u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+#[tokio::test]
+async fn workflow_macro_loop_exit_with_last() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // Body always returns Again; max 3 iterations with exit_with_last
+    let workflow = workflow! {
+        name: "loop-exit-last-test",
+        codec: JsonCodec,
+        steps: [loop accumulate 3 exit_with_last]
+    }
+    .unwrap();
+
+    // Input 0 → Again(1) → Again(2) → Again(3) → max reached, exit with 3
+    let status = runner
+        .run(workflow.workflow(), "loop-exit-inst-1", 0u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+#[tokio::test]
+async fn workflow_macro_loop_in_pipeline() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    let workflow = workflow! {
+        name: "loop-pipeline-test",
+        codec: JsonCodec,
+        steps: [add_ten, loop accumulate 20, double]
+    }
+    .unwrap();
+
+    // Input 0 → add_ten → 10 → accumulate: 10+1=11 ≥5 → Done(11) → double → 22
+    let status = runner
+        .run(workflow.workflow(), "loop-pipe-inst-1", 0u32)
         .await
         .unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));

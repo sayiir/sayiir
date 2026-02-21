@@ -85,6 +85,40 @@ export class BackendError extends WorkflowError {
   }
 }
 
+/**
+ * Result from a loop body task.
+ *
+ * Return `LoopResult.again(value)` to continue iterating,
+ * or `LoopResult.done(value)` to exit the loop.
+ *
+ * Serializes as `{ _loop: "again"|"done", value: ... }` matching the
+ * Rust `LoopResult<T>` serde format.
+ */
+export type LoopResult<T> = { _loop: "again"; value: T } | { _loop: "done"; value: T };
+
+/** Factory functions for creating `LoopResult` values. */
+export const LoopResult = {
+  /** Continue the loop with a new value. */
+  again<T>(value: T): LoopResult<T> {
+    return { _loop: "again", value };
+  },
+  /** Exit the loop with a final value. */
+  done<T>(value: T): LoopResult<T> {
+    return { _loop: "done", value };
+  },
+} as const;
+
+/** Policy for when max iterations is reached. */
+export type MaxIterationsPolicy = "fail" | "exit_with_last";
+
+/** Options for a loop step. */
+export interface LoopOptions {
+  /** Maximum number of iterations (default: 10). */
+  maxIterations?: number;
+  /** What to do when max iterations is reached (default: "fail"). */
+  onMax?: MaxIterationsPolicy;
+}
+
 /** All possible workflow status values returned by the native layer. */
 export type NativeWorkflowStatusKind =
   | "completed"

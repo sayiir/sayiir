@@ -10,7 +10,7 @@ use napi_derive::napi;
 use std::sync::Arc;
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_core::workflow::WorkflowStatus;
+use sayiir_core::workflow::{FlatWorkflowStatus, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
     ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
@@ -52,62 +52,19 @@ impl NapiWorkflowStatus {
                 .ok()
                 .map(std::string::ToString::to_string)
         });
-
-        let mut result = Self {
-            status: String::new(),
-            error: None,
-            reason: None,
-            cancelled_by: None,
-            paused_by: None,
+        let flat = FlatWorkflowStatus::from(status);
+        Self {
+            status: flat.status,
+            error: flat.error,
+            reason: flat.reason,
+            cancelled_by: flat.cancelled_by,
+            paused_by: flat.paused_by,
             output_json,
-            wake_at: None,
-            delay_id: None,
-            signal_id: None,
-            signal_name: None,
-        };
-
-        match status {
-            WorkflowStatus::Completed => {
-                result.status = "completed".to_string();
-            }
-            WorkflowStatus::InProgress => {
-                result.status = "in_progress".to_string();
-            }
-            WorkflowStatus::Failed(e) => {
-                result.status = "failed".to_string();
-                result.error = Some(e);
-            }
-            WorkflowStatus::Cancelled {
-                reason,
-                cancelled_by,
-            } => {
-                result.status = "cancelled".to_string();
-                result.reason = reason;
-                result.cancelled_by = cancelled_by;
-            }
-            WorkflowStatus::Paused { reason, paused_by } => {
-                result.status = "paused".to_string();
-                result.reason = reason;
-                result.paused_by = paused_by;
-            }
-            WorkflowStatus::Waiting { wake_at, delay_id } => {
-                result.status = "waiting".to_string();
-                result.wake_at = Some(wake_at.to_rfc3339());
-                result.delay_id = Some(delay_id);
-            }
-            WorkflowStatus::AwaitingSignal {
-                signal_id,
-                signal_name,
-                wake_at,
-            } => {
-                result.status = "awaiting_signal".to_string();
-                result.signal_id = Some(signal_id);
-                result.signal_name = Some(signal_name);
-                result.wake_at = wake_at.map(|t| t.to_rfc3339());
-            }
+            wake_at: flat.wake_at,
+            delay_id: flat.delay_id,
+            signal_id: flat.signal_id,
+            signal_name: flat.signal_name,
         }
-
-        result
     }
 }
 
@@ -175,7 +132,7 @@ impl NapiDurableEngine {
             "starting durable workflow execution"
         );
 
-        let executor = make_task_executor(&env, &task_registry);
+        let executor = make_task_executor(&env, &task_registry)?;
 
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
@@ -207,7 +164,7 @@ impl NapiDurableEngine {
                 })?
         });
 
-        tracing::info!(status = %status_to_str(&status), "durable workflow execution finished");
+        tracing::info!(status = %status.as_ref(), "durable workflow execution finished");
 
         Ok(NapiWorkflowStatus::from_core(status, output_bytes))
     }
@@ -230,7 +187,7 @@ impl NapiDurableEngine {
             "resuming workflow from checkpoint"
         );
 
-        let executor = make_task_executor(&env, &task_registry);
+        let executor = make_task_executor(&env, &task_registry)?;
 
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
@@ -351,18 +308,6 @@ impl NapiDurableEngine {
     }
 }
 
-fn status_to_str(s: &WorkflowStatus) -> &'static str {
-    match s {
-        WorkflowStatus::Completed => "completed",
-        WorkflowStatus::InProgress => "in_progress",
-        WorkflowStatus::Failed(_) => "failed",
-        WorkflowStatus::Cancelled { .. } => "cancelled",
-        WorkflowStatus::Paused { .. } => "paused",
-        WorkflowStatus::Waiting { .. } => "waiting",
-        WorkflowStatus::AwaitingSignal { .. } => "awaiting_signal",
-    }
-}
-
 /// Wrapper around a raw `napi_env` pointer that we assert is `Send`+`Sync`.
 ///
 /// SAFETY: This is only safe when we guarantee execution stays on the main
@@ -394,49 +339,55 @@ unsafe impl Sync for SendObjectRef {}
 fn make_task_executor(
     env: &Env,
     task_registry: &Object,
-) -> impl Fn(
-    &str,
-    Bytes,
-) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = std::result::Result<Bytes, sayiir_core::error::BoxError>>
-            + Send,
-    >,
-> + Send
-+ Sync {
-    let send_env = Arc::new(SendEnv(env.raw()));
-    let registry_ref = task_registry
-        .create_ref()
-        .unwrap_or_else(|_| panic!("Failed to create reference to task registry"));
-    let registry_ref = Arc::new(SendObjectRef(registry_ref));
-
-    move |task_id: &str,
-          task_input: Bytes|
-          -> std::pin::Pin<
+) -> Result<
+    impl Fn(
+        &str,
+        Bytes,
+    ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
                     Output = std::result::Result<Bytes, sayiir_core::error::BoxError>,
                 > + Send,
         >,
-    > {
-        let task_id = task_id.to_string();
-        let registry_ref = Arc::clone(&registry_ref);
-        let send_env = Arc::clone(&send_env);
+    > + Send
+    + Sync,
+> {
+    let send_env = Arc::new(SendEnv(env.raw()));
+    let registry_ref = task_registry.create_ref().map_err(|e| {
+        Error::new(
+            Status::GenericFailure,
+            format!("Failed to create reference to task registry: {e}"),
+        )
+    })?;
+    let registry_ref = Arc::new(SendObjectRef(registry_ref));
 
-        Box::pin(async move {
-            // SAFETY: We know we're on the main JS thread because we use
-            // current_thread runtime with block_on.
-            let env = Env::from_raw(send_env.0);
-            let registry: Object =
-                registry_ref
-                    .0
-                    .get_value(&env)
-                    .map_err(|e| -> sayiir_core::error::BoxError {
+    Ok(
+        move |task_id: &str,
+              task_input: Bytes|
+              -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<Bytes, sayiir_core::error::BoxError>,
+                    > + Send,
+            >,
+        > {
+            let task_id = task_id.to_string();
+            let registry_ref = Arc::clone(&registry_ref);
+            let send_env = Arc::clone(&send_env);
+
+            Box::pin(async move {
+                // SAFETY: We know we're on the main JS thread because we use
+                // current_thread runtime with block_on.
+                let env = Env::from_raw(send_env.0);
+                let registry: Object = registry_ref.0.get_value(&env).map_err(
+                    |e| -> sayiir_core::error::BoxError {
                         format!("Failed to get registry reference: {e}").into()
-                    })?;
+                    },
+                )?;
 
-            crate::engine::execute_js_task(&env, &task_id, &task_input, &registry)
-                .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
-        })
-    }
+                crate::engine::execute_js_task(&env, &task_id, &task_input, &registry)
+                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
+            })
+        },
+    )
 }

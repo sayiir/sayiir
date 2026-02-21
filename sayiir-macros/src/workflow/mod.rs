@@ -53,7 +53,7 @@ fn generate(def: &WorkflowDef) -> syn::Result<TokenStream> {
     let exhaustiveness_checks = codegen::collect_exhaustiveness_checks(&def.steps);
 
     Ok(quote::quote! {
-        (|| -> ::std::result::Result<_, ::sayiir_core::error::BuildError> {
+        (|| -> ::std::result::Result<_, ::sayiir_core::error::BuildErrors> {
             #(#exhaustiveness_checks)*
             let __codec = ::std::sync::Arc::new(#codec);
             let mut __registry = #registry_expr;

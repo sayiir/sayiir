@@ -11,8 +11,9 @@
 //! This module also provides [`TaskMetadata`], [`RetryPolicy`],
 //! [`BranchOutputs`] for fork/join, and the type-erased [`UntypedCoreTask`].
 
-use crate::codec::{Codec, sealed};
+use crate::codec::{Codec, EnvelopeCodec, sealed};
 use crate::error::{BoxError, WorkflowError};
+use crate::loop_result::LoopResult;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,6 +57,21 @@ pub struct RetryPolicy {
     pub max_delay: Option<Duration>,
 }
 
+impl RetryPolicy {
+    /// Create a retry policy with the given max retries and sensible defaults.
+    ///
+    /// Defaults: 1 s initial delay, 2.0× backoff, no max delay cap.
+    #[must_use]
+    pub fn with_max_retries(max_retries: u32) -> Self {
+        Self {
+            max_retries,
+            initial_delay: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+            max_delay: None,
+        }
+    }
+}
+
 pub use crate::branch_results::NamedBranchResults;
 
 /// Discriminated union output from a `Branch` (conditional branching) node.
@@ -76,16 +92,19 @@ pub struct BranchEnvelope<T> {
 
 /// A type-safe map of branch outputs for heterogeneous fork-join.
 ///
-/// Each branch can return a different type. Use `get::<T>(name)` to retrieve
-/// a branch's output with the correct type.
+/// Each branch can return a different type. Use [`get::<T>()`](Self::get)
+/// with `#[task]` structs (preferred) or [`get_by_id::<T>(name)`](Self::get_by_id)
+/// with string IDs.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// .join("combine", |outputs: BranchOutputs<MyCodec>| async move {
-///     let count: u32 = outputs.get("counter")?;
-///     let name: String = outputs.get("fetch_name")?;
-///     let items: Vec<Item> = outputs.get("load_items")?;
+///     // With #[task] structs — ID and output type inferred:
+///     let count = outputs.get::<CounterTask>()?;
+///     let name = outputs.get::<FetchNameTask>()?;
+///     // With string IDs:
+///     let items: Vec<Item> = outputs.get_by_id("load_items")?;
 ///     Ok(format!("{}: {} items for {}", count, items.len(), name))
 /// })
 /// ```
@@ -125,12 +144,41 @@ impl<C> BranchOutputs<C> {
 }
 
 impl<C: Codec> BranchOutputs<C> {
-    /// Get a branch output by name, deserializing to the requested type.
+    /// Get a branch output by task type, using the task's ID and output type.
+    ///
+    /// This is the preferred way to extract branch results when using
+    /// `#[task]` structs — the task ID and output type are inferred:
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// let payment: PaymentResult = results.get_by_id("validate_payment")?;
+    /// // Write:
+    /// let payment = results.get::<ValidatePaymentTask>()?;
+    /// ```
     ///
     /// # Errors
     ///
     /// Returns an error if the branch doesn't exist or deserialization fails.
-    pub fn get<T>(&self, name: &str) -> Result<T, BoxError>
+    pub fn get<T>(&self) -> Result<T::Output, BoxError>
+    where
+        T: RegisterableTask,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: sealed::DecodeValue<T::Output>,
+    {
+        self.get_by_id(T::task_id())
+    }
+
+    /// Get a branch output by string ID, deserializing to the requested type.
+    ///
+    /// Prefer [`get::<T>()`](Self::get) when using `#[task]` structs.
+    /// Use this method for dynamically-named branches or closures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the branch doesn't exist or deserialization fails.
+    pub fn get_by_id<T>(&self, name: &str) -> Result<T, BoxError>
     where
         C: sealed::DecodeValue<T>,
     {
@@ -141,6 +189,37 @@ impl<C: Codec> BranchOutputs<C> {
 
         self.codec.decode(bytes.clone())
     }
+}
+
+/// A task that carries its own static ID and metadata.
+///
+/// This trait extends [`CoreTask`] to provide compile-time identification,
+/// enabling type-safe builder methods like
+/// [`then_task::<T>()`](crate::builder::WorkflowBuilder::then_task) that
+/// extract the task ID, output type, and metadata from the type itself —
+/// eliminating stringly-typed wiring.
+///
+/// # Implementing
+///
+/// The `#[task]` proc-macro generates this impl automatically.
+/// Manual implementation is straightforward for struct-based tasks:
+///
+/// ```rust,ignore
+/// impl RegisterableTask for MyTask {
+///     fn task_id() -> &'static str { "my_task" }
+///     fn metadata() -> TaskMetadata { TaskMetadata::default() }
+/// }
+/// ```
+pub trait RegisterableTask: CoreTask + Send + Sync + 'static
+where
+    Self::Input: Send + 'static,
+    Self::Output: Send + 'static,
+    Self::Future: Send + 'static,
+{
+    /// The unique string identifier for this task type.
+    fn task_id() -> &'static str;
+    /// Static metadata (timeout, retries, display name, …).
+    fn metadata() -> TaskMetadata;
 }
 
 /// A core task is a task that can be run by the workflow runtime.
@@ -366,6 +445,109 @@ where
     })
 }
 
+/// Create an untyped task from a loop body function.
+///
+/// Unlike [`to_core_task_arc`], this wrapper encodes `LoopResult<O>` via
+/// [`EnvelopeCodec::encode_loop_result`], which first serializes the inner
+/// value `O` then wraps it in a codec-specific envelope. This ensures the
+/// output can be decoded by [`EnvelopeCodec::decode_loop_result`] regardless
+/// of the concrete inner type.
+pub fn to_core_loop_task_arc<F, I, O, Fut, C>(func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
+where
+    F: Fn(I) -> Fut + Send + Sync + 'static,
+    I: Send + 'static,
+    O: Send + 'static,
+    Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
+    C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+{
+    struct LoopTaskFnWrapper<F, I, O, Fut, C> {
+        func: Arc<F>,
+        codec: Arc<C>,
+        _phantom: PhantomData<fn(I) -> (O, Fut)>,
+    }
+
+    impl<F, I, O, Fut, C> CoreTask for LoopTaskFnWrapper<F, I, O, Fut, C>
+    where
+        F: Fn(I) -> Fut + Send + Sync + 'static,
+        I: Send + 'static,
+        O: Send + 'static,
+        Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+    {
+        type Input = Bytes;
+        type Output = Bytes;
+        type Future = BytesFuture;
+
+        fn run(&self, input: Bytes) -> Self::Future {
+            let func = Arc::clone(&self.func);
+            let codec = Arc::clone(&self.codec);
+            BytesFuture::new(async move {
+                let decoded_input = codec.decode::<I>(input)?;
+                let loop_result = func(decoded_input).await?;
+                let (decision, inner) = loop_result.into_decision();
+                let inner_bytes = codec.encode(&inner)?;
+                codec.encode_loop_result(decision, &inner_bytes)
+            })
+        }
+    }
+
+    Box::new(LoopTaskFnWrapper {
+        func,
+        codec,
+        _phantom: PhantomData,
+    })
+}
+
+/// Wrap a `CoreTask` whose output is `LoopResult<O>` into an [`UntypedCoreTask`]
+/// that uses [`EnvelopeCodec::encode_loop_result`] for encoding.
+///
+/// This is the loop-aware equivalent of [`wrap_core_task`].
+pub fn wrap_core_loop_task<T, O, C>(task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
+where
+    T: CoreTask<Output = LoopResult<O>> + 'static,
+    T::Input: Send + 'static,
+    O: Send + 'static,
+    T::Future: Send + 'static,
+    C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+{
+    struct LoopCoreTaskWrapper<T, O, C> {
+        task: Arc<T>,
+        codec: Arc<C>,
+        _phantom: PhantomData<fn() -> O>,
+    }
+
+    impl<T, O, C> CoreTask for LoopCoreTaskWrapper<T, O, C>
+    where
+        T: CoreTask<Output = LoopResult<O>> + Send + Sync + 'static,
+        T::Input: Send + 'static,
+        O: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O>,
+    {
+        type Input = Bytes;
+        type Output = Bytes;
+        type Future = BytesFuture;
+
+        fn run(&self, input: Bytes) -> Self::Future {
+            let task = Arc::clone(&self.task);
+            let codec = Arc::clone(&self.codec);
+            BytesFuture::new(async move {
+                let decoded_input = codec.decode::<T::Input>(input)?;
+                let loop_result = task.run(decoded_input).await?;
+                let (decision, inner) = loop_result.into_decision();
+                let inner_bytes = codec.encode(&inner)?;
+                codec.encode_loop_result(decision, &inner_bytes)
+            })
+        }
+    }
+
+    Box::new(LoopCoreTaskWrapper {
+        task,
+        codec,
+        _phantom: PhantomData,
+    })
+}
+
 /// A boxed async function for use in fork branches (internal).
 type BoxedBranchFn<I, O> = Box<
     dyn Fn(I) -> std::pin::Pin<Box<dyn Future<Output = Result<O, BoxError>> + Send>> + Send + Sync,
@@ -495,8 +677,8 @@ where
 ///
 /// ```rust,ignore
 /// .join("combine", |outputs: BranchOutputs<MyCodec>| async move {
-///     let count: u32 = outputs.get("counter")?;
-///     let name: String = outputs.get("fetch_name")?;
+///     let count: u32 = outputs.get_by_id("counter")?;
+///     let name: String = outputs.get_by_id("fetch_name")?;
 ///     Ok(format!("{} - {}", name, count))
 /// })
 /// ```
@@ -539,4 +721,49 @@ where
         codec,
         _phantom: PhantomData,
     })
+}
+
+/// Wrap an `Arc<T: CoreTask>` + codec into an [`UntypedCoreTask`].
+///
+/// This is the public equivalent of the registry-internal `TaskWrapper`.
+/// It is used by [`WorkflowBuilder::then_task_with`](crate::builder::WorkflowBuilder::then_task_with)
+/// to create the type-erased task stored in the continuation tree.
+pub fn wrap_core_task<T, C>(task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
+where
+    T: CoreTask + 'static,
+    T::Input: Send + 'static,
+    T::Output: Send + 'static,
+    T::Future: Send + 'static,
+    C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+{
+    /// Internal wrapper that adapts a typed `CoreTask` to `UntypedCoreTask`.
+    struct CoreTaskWrapper<T, C> {
+        task: Arc<T>,
+        codec: Arc<C>,
+    }
+
+    impl<T, C> CoreTask for CoreTaskWrapper<T, C>
+    where
+        T: CoreTask + Send + Sync + 'static,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output>,
+    {
+        type Input = Bytes;
+        type Output = Bytes;
+        type Future = BytesFuture;
+
+        fn run(&self, input: Bytes) -> Self::Future {
+            let task = Arc::clone(&self.task);
+            let codec = Arc::clone(&self.codec);
+            BytesFuture::new(async move {
+                let decoded_input = codec.decode::<T::Input>(input)?;
+                let output = task.run(decoded_input).await?;
+                codec.encode(&output)
+            })
+        }
+    }
+
+    Box::new(CoreTaskWrapper { task, codec })
 }

@@ -67,6 +67,10 @@ export default defineConfig({
               slug: "guides/parallel-workflows",
             },
             {
+              label: "Loops & Iteration",
+              slug: "guides/loops-and-iteration",
+            },
+            {
               label: "Composing Workflows",
               slug: "guides/composing-workflows",
             },

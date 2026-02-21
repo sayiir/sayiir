@@ -9,7 +9,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use sayiir_core::continuation_builder::BuilderTask;
+use sayiir_core::continuation_builder::FlowBuilder;
 use sayiir_core::workflow::WorkflowContinuation;
 
 use crate::task::NapiTaskMetadata;
@@ -45,7 +45,7 @@ impl NapiWorkflow {
 #[napi]
 pub struct NapiFlowBuilder {
     workflow_id: String,
-    tasks: Vec<BuilderTask>,
+    inner: FlowBuilder,
     metadata_json: Option<String>,
 }
 
@@ -55,9 +55,15 @@ impl NapiFlowBuilder {
     pub fn new(name: String) -> Self {
         Self {
             workflow_id: name,
-            tasks: Vec::new(),
+            inner: FlowBuilder::new(),
             metadata_json: None,
         }
+    }
+
+    /// Generate the next lambda ID (`lambda_0`, `lambda_1`, …).
+    #[napi]
+    pub fn next_lambda_id(&mut self) -> String {
+        self.inner.next_lambda_id()
     }
 
     /// Set workflow-level metadata as a JSON string.
@@ -70,10 +76,8 @@ impl NapiFlowBuilder {
     #[napi]
     pub fn then(&mut self, task_id: String, metadata: Option<NapiTaskMetadata>) {
         tracing::trace!(workflow_id = %self.workflow_id, %task_id, "adding sequential task");
-        self.tasks.push(BuilderTask::Sequential {
-            task_id,
-            metadata: metadata.map(Into::into).unwrap_or_default(),
-        });
+        self.inner
+            .add_sequential(task_id, metadata.map(Into::into).unwrap_or_default());
     }
 
     /// Add a fork with branches and a join task.
@@ -84,26 +88,12 @@ impl NapiFlowBuilder {
         join_id: String,
         join_metadata: Option<NapiTaskMetadata>,
     ) -> Result<()> {
-        if branches.is_empty() {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "Fork must have at least one branch",
-            ));
-        }
         tracing::trace!(
             workflow_id = %self.workflow_id,
             branch_count = branches.len(),
             %join_id,
             "adding fork"
         );
-        for (i, branch) in branches.iter().enumerate() {
-            if branch.is_empty() {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    format!("Branch {i} must have at least one task"),
-                ));
-            }
-        }
         let branches = branches
             .into_iter()
             .map(|chain| {
@@ -113,12 +103,13 @@ impl NapiFlowBuilder {
                     .collect()
             })
             .collect();
-        self.tasks.push(BuilderTask::Fork {
-            branches,
-            join_id,
-            join_metadata: join_metadata.map(Into::into).unwrap_or_default(),
-        });
-        Ok(())
+        self.inner
+            .add_fork(
+                branches,
+                join_id,
+                join_metadata.map(Into::into).unwrap_or_default(),
+            )
+            .map_err(|e| Error::new(Status::InvalidArg, e))
     }
 
     /// Wait for an external signal before continuing.
@@ -129,64 +120,32 @@ impl NapiFlowBuilder {
         signal_name: String,
         timeout_secs: Option<f64>,
     ) -> Result<()> {
-        if let Some(t) = timeout_secs
-            && (!t.is_finite() || t < 0.0)
-        {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "timeout must be a finite non-negative number",
-            ));
-        }
-        self.tasks.push(BuilderTask::AwaitSignal {
-            signal_id,
-            signal_name,
-            timeout_secs,
-        });
-        Ok(())
+        self.inner
+            .add_signal(signal_id, signal_name, timeout_secs)
+            .map_err(|e| Error::new(Status::InvalidArg, e))
     }
 
     /// Add a durable delay.
     #[napi]
     pub fn delay(&mut self, delay_id: String, seconds: f64) -> Result<()> {
-        if !seconds.is_finite() || seconds < 0.0 {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "delay duration must be a finite non-negative number",
-            ));
-        }
-        self.tasks.push(BuilderTask::Delay {
-            delay_id,
-            duration_secs: seconds,
-        });
-        Ok(())
+        self.inner
+            .add_delay(delay_id, seconds)
+            .map_err(|e| Error::new(Status::InvalidArg, e))
     }
 
     /// Add a conditional branch node.
     ///
-    /// `branch_id` is the node ID. The key function must be registered in the
-    /// JS task registry as `"{branch_id}::key_fn"`.
+    /// The branch ID is auto-generated internally. The key function must be
+    /// registered in the JS task registry as `"{branch_id}::key_fn"`.
     /// `branches` is `[{ key, tasks: [{ taskId, metadata }] }]`.
+    ///
+    /// Returns the generated branch ID.
     #[napi]
     pub fn add_branch(
         &mut self,
-        branch_id: String,
         branches: Vec<NapiBranchEntry>,
         default_branch: Option<Vec<NapiBranchTask>>,
-    ) -> Result<()> {
-        if branches.is_empty() {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "route must have at least one branch",
-            ));
-        }
-        for entry in &branches {
-            if entry.tasks.is_empty() {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    format!("Branch '{}' must have at least one task", entry.key),
-                ));
-            }
-        }
+    ) -> Result<String> {
         let branches = branches
             .into_iter()
             .map(|entry| {
@@ -204,23 +163,55 @@ impl NapiFlowBuilder {
                 .map(|t| (t.task_id, t.metadata.map(Into::into).unwrap_or_default()))
                 .collect()
         });
-        self.tasks.push(BuilderTask::Branch {
-            branch_id,
-            branches,
-            default,
-        });
-        Ok(())
+        self.inner
+            .add_branch(branches, default)
+            .map_err(|e| Error::new(Status::InvalidArg, e))
+    }
+
+    /// Add a loop node.
+    ///
+    /// The loop ID is auto-generated internally.
+    /// `bodyTaskId` is the task that runs each iteration.
+    /// `maxIterations` caps the iteration count.
+    /// `onMax` is `"fail"` (default) or `"exit_with_last"`.
+    ///
+    /// Returns the generated loop ID.
+    #[napi]
+    pub fn add_loop(
+        &mut self,
+        body_task_id: String,
+        body_metadata: Option<NapiTaskMetadata>,
+        max_iterations: u32,
+        on_max: Option<String>,
+    ) -> Result<String> {
+        let on_max: sayiir_core::workflow::MaxIterationsPolicy =
+            on_max.as_deref().unwrap_or("fail").parse().map_err(|_| {
+                Error::new(
+                    Status::InvalidArg,
+                    format!(
+                        "Invalid onMax policy: '{}'. Use 'fail' or 'exit_with_last'.",
+                        on_max.as_deref().unwrap_or("fail")
+                    ),
+                )
+            })?;
+        self.inner
+            .add_loop(
+                body_task_id,
+                body_metadata.map(Into::into).unwrap_or_default(),
+                max_iterations,
+                on_max,
+            )
+            .map_err(|e| Error::new(Status::InvalidArg, e))
     }
 
     /// Build the workflow.
     #[napi]
     pub fn build(&self) -> Result<NapiWorkflow> {
-        tracing::debug!(
-            workflow_id = %self.workflow_id,
-            task_count = self.tasks.len(),
-            "building workflow"
-        );
-        let continuation = self.build_continuation()?;
+        tracing::debug!(workflow_id = %self.workflow_id, "building workflow");
+        let continuation = self
+            .inner
+            .build()
+            .map_err(|e| Error::new(Status::InvalidArg, e))?;
         let serializable = continuation.to_serializable();
         let definition_hash = serializable.compute_definition_hash();
 
@@ -251,11 +242,4 @@ pub struct NapiBranchTask {
 pub struct NapiBranchEntry {
     pub key: String,
     pub tasks: Vec<NapiBranchTask>,
-}
-
-impl NapiFlowBuilder {
-    fn build_continuation(&self) -> Result<WorkflowContinuation> {
-        sayiir_core::continuation_builder::build_continuation(&self.tasks)
-            .map_err(|e| Error::new(Status::InvalidArg, e))
-    }
 }

@@ -124,6 +124,7 @@ The hash covers the **structure** of the workflow:
 - Retry policies (max retries, initial delay, backoff multiplier)
 - Fork IDs and branch structure
 - Branch IDs, keys, and default handlers
+- Loop IDs, max iterations, and on_max policy
 - Delay durations and IDs
 - Signal names, IDs, and timeouts
 
@@ -148,6 +149,7 @@ The hash covers the **structure** of the workflow:
 | Change a timeout value | **Changes** | No |
 | Change retry policy | **Changes** | No |
 | Add/remove a fork branch | **Changes** | No |
+| Change loop max_iterations or on_max | **Changes** | No |
 | Rename a task ID | **Changes** | No |
 | Change a signal name | **Changes** | No |
 

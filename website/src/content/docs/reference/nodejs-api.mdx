@@ -95,6 +95,63 @@ const workflow = flow<number>("pipeline")
 
 **Returns:** `Flow<TInput, Awaited<TOut>>` — Updated flow with new output type.
 
+### .loop(fn, opts?) / .loop(id, fn, opts?)
+
+Add a loop whose body repeats until it returns `LoopResult.done()`.
+
+```typescript
+import { flow, task, LoopResult } from "sayiir";
+
+const refine = task("refine", (draft: string) => {
+  const improved = improve(draft);
+  return isGoodEnough(improved)
+    ? LoopResult.done(improved)
+    : LoopResult.again(improved);
+});
+
+const workflow = flow<string>("iterative")
+  .then(initialAttempt)
+  .loop(refine, { maxIterations: 5 })
+  .then(finalize)
+  .build();
+```
+
+**Parameters (overload 1):**
+- `fn` (TaskFn\<TLast, LoopResult\<TOut\>\>) — A `task()` function returning `LoopResult`
+- `opts` (LoopOptions, optional) — `maxIterations` (default: 10, must be ≥ 1), `onMax` (`"fail"` | `"exit_with_last"`)
+
+**Parameters (overload 2):**
+- `id` (string) — Step identifier
+- `fn` ((input: TLast) => LoopResult\<TOut\>) — Loop body function
+- `opts` (LoopOptions, optional)
+
+**Returns:** `Flow<TInput, TOut>` — The output type is the inner type of `LoopResult`.
+
+### LoopResult
+
+Control flow type for loop body tasks.
+
+```typescript
+import { LoopResult } from "sayiir";
+
+// Continue the loop with a new value
+LoopResult.again(newValue);  // { _loop: "again", value: newValue }
+
+// Exit the loop with the final value
+LoopResult.done(finalValue); // { _loop: "done", value: finalValue }
+```
+
+**Type:** `LoopResult<T> = { _loop: "again"; value: T } | { _loop: "done"; value: T }`
+
+### LoopOptions
+
+```typescript
+interface LoopOptions {
+  maxIterations?: number;  // default: 10
+  onMax?: "fail" | "exit_with_last";  // default: "fail"
+}
+```
+
 ### .fork(branches)
 
 Start parallel execution with an array of branch definitions.

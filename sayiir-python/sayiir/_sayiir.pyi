@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from .loop_result import OnMax
+
 class PyRetryPolicy:
     """Retry policy for tasks."""
 
@@ -32,6 +34,7 @@ class PyFlowBuilder:
     """Workflow builder."""
 
     def __init__(self, name: str) -> None: ...
+    def next_lambda_id(self) -> str: ...
     def then(self, task_id: str, metadata: PyTaskMetadata | None = None) -> None: ...
     def delay(self, delay_id: str, seconds: float) -> None: ...
     def wait_for_signal(
@@ -49,10 +52,16 @@ class PyFlowBuilder:
     def set_metadata_json(self, json: str) -> None: ...
     def add_branch(
         self,
-        branch_id: str,
         branches: list[tuple[str, list[tuple[str, PyTaskMetadata | None]]]],
         default: list[tuple[str, PyTaskMetadata | None]] | None = None,
-    ) -> None: ...
+    ) -> str: ...
+    def add_loop(
+        self,
+        body_task_id: str,
+        body_metadata: PyTaskMetadata | None = None,
+        max_iterations: int = 10,
+        on_max: str | OnMax = "fail",
+    ) -> str: ...
     def build(self) -> PyWorkflow: ...
 
 class PyWorkflow:
