@@ -3073,3 +3073,416 @@ async fn test_async_loop_inside_fork_branch() {
     // loop_a: countdown 3→2→1→0 → Done(100), double: 3*2=6, join: 100+6=106
     assert_eq!(decode_u32(&result), 106);
 }
+
+// ========================================================================
+// Loop tests — async (additional coverage)
+// ========================================================================
+
+#[tokio::test]
+async fn test_async_loop_three_iterations() {
+    use sayiir_core::LoopResult;
+
+    let body = loop_body_task("countdown", |n| {
+        Box::pin(async move {
+            if n == 0 {
+                Ok(LoopResult::Done(n))
+            } else {
+                Ok(LoopResult::Again(n - 1))
+            }
+        })
+    });
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+    let input = encode_u32(3);
+
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
+    assert_eq!(decode_u32(&result), 0);
+}
+
+#[tokio::test]
+async fn test_async_loop_exit_with_last() {
+    use sayiir_core::LoopResult;
+
+    let body = loop_body_task("always_again", |val| {
+        Box::pin(async move { Ok(LoopResult::Again(val + 1)) })
+    });
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 3,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::ExitWithLast,
+        next: None,
+    };
+    let input = encode_u32(0);
+
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
+    // 0 → again(1) → again(2) → again(3) → max reached, exit with 3
+    assert_eq!(decode_u32(&result), 3);
+}
+
+#[tokio::test]
+async fn test_async_loop_in_chain() {
+    use sayiir_core::LoopResult;
+
+    let double = task_node("double", |x: u32| async move { Ok(x * 2) }, None);
+    let body = loop_body_task("countdown", |n| {
+        Box::pin(async move {
+            if n == 0 {
+                Ok(LoopResult::Done(10u32))
+            } else {
+                Ok(LoopResult::Again(n - 1))
+            }
+        })
+    });
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: Some(Box::new(double).into()),
+    };
+    let input = encode_u32(3);
+
+    let result = execute_continuation_async(&cont, input, &JsonCodec)
+        .await
+        .unwrap();
+    // 3→2→1→0 → Done(10) → double → 20
+    assert_eq!(decode_u32(&result), 20);
+}
+
+// ========================================================================
+// Loop tests — checkpointing (additional coverage)
+// ========================================================================
+
+#[tokio::test]
+async fn test_checkpointing_loop_caches_result_on_exit() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(2);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let body = stub_node("countdown", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+
+    let callback = |_id: &str, input: Bytes| async move {
+        let n = decode_u32(&input);
+        if n == 0 {
+            Ok(encode_loop_done(0))
+        } else {
+            Ok(encode_loop_again(n - 1))
+        }
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(decode_u32(&result), 0);
+
+    // The loop node itself should have a cached result in the snapshot.
+    let cached = snapshot.get_task_result("loop_0");
+    assert!(cached.is_some(), "loop node should be cached after exit");
+    assert_eq!(decode_u32(&cached.unwrap().output), 0);
+}
+
+#[tokio::test]
+async fn test_checkpointing_loop_short_circuits_when_cached() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(99);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+
+    // Pre-cache a result for the loop node.
+    let cached_output = encode_u32(42);
+    snapshot.mark_task_completed("loop_0".into(), cached_output.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let body = stub_node("body", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+
+    let call_count = Arc::new(AtomicU32::new(0));
+    let cc = call_count.clone();
+    let callback = move |_id: &str, _input: Bytes| {
+        let cc = cc.clone();
+        async move {
+            cc.fetch_add(1, Ordering::SeqCst);
+            Ok(encode_loop_done(0))
+        }
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    // Should return the cached result without executing any body tasks.
+    assert_eq!(decode_u32(&result), 42);
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn test_checkpointing_loop_exit_with_last() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(0);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let body = stub_node("always_again", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 3,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::ExitWithLast,
+        next: None,
+    };
+
+    let callback = |_id: &str, input: Bytes| async move {
+        let n = decode_u32(&input);
+        Ok(encode_loop_again(n + 1))
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    // 0 → again(1) → again(2) → again(3) → max reached, exit with 3
+    assert_eq!(decode_u32(&result), 3);
+
+    // Should be cached under the loop node.
+    let cached = snapshot.get_task_result("loop_0");
+    assert!(
+        cached.is_some(),
+        "loop node should be cached after exit_with_last"
+    );
+    assert_eq!(decode_u32(&cached.unwrap().output), 3);
+
+    // Iteration counter should be cleared.
+    assert_eq!(snapshot.loop_iteration("loop_0"), 0);
+}
+
+#[tokio::test]
+async fn test_checkpointing_loop_in_chain() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(2);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let double = stub_node("double", None);
+    let body = stub_node("countdown", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: Some(Box::new(double).into()),
+    };
+
+    let callback = |id: &str, input: Bytes| {
+        let id = id.to_string();
+        async move {
+            let val = decode_u32(&input);
+            match id.as_str() {
+                "countdown" => {
+                    if val == 0 {
+                        Ok(encode_loop_done(10))
+                    } else {
+                        Ok(encode_loop_again(val - 1))
+                    }
+                }
+                "double" => Ok(encode_u32(val * 2)),
+                _ => Err(format!("Unknown task: {id}").into()),
+            }
+        }
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    // 2→1→0 → Done(10) → double → 20
+    assert_eq!(decode_u32(&result), 20);
+
+    // Loop node should be cached (even though there's a next step).
+    assert!(snapshot.get_task_result("loop_0").is_some());
+}
+
+#[tokio::test]
+async fn test_checkpointing_loop_inside_fork_branch() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(2);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let body = stub_node("countdown", None);
+    let loop_branch = Arc::new(WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    });
+
+    let passthrough = Arc::new(stub_node("passthrough", None));
+
+    let fork = WorkflowContinuation::Fork {
+        id: "fork_0".into(),
+        branches: vec![loop_branch, passthrough].into_boxed_slice(),
+        join: None,
+    };
+
+    let callback = |id: &str, input: Bytes| {
+        let id = id.to_string();
+        async move {
+            let val = decode_u32(&input);
+            match id.as_str() {
+                "countdown" => {
+                    if val == 0 {
+                        Ok(encode_loop_done(0))
+                    } else {
+                        Ok(encode_loop_again(val - 1))
+                    }
+                }
+                "passthrough" => Ok(encode_u32(val)),
+                _ => Err(format!("Unknown task: {id}").into()),
+            }
+        }
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &fork,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await;
+
+    // Fork with no join returns the named results envelope.
+    // Just verify it doesn't error — the loop inside a branch executes correctly.
+    assert!(
+        result.is_ok(),
+        "loop inside fork branch should succeed: {:?}",
+        result.err()
+    );
+
+    // The loop node should be cached in the snapshot.
+    assert!(
+        snapshot.get_task_result("loop_0").is_some(),
+        "loop inside fork branch should be cached"
+    );
+}
+
+#[tokio::test]
+async fn test_checkpointing_loop_iteration_counter_persisted() {
+    let backend = InMemoryBackend::new();
+    let input = encode_u32(5);
+
+    let mut snapshot =
+        WorkflowSnapshot::with_initial_input("inst-1".into(), "hash-1".into(), input.clone());
+    backend.save_snapshot(&snapshot).await.unwrap();
+
+    let body = stub_node("countdown", None);
+    let cont = WorkflowContinuation::Loop {
+        id: "loop_0".into(),
+        body: Box::new(body),
+        max_iterations: 10,
+        on_max: sayiir_core::workflow::MaxIterationsPolicy::Fail,
+        next: None,
+    };
+
+    let call_count = Arc::new(AtomicU32::new(0));
+    let cc = call_count.clone();
+
+    let callback = move |_id: &str, input: Bytes| {
+        let cc = cc.clone();
+        async move {
+            let n = decode_u32(&input);
+            cc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(encode_loop_done(0))
+            } else {
+                Ok(encode_loop_again(n - 1))
+            }
+        }
+    };
+
+    let result = execute_continuation_with_checkpointing(
+        &cont,
+        input,
+        &mut snapshot,
+        &backend,
+        &callback,
+        &JsonCodec,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(decode_u32(&result), 0);
+    assert_eq!(call_count.load(Ordering::SeqCst), 6); // 5→4→3→2→1→0
+
+    // After completion, the backend's snapshot should also have the cached result.
+    let persisted = backend.load_snapshot("inst-1").await.unwrap();
+    assert!(
+        persisted.get_task_result("loop_0").is_some(),
+        "loop result should be persisted to backend"
+    );
+    assert_eq!(persisted.loop_iteration("loop_0"), 0);
+}

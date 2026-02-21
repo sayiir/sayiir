@@ -471,36 +471,40 @@ where
                 on_max,
                 ..
             } => {
-                let cfg = LoopConfig {
-                    id,
-                    body,
-                    max_iterations: *max_iterations,
-                    on_max: *on_max,
-                    start_iteration: snapshot.loop_iteration(id),
-                };
-                let mut hooks = CheckpointingLoopHooks {
-                    snapshot: &mut snapshot,
-                    backend,
-                    track_position: false,
-                };
-                let output = run_loop_async(
-                    &cfg,
-                    current_input.clone(),
-                    envelope_codec,
-                    |input| {
-                        Box::pin(execute_branch_with_checkpointing(
-                            body,
-                            input,
-                            instance_id,
-                            backend,
-                            execute_task,
-                            envelope_codec,
-                        ))
-                    },
-                    &mut hooks,
-                )
-                .await?;
-                Ok(ControlFlow::Continue(output))
+                if let Some(result) = snapshot.get_task_result(id) {
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let cfg = LoopConfig {
+                        id,
+                        body,
+                        max_iterations: *max_iterations,
+                        on_max: *on_max,
+                        start_iteration: snapshot.loop_iteration(id),
+                    };
+                    let mut hooks = CheckpointingLoopHooks {
+                        snapshot: &mut snapshot,
+                        backend,
+                        track_position: false,
+                    };
+                    let output = run_loop_async(
+                        &cfg,
+                        current_input.clone(),
+                        envelope_codec,
+                        |input| {
+                            Box::pin(execute_branch_with_checkpointing(
+                                body,
+                                input,
+                                instance_id,
+                                backend,
+                                execute_task,
+                                envelope_codec,
+                            ))
+                        },
+                        &mut hooks,
+                    )
+                    .await?;
+                    Ok(ControlFlow::Continue(output))
+                }
             }
         };
 

@@ -79,7 +79,16 @@ pub(crate) trait LoopHooks: Send {
     fn clear_body_tasks(&mut self, body: &WorkflowContinuation) {}
 
     /// Called when the loop exits (Done or `ExitWithLast`).
-    fn on_loop_exit(&mut self, loop_id: &str) {}
+    ///
+    /// Checkpointing implementations cache the final output in the snapshot
+    /// so that resume after a crash can skip the completed loop.
+    fn on_loop_exit(
+        &mut self,
+        loop_id: &str,
+        output: &Bytes,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + Send {
+        async { Ok(()) }
+    }
 
     /// Checkpoint iteration progress (set iteration counter, optionally
     /// update position, save snapshot).
@@ -117,8 +126,12 @@ impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
         }
     }
 
-    fn on_loop_exit(&mut self, loop_id: &str) {
+    async fn on_loop_exit(&mut self, loop_id: &str, output: &Bytes) -> Result<(), RuntimeError> {
         self.snapshot.clear_loop_iteration(loop_id);
+        self.snapshot
+            .mark_task_completed(loop_id.to_string(), output.clone());
+        self.backend.save_snapshot(self.snapshot).await?;
+        Ok(())
     }
 
     async fn on_iteration_progress(
@@ -134,8 +147,12 @@ impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
                 iteration: next_iteration,
                 next_task_id: Some(body.first_task_id().to_string()),
             });
-            self.backend.save_snapshot(self.snapshot).await?;
         }
+        // Always persist: the cleared body task results and updated iteration
+        // counter must reach the backend so that nested executors (e.g.
+        // execute_branch_with_checkpointing) that load a fresh snapshot
+        // don't see stale cached body results from the previous iteration.
+        self.backend.save_snapshot(self.snapshot).await?;
         Ok(())
     }
 }
@@ -166,7 +183,7 @@ where
 
         match resolve_loop_iteration(&output, iteration, cfg, codec)? {
             ControlFlow::Break(LoopExit(inner)) => {
-                hooks.on_loop_exit(cfg.id);
+                hooks.on_loop_exit(cfg.id, &inner).await?;
                 return Ok(inner);
             }
             ControlFlow::Continue(LoopNext(inner)) => {

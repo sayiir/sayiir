@@ -200,7 +200,7 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                     },
                 };
                 tokens.extend(quote! {
-                    .loop_task_registered::<<#body as ::sayiir_core::task::CoreTask>::Output>(
+                    .loop_task_registered::<<<#body as ::sayiir_core::task::CoreTask>::Output as ::sayiir_core::loop_result::LoopOutput>::Inner>(
                         #body::task_id(),
                         #max_iterations,
                         #on_max_expr,

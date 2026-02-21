@@ -664,57 +664,65 @@ where
             } => {
                 check_guards(backend, &snapshot.instance_id, Some(id)).await?;
 
-                let cfg = LoopConfig {
-                    id,
-                    body,
-                    max_iterations: *max_iterations,
-                    on_max: *on_max,
-                    start_iteration: snapshot.loop_iteration(id),
-                };
-                let mut loop_input = current_input.clone();
-                let mut final_output = None;
-
-                for iteration in cfg.start_iteration..cfg.max_iterations {
-                    let output = Box::pin(execute_continuation_with_checkpointing(
+                // Short-circuit: if the loop already completed (cached from a
+                // previous run), skip re-execution entirely.
+                if let Some(result) = snapshot.get_task_result(id) {
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let cfg = LoopConfig {
+                        id,
                         body,
-                        loop_input.clone(),
-                        snapshot,
-                        backend,
-                        execute_task,
-                        envelope_codec,
-                    ))
-                    .await?;
-
-                    let body_ser = body.to_serializable();
-                    for tid in &body_ser.task_ids() {
-                        snapshot.remove_task_result(tid);
-                    }
-
-                    match resolve_loop_iteration(&output, iteration, &cfg, envelope_codec)? {
-                        ControlFlow::Break(LoopExit(inner)) => {
-                            snapshot.clear_loop_iteration(id);
-                            final_output = Some(inner);
-                            break;
-                        }
-                        ControlFlow::Continue(LoopNext(inner)) => {
-                            snapshot.set_loop_iteration(id, iteration + 1);
-                            snapshot.update_position(ExecutionPosition::InLoop {
-                                loop_id: id.clone(),
-                                iteration: iteration + 1,
-                                next_task_id: Some(body.first_task_id().to_string()),
-                            });
-                            backend.save_snapshot(snapshot).await?;
-                            loop_input = inner;
-                        }
-                    }
-                }
-
-                match final_output {
-                    Some(output) => Ok(ControlFlow::Continue(output)),
-                    None => Err(RuntimeError::from(WorkflowError::MaxIterationsExceeded {
-                        loop_id: id.clone(),
                         max_iterations: *max_iterations,
-                    })),
+                        on_max: *on_max,
+                        start_iteration: snapshot.loop_iteration(id),
+                    };
+                    let mut loop_input = current_input.clone();
+                    let mut final_output = None;
+
+                    for iteration in cfg.start_iteration..cfg.max_iterations {
+                        let output = Box::pin(execute_continuation_with_checkpointing(
+                            body,
+                            loop_input.clone(),
+                            snapshot,
+                            backend,
+                            execute_task,
+                            envelope_codec,
+                        ))
+                        .await?;
+
+                        let body_ser = body.to_serializable();
+                        for tid in &body_ser.task_ids() {
+                            snapshot.remove_task_result(tid);
+                        }
+
+                        match resolve_loop_iteration(&output, iteration, &cfg, envelope_codec)? {
+                            ControlFlow::Break(LoopExit(inner)) => {
+                                snapshot.clear_loop_iteration(id);
+                                snapshot.mark_task_completed(id.clone(), inner.clone());
+                                backend.save_snapshot(snapshot).await?;
+                                final_output = Some(inner);
+                                break;
+                            }
+                            ControlFlow::Continue(LoopNext(inner)) => {
+                                snapshot.set_loop_iteration(id, iteration + 1);
+                                snapshot.update_position(ExecutionPosition::InLoop {
+                                    loop_id: id.clone(),
+                                    iteration: iteration + 1,
+                                    next_task_id: Some(body.first_task_id().to_string()),
+                                });
+                                backend.save_snapshot(snapshot).await?;
+                                loop_input = inner;
+                            }
+                        }
+                    }
+
+                    match final_output {
+                        Some(output) => Ok(ControlFlow::Continue(output)),
+                        None => Err(RuntimeError::from(WorkflowError::MaxIterationsExceeded {
+                            loop_id: id.clone(),
+                            max_iterations: *max_iterations,
+                        })),
+                    }
                 }
             }
         };

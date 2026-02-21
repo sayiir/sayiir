@@ -41,6 +41,27 @@ pub enum LoopResult<T> {
     Done(T),
 }
 
+/// Helper trait to extract the inner type from a `LoopResult<T>`.
+///
+/// Used by the `workflow!` macro to resolve the output type of a loop node:
+/// the loop body returns `LoopResult<T>` but the loop itself outputs `T`.
+///
+/// ```rust
+/// use sayiir_core::loop_result::{LoopResult, LoopOutput};
+///
+/// // <LoopResult<u32> as LoopOutput>::Inner == u32
+/// fn assert_inner<T: LoopOutput<Inner = u32>>() {}
+/// assert_inner::<LoopResult<u32>>();
+/// ```
+pub trait LoopOutput {
+    /// The inner type after unwrapping the `LoopResult` envelope.
+    type Inner;
+}
+
+impl<T> LoopOutput for LoopResult<T> {
+    type Inner = T;
+}
+
 impl<T> LoopResult<T> {
     /// Returns `true` if this is a `Done` variant.
     #[must_use]

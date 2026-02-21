@@ -260,6 +260,20 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Get the terminal task ID of this continuation chain.
+    ///
+    /// Follows `get_next()` pointers to the end and returns the ID of the
+    /// last node. This is the task whose output is the "final" output of the
+    /// chain (e.g. the `LoopResult` envelope for a loop body).
+    #[must_use]
+    pub fn terminal_task_id(&self) -> &str {
+        let mut current = self;
+        while let Some(next) = current.get_next() {
+            current = next;
+        }
+        current.first_task_id()
+    }
+
     /// Find a task node by ID (immutable).
     ///
     /// Recursively walks the full continuation tree, including through `Arc`
@@ -930,7 +944,7 @@ impl SerializableContinuation {
                     hasher.update(b":");
                     hasher.update(max_iterations.to_string().as_bytes());
                     hasher.update(b":");
-                    hasher.update(format!("{on_max:?}").as_bytes());
+                    hasher.update(on_max.to_string().as_bytes());
                     hasher.update(b"{");
                     hash_continuation(body, hasher);
                     hasher.update(b"}");
