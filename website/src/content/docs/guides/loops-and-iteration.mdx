@@ -1,0 +1,282 @@
+---
+title: Loops & Iteration
+description: Repeat a task until it signals done, with durable checkpointing per iteration
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Overview
+
+Loops let a workflow repeat a single task until it signals completion. Each iteration is durably checkpointed, so on crash or restart the loop resumes from the last completed iteration — no replay of earlier work.
+
+Loops are different from [retries](/guides/retries-and-timeouts/): retries re-execute a failed task hoping for success, while loops re-execute a *succeeding* task to accumulate or refine a result over multiple iterations.
+
+## Basic Loop
+
+A loop body task receives a value and returns a `LoopResult`:
+- **`again(value)`** — feed `value` back as input to the next iteration.
+- **`done(value)`** — exit the loop; `value` becomes the loop's output.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task, Flow, LoopResult, run_workflow
+
+@task
+def countdown(n):
+    if n <= 0:
+        return LoopResult.done(0)
+    return LoopResult.again(n - 1)
+
+wf = Flow("countdown").loop(countdown).build()
+
+result = run_workflow(wf, 3)
+# 3 → 2 → 1 → 0 (done) → result = 0
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task, flow, runWorkflow, LoopResult } from "sayiir";
+
+const countdown = task("countdown", (n: number) => {
+    if (n <= 1) return LoopResult.done(0);
+    return LoopResult.again(n - 1);
+});
+
+const wf = flow<number>("countdown").loop(countdown).build();
+
+const result = await runWorkflow(wf, 5);
+// 5 → 4 → 3 → 2 → 1 (done) → result = 0
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_core::LoopResult;
+
+#[task]
+async fn countdown(n: u32) -> Result<LoopResult<u32>, BoxError> {
+    if n == 0 {
+        Ok(LoopResult::Done(0))
+    } else {
+        Ok(LoopResult::Again(n - 1))
+    }
+}
+
+let wf = workflow! {
+    name: "countdown",
+    steps: [loop countdown 100]
+}?;
+```
+
+</TabItem>
+</Tabs>
+
+## LoopResult
+
+`LoopResult` has exactly two variants:
+
+| Variant | Python | Node.js | Rust |
+|---------|--------|---------|------|
+| Continue | `LoopResult.again(value)` | `LoopResult.again(value)` | `LoopResult::Again(value)` |
+| Exit | `LoopResult.done(value)` | `LoopResult.done(value)` | `LoopResult::Done(value)` |
+
+The value inside `again` becomes the next iteration's input. The value inside `done` becomes the loop step's output, flowing to the next step in the pipeline.
+
+### Wire format
+
+On the wire (JSON), a `LoopResult` is serialized as:
+
+```json
+{ "_loop": "again", "value": 42 }
+{ "_loop": "done",  "value": 0 }
+```
+
+This matches Rust's `#[serde(tag = "_loop", content = "value")]` representation, so all three languages interoperate seamlessly.
+
+## Max Iterations
+
+Every loop has a `max_iterations` safety limit (default: **10**). When reached, the behavior depends on the policy:
+
+- **`fail`** (default) — the workflow fails with an error.
+- **`exit_with_last`** — the loop exits gracefully with the last iteration's value.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task
+def always_again(x):
+    return LoopResult.again(x + 1)
+
+# Fails after 3 iterations
+wf_fail = (
+    Flow("bounded")
+    .loop(always_again, max_iterations=3, on_max="fail")
+    .build()
+)
+
+# Exits gracefully with the last value
+wf_exit = (
+    Flow("bounded-exit")
+    .loop(always_again, max_iterations=3, on_max="exit_with_last")
+    .build()
+)
+
+run_workflow(wf_exit, 0)
+# iteration 1 → 1, iteration 2 → 2, iteration 3 → 3, max reached → result = 3
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+// Fails after 3 iterations
+const wfFail = flow<number>("bounded")
+    .loop("always-again", (n: number) => LoopResult.again(n + 1), {
+        maxIterations: 3,
+    })
+    .build();
+
+// Exits gracefully with the last value
+const wfExit = flow<number>("bounded-exit")
+    .loop("always-again", (n: number) => LoopResult.again(n + 1), {
+        maxIterations: 3,
+        onMax: "exit_with_last",
+    })
+    .build();
+
+await runWorkflow(wfExit, 5);
+// iteration 1 → 6, iteration 2 → 7, iteration 3 → 8, max reached → result = 8
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Fails after 10 iterations (default policy)
+let wf = workflow! {
+    name: "bounded",
+    steps: [loop refine 10]
+}?;
+
+// Exits gracefully with the last value
+let wf = workflow! {
+    name: "bounded-exit",
+    steps: [loop refine 10 exit_with_last]
+}?;
+```
+
+</TabItem>
+</Tabs>
+
+:::tip
+Set `max_iterations` high enough for your expected workload, but keep it bounded as a safety net. If your loop body truly needs unbounded iteration, use `exit_with_last` so the workflow degrades gracefully instead of failing.
+:::
+
+## Loops in Pipelines
+
+Loops compose naturally with `.then()` steps. The loop receives its input from the previous step and feeds its output to the next:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task
+def setup(x):
+    return x * 2
+
+@task
+def countdown(n):
+    if n <= 1:
+        return LoopResult.done(0)
+    return LoopResult.again(n - 1)
+
+@task
+def finalize(x):
+    return x + 100
+
+wf = Flow("pipeline").then(setup).loop(countdown).then(finalize).build()
+
+run_workflow(wf, 3)
+# 3 → setup → 6 → countdown (6→5→4→3→2→1→done 0) → finalize → 100
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const setup = task("setup", (x: number) => x + 10);
+
+const countdown = task("countdown", (n: number) => {
+    if (n <= 1) return LoopResult.done(0);
+    return LoopResult.again(n - 1);
+});
+
+const finalize = task("finalize", (x: number) => x * 100);
+
+const wf = flow<number>("pipeline")
+    .then(setup)
+    .loop(countdown, { maxIterations: 20 })
+    .then(finalize)
+    .build();
+
+await runWorkflow(wf, 5);
+// 5 → setup → 15 → countdown (15→…→1→done 0) → finalize → 0
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let wf = workflow! {
+    name: "pipeline",
+    steps: [add_ten, loop accumulate 20, double]
+}?;
+```
+
+</TabItem>
+</Tabs>
+
+## Durable Checkpointing
+
+Each loop iteration is checkpointed independently. If a workflow crashes mid-loop, the durable engine resumes from the **last completed iteration** — it does not replay earlier ones. This means:
+
+- Iteration 1 completes and is checkpointed → crash
+- On resume, the loop starts at iteration 2 with the value from iteration 1
+
+This makes loops safe for long-running iterative work (e.g., paginated API calls, batch processing, iterative refinement) where replaying from scratch would be expensive or cause side effects.
+
+:::note
+Loops use the same checkpointing mechanism as regular workflow steps. See the [Durable Workflows](/guides/durable-workflows/) guide for details on how checkpointing works.
+:::
+
+## Rust Macro Syntax
+
+The `workflow!` macro supports loops with a concise syntax:
+
+```rust
+// loop <body_task> <max_iterations>
+let wf = workflow! {
+    name: "loop-test",
+    steps: [loop accumulate 10]
+}?;
+
+// With exit_with_last policy
+let wf = workflow! {
+    name: "loop-exit",
+    steps: [loop accumulate 3 exit_with_last]
+}?;
+
+// Loop in a pipeline: then → loop → then
+let wf = workflow! {
+    name: "pipeline",
+    steps: [add_ten, loop accumulate 20, double]
+}?;
+```
+
+The syntax is `loop <task_id> <max_iterations> [exit_with_last]`. Without `exit_with_last`, the default policy is `fail`.
