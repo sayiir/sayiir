@@ -54,7 +54,7 @@
 //! # }
 //! ```
 
-use crate::codec::{Codec, EnvelopeCodec, sealed};
+use crate::codec::{Codec, sealed};
 use crate::error::BoxError;
 use crate::loop_result::LoopResult;
 use crate::task::{
@@ -298,7 +298,7 @@ impl TaskRegistry {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
     {
         use crate::task::wrap_core_loop_task;
         let factory = Box::new(move || -> UntypedCoreTask {
@@ -310,7 +310,7 @@ impl TaskRegistry {
             .insert(id.to_string(), TaskEntry { factory, metadata });
     }
 
-    /// Register a loop body closure that uses two-step encoding via [`EnvelopeCodec`].
+    /// Register a loop body closure that uses two-step encoding.
     pub(crate) fn register_loop_fn_arc<I, O, F, Fut, C>(
         &mut self,
         id: &str,
@@ -322,7 +322,7 @@ impl TaskRegistry {
         I: Send + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         let factory = Box::new(move || -> UntypedCoreTask {
             let func = Arc::clone(&func);
@@ -661,7 +661,7 @@ where
     I: Send + 'static,
     O: Send + 'static,
     Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
-    C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
 {
     type Input = Bytes;
     type Output = Bytes;
@@ -675,7 +675,7 @@ where
             let loop_result = func(decoded_input).await?;
             let (decision, inner) = loop_result.into_decision();
             let inner_bytes = codec.encode(&inner)?;
-            codec.encode_loop_result(decision, &inner_bytes)
+            Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
         })
     }
 }

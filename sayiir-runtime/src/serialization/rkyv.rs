@@ -2,7 +2,7 @@ use bytecheck::CheckBytes;
 use bytes::Bytes;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::{Archive, Deserialize, Serialize, from_bytes, to_bytes};
-use sayiir_core::codec::{Decoder, Encoder, EnvelopeCodec, LoopDecision, sealed};
+use sayiir_core::codec::{Decoder, Encoder, sealed};
 use sayiir_core::error::BoxError;
 
 /// A codec that can serialize and deserialize values using rkyv.
@@ -66,10 +66,10 @@ where
     }
 }
 
-impl EnvelopeCodec for RkyvCodec {
+impl sayiir_core::codec::EnvelopeCodec for RkyvCodec {
     fn decode_string(&self, bytes: &[u8]) -> Result<String, BoxError> {
         from_bytes::<String, Error>(bytes)
-            .map_err(|e| -> BoxError { format!("Failed to decode string with rkyv: {e}").into() })
+            .map_err(|e| format!("Failed to decode string with rkyv: {e}").into())
     }
 
     fn encode_branch_envelope(&self, key: &str, result_bytes: &[u8]) -> Result<Bytes, BoxError> {
@@ -82,8 +82,7 @@ impl EnvelopeCodec for RkyvCodec {
         let aligned_vec = to_bytes::<Error>(&envelope).map_err(|e| -> BoxError {
             format!("Failed to encode branch envelope with rkyv: {e}").into()
         })?;
-        let vec: Vec<u8> = aligned_vec.into();
-        Ok(Bytes::from(vec))
+        Ok(Bytes::from(Vec::from(aligned_vec)))
     }
 
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
@@ -93,58 +92,27 @@ impl EnvelopeCodec for RkyvCodec {
         let aligned_vec = to_bytes::<Error>(&nbr).map_err(|e| -> BoxError {
             format!("Failed to encode named results with rkyv: {e}").into()
         })?;
-        let vec: Vec<u8> = aligned_vec.into();
-        Ok(Bytes::from(vec))
-    }
-
-    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
-        use sayiir_core::LoopResult;
-
-        from_bytes::<LoopResult<Bytes>, Error>(bytes)
-            .map(LoopResult::into_decision)
-            .map_err(|e| -> BoxError {
-                format!("Failed to decode LoopResult with rkyv: {e}").into()
-            })
-    }
-
-    fn encode_loop_result(
-        &self,
-        decision: LoopDecision,
-        inner_bytes: &[u8],
-    ) -> Result<Bytes, BoxError> {
-        use sayiir_core::LoopResult;
-
-        let envelope = match decision {
-            LoopDecision::Again => LoopResult::Again(Bytes::copy_from_slice(inner_bytes)),
-            LoopDecision::Done => LoopResult::Done(Bytes::copy_from_slice(inner_bytes)),
-        };
-        let aligned_vec = to_bytes::<Error>(&envelope).map_err(|e| -> BoxError {
-            format!("Failed to encode LoopResult with rkyv: {e}").into()
-        })?;
-        let vec: Vec<u8> = aligned_vec.into();
-        Ok(Bytes::from(vec))
+        Ok(Bytes::from(Vec::from(aligned_vec)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sayiir_core::codec::{LoopDecision, decode_loop_envelope, encode_loop_envelope};
 
     #[test]
     fn rkyv_loop_result_round_trip_done() {
-        let codec = RkyvCodec;
         // Encode an inner u32 value
         let inner: u32 = 42;
         let inner_bytes = to_bytes::<Error>(&inner).unwrap();
         let inner_bytes = Bytes::from(Vec::from(inner_bytes));
 
-        // Encode as LoopResult (Done variant)
-        let encoded = codec
-            .encode_loop_result(LoopDecision::Done, &inner_bytes)
-            .unwrap();
+        // Encode as loop envelope (Done variant)
+        let encoded = encode_loop_envelope(LoopDecision::Done, &inner_bytes);
 
         // Decode should recover the decision + inner bytes
-        let (decision, decoded_inner) = codec.decode_loop_result(&encoded).unwrap();
+        let (decision, decoded_inner) = decode_loop_envelope(&encoded).unwrap();
         assert!(matches!(decision, LoopDecision::Done));
         assert_eq!(decoded_inner, inner_bytes);
 
@@ -155,16 +123,13 @@ mod tests {
 
     #[test]
     fn rkyv_loop_result_round_trip_again() {
-        let codec = RkyvCodec;
         let inner: String = "hello".to_string();
         let inner_bytes = to_bytes::<Error>(&inner).unwrap();
         let inner_bytes = Bytes::from(Vec::from(inner_bytes));
 
-        let encoded = codec
-            .encode_loop_result(LoopDecision::Again, &inner_bytes)
-            .unwrap();
+        let encoded = encode_loop_envelope(LoopDecision::Again, &inner_bytes);
 
-        let (decision, decoded_inner) = codec.decode_loop_result(&encoded).unwrap();
+        let (decision, decoded_inner) = decode_loop_envelope(&encoded).unwrap();
         assert!(matches!(decision, LoopDecision::Again));
         assert_eq!(decoded_inner, inner_bytes);
 

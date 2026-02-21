@@ -8,8 +8,8 @@
 //! For the proc-macro DSL alternative, see the `workflow!` macro in `sayiir-macros`.
 
 use crate::branch_key::BranchKey;
+use crate::codec::Codec;
 use crate::codec::sealed;
-use crate::codec::{Codec, EnvelopeCodec};
 use crate::context::WorkflowContext;
 use crate::error::{BuildError, BuildErrors};
 use crate::loop_result::LoopResult;
@@ -85,7 +85,7 @@ pub trait RegistryBehavior {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static;
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static;
 
     /// Register a loop body task with two-step encoding (no-op for `NoRegistry`).
     fn maybe_register_loop<I, O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
@@ -96,7 +96,7 @@ pub trait RegistryBehavior {
         Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static;
 
     /// Register a join task (no-op for `NoRegistry`, actual registration for `TaskRegistry`).
     fn maybe_register_join<O, F, Fut, C>(&mut self, _id: &str, _codec: Arc<C>, _func: &Arc<F>)
@@ -151,7 +151,7 @@ impl RegistryBehavior for NoRegistry {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
     {
         // No-op for non-serializable workflows
     }
@@ -164,7 +164,7 @@ impl RegistryBehavior for NoRegistry {
         Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         // No-op for non-serializable workflows
     }
@@ -225,7 +225,7 @@ impl RegistryBehavior for TaskRegistry {
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
     {
         self.register_loop_task_arc(id, codec, task, metadata);
     }
@@ -238,7 +238,7 @@ impl RegistryBehavior for TaskRegistry {
         Fut: std::future::Future<Output = Result<LoopResult<O>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
         use crate::task::TaskMetadata;
         self.register_loop_fn_arc(id, codec, Arc::clone(func), TaskMetadata::default());
@@ -515,11 +515,7 @@ where
         Fut: std::future::Future<Output = Result<LoopResult<NewOutput>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         self.loop_task_with_policy(id, func, max_iterations, MaxIterationsPolicy::Fail)
     }
@@ -543,11 +539,7 @@ where
         Fut: std::future::Future<Output = Result<LoopResult<NewOutput>, crate::error::BoxError>>
             + Send
             + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         if max_iterations == 0 {
             self.errors
@@ -711,11 +703,7 @@ where
         Output: Send + 'static,
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         self.loop_task_struct_with_policy(T::default(), max_iterations, MaxIterationsPolicy::Fail)
     }
@@ -734,11 +722,7 @@ where
         Output: Send + 'static,
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         self.loop_task_struct_with_policy(task, max_iterations, MaxIterationsPolicy::Fail)
     }
@@ -758,11 +742,7 @@ where
         Output: Send + 'static,
         NewOutput: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec
-            + EnvelopeCodec
-            + sealed::DecodeValue<Output>
-            + sealed::EncodeValue<NewOutput>
-            + 'static,
+        C: Codec + sealed::DecodeValue<Output> + sealed::EncodeValue<NewOutput> + 'static,
     {
         let id = T::task_id();
         if max_iterations == 0 {

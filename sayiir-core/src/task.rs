@@ -11,7 +11,7 @@
 //! This module also provides [`TaskMetadata`], [`RetryPolicy`],
 //! [`BranchOutputs`] for fork/join, and the type-erased [`UntypedCoreTask`].
 
-use crate::codec::{Codec, EnvelopeCodec, sealed};
+use crate::codec::{Codec, sealed};
 use crate::error::{BoxError, WorkflowError};
 use crate::loop_result::LoopResult;
 use bytes::Bytes;
@@ -448,17 +448,18 @@ where
 /// Create an untyped task from a loop body function.
 ///
 /// Unlike [`to_core_task_arc`], this wrapper encodes `LoopResult<O>` via
-/// [`EnvelopeCodec::encode_loop_result`], which first serializes the inner
-/// value `O` then wraps it in a codec-specific envelope. This ensures the
-/// output can be decoded by [`EnvelopeCodec::decode_loop_result`] regardless
-/// of the concrete inner type.
+/// [`codec::encode_loop_envelope`](crate::codec::encode_loop_envelope),
+/// which first serializes the inner value `O` then wraps it in a binary
+/// tag + payload envelope. This ensures the output can be decoded by
+/// [`codec::decode_loop_envelope`](crate::codec::decode_loop_envelope)
+/// regardless of the concrete inner type.
 pub fn to_core_loop_task_arc<F, I, O, Fut, C>(func: Arc<F>, codec: Arc<C>) -> UntypedCoreTask
 where
     F: Fn(I) -> Fut + Send + Sync + 'static,
     I: Send + 'static,
     O: Send + 'static,
     Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
-    C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
+    C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
 {
     struct LoopTaskFnWrapper<F, I, O, Fut, C> {
         func: Arc<F>,
@@ -472,7 +473,7 @@ where
         I: Send + 'static,
         O: Send + 'static,
         Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
+        C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O>,
     {
         type Input = Bytes;
         type Output = Bytes;
@@ -486,7 +487,7 @@ where
                 let loop_result = func(decoded_input).await?;
                 let (decision, inner) = loop_result.into_decision();
                 let inner_bytes = codec.encode(&inner)?;
-                codec.encode_loop_result(decision, &inner_bytes)
+                Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
             })
         }
     }
@@ -499,7 +500,7 @@ where
 }
 
 /// Wrap a `CoreTask` whose output is `LoopResult<O>` into an [`UntypedCoreTask`]
-/// that uses [`EnvelopeCodec::encode_loop_result`] for encoding.
+/// that uses [`codec::encode_loop_envelope`](crate::codec::encode_loop_envelope) for encoding.
 ///
 /// This is the loop-aware equivalent of [`wrap_core_task`].
 pub fn wrap_core_loop_task<T, O, C>(task: Arc<T>, codec: Arc<C>) -> UntypedCoreTask
@@ -508,7 +509,7 @@ where
     T::Input: Send + 'static,
     O: Send + 'static,
     T::Future: Send + 'static,
-    C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
+    C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
 {
     struct LoopCoreTaskWrapper<T, O, C> {
         task: Arc<T>,
@@ -522,7 +523,7 @@ where
         T::Input: Send + 'static,
         O: Send + 'static,
         T::Future: Send + 'static,
-        C: Codec + EnvelopeCodec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O>,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O>,
     {
         type Input = Bytes;
         type Output = Bytes;
@@ -536,7 +537,7 @@ where
                 let loop_result = task.run(decoded_input).await?;
                 let (decision, inner) = loop_result.into_decision();
                 let inner_bytes = codec.encode(&inner)?;
-                codec.encode_loop_result(decision, &inner_bytes)
+                Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
             })
         }
     }

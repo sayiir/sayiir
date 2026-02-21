@@ -2835,11 +2835,17 @@ async fn test_checkpointing_loop_resumes_from_iteration() {
 // ========================================================================
 
 fn encode_loop_again(val: u32) -> Bytes {
-    Bytes::from(serde_json::to_vec(&serde_json::json!({"_loop":"again","value":val})).unwrap())
+    sayiir_core::codec::encode_loop_envelope(
+        sayiir_core::codec::LoopDecision::Again,
+        &serde_json::to_vec(&val).unwrap(),
+    )
 }
 
 fn encode_loop_done(val: u32) -> Bytes {
-    Bytes::from(serde_json::to_vec(&serde_json::json!({"_loop":"done","value":val})).unwrap())
+    sayiir_core::codec::encode_loop_envelope(
+        sayiir_core::codec::LoopDecision::Done,
+        &serde_json::to_vec(&val).unwrap(),
+    )
 }
 
 fn loop_node(

@@ -552,12 +552,7 @@ where
                                 snapshot.remove_task_result(tid);
                             }
 
-                            match resolve_loop_iteration(
-                                &output,
-                                iteration,
-                                &cfg,
-                                context.codec.as_ref(),
-                            )? {
+                            match resolve_loop_iteration(&output, iteration, &cfg)? {
                                 ControlFlow::Break(LoopExit(inner)) => {
                                     snapshot.clear_loop_iteration(id);
                                     snapshot.mark_task_completed(id.clone(), inner.clone());
@@ -939,7 +934,6 @@ where
                             let output = run_loop_async(
                                 &cfg,
                                 current_input.clone(),
-                                context.codec.as_ref(),
                                 |input| {
                                     Box::pin(Self::execute_branch_with_checkpoint(
                                         body,

@@ -1122,7 +1122,6 @@ where
                     workflow.continuation(),
                     snapshot,
                     self.backend.as_ref(),
-                    workflow.context().codec.as_ref(),
                 )
                 .await?;
                 self.determine_post_task_status(
@@ -1665,16 +1664,14 @@ where
         continuation: &WorkflowContinuation,
         snapshot: &mut WorkflowSnapshot,
         backend: &B,
-        codec: &impl EnvelopeCodec,
     ) -> Result<(), crate::error::RuntimeError> {
-        Self::resolve_loops_recursive(continuation, snapshot, backend, codec).await
+        Self::resolve_loops_recursive(continuation, snapshot, backend).await
     }
 
     fn resolve_loops_recursive<'a>(
         continuation: &'a WorkflowContinuation,
         snapshot: &'a mut WorkflowSnapshot,
         backend: &'a B,
-        codec: &'a (impl EnvelopeCodec + 'a),
     ) -> Pin<
         Box<dyn std::future::Future<Output = Result<(), crate::error::RuntimeError>> + Send + 'a>,
     > {
@@ -1692,7 +1689,7 @@ where
                         let terminal_id = body.terminal_task_id();
                         if let Some(result) = snapshot.get_task_result(terminal_id) {
                             let output = result.output.clone();
-                            match codec.decode_loop_result(&output) {
+                            match crate::execution::decode_loop_envelope(&output) {
                                 Ok((LoopDecision::Done, inner)) => {
                                     snapshot.clear_loop_iteration(id);
                                     snapshot.mark_task_completed(id.clone(), inner);
@@ -1741,9 +1738,9 @@ where
                         }
                     }
                     // Recurse into body and next.
-                    Self::resolve_loops_recursive(body, snapshot, backend, codec).await?;
+                    Self::resolve_loops_recursive(body, snapshot, backend).await?;
                     if let Some(next) = next {
-                        Self::resolve_loops_recursive(next, snapshot, backend, codec).await?;
+                        Self::resolve_loops_recursive(next, snapshot, backend).await?;
                     }
                 }
                 WorkflowContinuation::Task { next, .. }
@@ -1751,15 +1748,15 @@ where
                 | WorkflowContinuation::AwaitSignal { next, .. }
                 | WorkflowContinuation::Branch { next, .. } => {
                     if let Some(next) = next {
-                        Self::resolve_loops_recursive(next, snapshot, backend, codec).await?;
+                        Self::resolve_loops_recursive(next, snapshot, backend).await?;
                     }
                 }
                 WorkflowContinuation::Fork { branches, join, .. } => {
                     for branch in branches {
-                        Self::resolve_loops_recursive(branch, snapshot, backend, codec).await?;
+                        Self::resolve_loops_recursive(branch, snapshot, backend).await?;
                     }
                     if let Some(join) = join {
-                        Self::resolve_loops_recursive(join, snapshot, backend, codec).await?;
+                        Self::resolve_loops_recursive(join, snapshot, backend).await?;
                     }
                 }
             }

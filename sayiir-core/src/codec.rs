@@ -118,9 +118,7 @@ impl<C> Decoder for std::sync::Arc<C> where C: Decoder {}
 /// - Constructing discriminated `{"branch": key, "result": value}` envelopes
 /// - Serializing named fork/join results
 ///
-/// By default, `JsonCodec` implements this with `serde_json`. Other codecs
-/// (e.g. `RkyvCodec`) can return clear errors if envelope operations are
-/// unsupported.
+/// Concrete implementations live in `sayiir-runtime` (`JsonCodec`, `RkyvCodec`).
 pub trait EnvelopeCodec: Send + Sync {
     /// Decode a routing key (String) from bytes produced by a branch key function.
     ///
@@ -148,41 +146,6 @@ pub trait EnvelopeCodec: Send + Sync {
     ///
     /// Returns an error if serialization fails.
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError>;
-
-    /// Decode a `LoopResult` envelope and return the decision + inner value bytes.
-    ///
-    /// The runtime calls this after each loop body execution to determine whether
-    /// to iterate again or exit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the bytes cannot be decoded as a `LoopResult` envelope.
-    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError>;
-
-    /// Encode a `LoopResult` envelope from a decision tag and pre-encoded inner value bytes.
-    ///
-    /// This is the encoding counterpart of [`decode_loop_result`](Self::decode_loop_result).
-    /// The loop task wrapper calls this after encoding the inner value separately,
-    /// ensuring the envelope format matches what `decode_loop_result` expects.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if envelope construction or serialization fails.
-    fn encode_loop_result(
-        &self,
-        decision: LoopDecision,
-        inner_bytes: &[u8],
-    ) -> Result<Bytes, BoxError>;
-}
-
-/// Whether a loop body returned `Again` or `Done`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr)]
-#[strum(serialize_all = "snake_case")]
-pub enum LoopDecision {
-    /// Continue iterating with the inner value as the next input.
-    Again,
-    /// Exit the loop; the inner value is the loop's output.
-    Done,
 }
 
 /// Blanket implementation for `&C` to allow passing references generically.
@@ -197,18 +160,6 @@ impl<C: EnvelopeCodec> EnvelopeCodec for &C {
 
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
         (**self).encode_named_results(results)
-    }
-
-    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
-        (**self).decode_loop_result(bytes)
-    }
-
-    fn encode_loop_result(
-        &self,
-        decision: LoopDecision,
-        inner_bytes: &[u8],
-    ) -> Result<Bytes, BoxError> {
-        (**self).encode_loop_result(decision, inner_bytes)
     }
 }
 
@@ -225,16 +176,51 @@ impl<C: EnvelopeCodec> EnvelopeCodec for std::sync::Arc<C> {
     fn encode_named_results(&self, results: &[(String, Bytes)]) -> Result<Bytes, BoxError> {
         (**self).encode_named_results(results)
     }
+}
 
-    fn decode_loop_result(&self, bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
-        (**self).decode_loop_result(bytes)
-    }
+/// Whether a loop body returned `Again` or `Done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum LoopDecision {
+    /// Continue iterating with the inner value as the next input.
+    Again,
+    /// Exit the loop; the inner value is the loop's output.
+    Done,
+}
 
-    fn encode_loop_result(
-        &self,
-        decision: LoopDecision,
-        inner_bytes: &[u8],
-    ) -> Result<Bytes, BoxError> {
-        (**self).encode_loop_result(decision, inner_bytes)
-    }
+/// Encode a loop envelope using a binary tag + inner bytes framing.
+///
+/// This is a codec-independent free function used by loop task wrappers.
+/// The format is a single tag byte (`0` = Again, `1` = Done) followed by
+/// the pre-encoded inner value bytes.
+#[must_use]
+pub fn encode_loop_envelope(decision: LoopDecision, inner_bytes: &[u8]) -> Bytes {
+    let mut buf = Vec::with_capacity(1 + inner_bytes.len());
+    buf.push(match decision {
+        LoopDecision::Again => 0,
+        LoopDecision::Done => 1,
+    });
+    buf.extend_from_slice(inner_bytes);
+    Bytes::from(buf)
+}
+
+/// Decode a binary loop envelope produced by [`encode_loop_envelope`].
+///
+/// The expected format is a single tag byte (`0x00` = Again, `0x01` = Done)
+/// followed by the inner value bytes.
+///
+/// # Errors
+///
+/// Returns an error if the bytes are empty or the tag byte is invalid.
+pub fn decode_loop_envelope(bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
+    let &tag = bytes.first().ok_or("empty loop envelope")?;
+    let decision = match tag {
+        0 => LoopDecision::Again,
+        1 => LoopDecision::Done,
+        _ => return Err(format!("invalid loop envelope tag: {tag:#04x}").into()),
+    };
+    let inner = bytes
+        .get(1..)
+        .ok_or("unexpected empty loop envelope payload")?;
+    Ok((decision, Bytes::copy_from_slice(inner)))
 }

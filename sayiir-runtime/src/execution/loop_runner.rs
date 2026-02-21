@@ -8,13 +8,40 @@ use std::future::Future;
 use std::ops::ControlFlow;
 
 use bytes::Bytes;
-use sayiir_core::codec::{EnvelopeCodec, LoopDecision};
-use sayiir_core::error::WorkflowError;
+use sayiir_core::codec::LoopDecision;
+use sayiir_core::error::{BoxError, WorkflowError};
 use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot};
 use sayiir_core::workflow::{MaxIterationsPolicy, WorkflowContinuation};
 use sayiir_persistence::SnapshotStore;
 
 use crate::error::RuntimeError;
+
+/// Decode a loop envelope, auto-detecting binary vs JSON format.
+///
+/// - **Binary** (tag byte `0x00`/`0x01` + payload) — produced by Rust loop task wrappers.
+/// - **JSON** (`{"_loop":"again"|"done","value":...}`) — produced by Python/JS bindings.
+pub(crate) fn decode_loop_envelope(bytes: &[u8]) -> Result<(LoopDecision, Bytes), BoxError> {
+    let &first = bytes.first().ok_or("empty loop envelope")?;
+    match first {
+        // Binary tags produced by sayiir_core::codec::encode_loop_envelope.
+        0 | 1 => sayiir_core::codec::decode_loop_envelope(bytes),
+        // JSON format from bindings.
+        _ => {
+            let v: serde_json::Value = serde_json::from_slice(bytes)?;
+            let tag = v
+                .get("_loop")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing or invalid '_loop' tag in LoopResult JSON")?;
+            let decision: LoopDecision = tag
+                .parse()
+                .map_err(|_| format!("unknown loop decision tag: '{tag}'"))?;
+            let inner = v
+                .get("value")
+                .ok_or("missing 'value' field in LoopResult JSON")?;
+            Ok((decision, Bytes::from(serde_json::to_vec(inner)?)))
+        }
+    }
+}
 
 /// Final output of a loop (`Break` arm of `ControlFlow`).
 pub(crate) struct LoopExit(pub Bytes);
@@ -46,11 +73,8 @@ pub(crate) fn resolve_loop_iteration(
     output: &Bytes,
     iteration: u32,
     cfg: &LoopConfig<'_>,
-    codec: &impl EnvelopeCodec,
 ) -> Result<ControlFlow<LoopExit, LoopNext>, RuntimeError> {
-    let (decision, inner) = codec
-        .decode_loop_result(output)
-        .map_err(RuntimeError::from)?;
+    let (decision, inner) = decode_loop_envelope(output).map_err(RuntimeError::from)?;
     match decision {
         LoopDecision::Done => Ok(ControlFlow::Break(LoopExit(inner))),
         LoopDecision::Again => {
@@ -161,10 +185,9 @@ impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
 ///
 /// Generic over body execution (async closure) and snapshot hooks.
 /// The sync executor uses [`resolve_loop_iteration`] directly instead.
-pub(crate) async fn run_loop_async<F, Fut, H, E>(
+pub(crate) async fn run_loop_async<F, Fut, H>(
     cfg: &LoopConfig<'_>,
     initial_input: Bytes,
-    codec: &E,
     execute_body: F,
     hooks: &mut H,
 ) -> Result<Bytes, RuntimeError>
@@ -172,7 +195,6 @@ where
     F: Fn(Bytes) -> Fut,
     Fut: Future<Output = Result<Bytes, RuntimeError>>,
     H: LoopHooks,
-    E: EnvelopeCodec,
 {
     let mut loop_input = initial_input;
 
@@ -181,7 +203,7 @@ where
 
         hooks.clear_body_tasks(cfg.body);
 
-        match resolve_loop_iteration(&output, iteration, cfg, codec)? {
+        match resolve_loop_iteration(&output, iteration, cfg)? {
             ControlFlow::Break(LoopExit(inner)) => {
                 hooks.on_loop_exit(cfg.id, &inner).await?;
                 return Ok(inner);
