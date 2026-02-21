@@ -55,7 +55,7 @@
 //! ```
 
 use crate::codec::{Codec, sealed};
-use crate::error::BoxError;
+use crate::error::{BoxError, CodecError};
 use crate::loop_result::LoopResult;
 use crate::task::{
     BranchOutputs, BytesFuture, CoreTask, TaskMetadata, UntypedCoreTask,
@@ -195,10 +195,15 @@ impl TaskRegistry {
         T::Future: Send + 'static,
         C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
     {
+        let task_id = id.to_string();
         let factory = Box::new(move || -> UntypedCoreTask {
             let task = Arc::clone(&task);
             let codec = Arc::clone(&codec);
-            Box::new(TaskWrapper { task, codec })
+            Box::new(TaskWrapper {
+                task,
+                codec,
+                task_id: task_id.clone(),
+            })
         });
         self.tasks
             .insert(id.to_string(), TaskEntry { factory, metadata });
@@ -273,12 +278,14 @@ impl TaskRegistry {
         Fut: Future<Output = Result<O, BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
+        let task_id = id.to_string();
         let factory = Box::new(move || -> UntypedCoreTask {
             let func = Arc::clone(&func);
             let codec = Arc::clone(&codec);
             Box::new(FnTaskWrapper {
                 func,
                 codec,
+                task_id: task_id.clone(),
                 _phantom: PhantomData,
             })
         });
@@ -301,10 +308,11 @@ impl TaskRegistry {
         C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<O> + 'static,
     {
         use crate::task::wrap_core_loop_task;
+        let task_id = id.to_string();
         let factory = Box::new(move || -> UntypedCoreTask {
             let task = Arc::clone(&task);
             let codec = Arc::clone(&codec);
-            wrap_core_loop_task(task, codec)
+            wrap_core_loop_task(&task_id, task, codec)
         });
         self.tasks
             .insert(id.to_string(), TaskEntry { factory, metadata });
@@ -324,12 +332,14 @@ impl TaskRegistry {
         Fut: Future<Output = Result<LoopResult<O>, BoxError>> + Send + 'static,
         C: Codec + sealed::DecodeValue<I> + sealed::EncodeValue<O> + 'static,
     {
+        let task_id = id.to_string();
         let factory = Box::new(move || -> UntypedCoreTask {
             let func = Arc::clone(&func);
             let codec = Arc::clone(&codec);
             Box::new(LoopFnTaskWrapper {
                 func,
                 codec,
+                task_id: task_id.clone(),
                 _phantom: PhantomData,
             })
         });
@@ -392,8 +402,9 @@ impl TaskRegistry {
             + Sync
             + 'static,
     {
+        let task_id = id.to_string();
         let factory = Box::new(move || -> UntypedCoreTask {
-            to_heterogeneous_join_task_arc(Arc::clone(&func), Arc::clone(&codec))
+            to_heterogeneous_join_task_arc(&task_id, Arc::clone(&func), Arc::clone(&codec))
         });
         self.tasks
             .insert(id.to_string(), TaskEntry { factory, metadata });
@@ -622,6 +633,7 @@ impl<C: Codec> RegistryBuilder<C> {
 struct FnTaskWrapper<F, I, O, C> {
     func: Arc<F>,
     codec: Arc<C>,
+    task_id: String,
     _phantom: PhantomData<fn(I) -> O>,
 }
 
@@ -640,10 +652,19 @@ where
     fn run(&self, input: Bytes) -> Self::Future {
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
+        let task_id = self.task_id.clone();
         BytesFuture::new(async move {
-            let decoded_input = codec.decode::<I>(input)?;
+            let decoded_input = codec.decode::<I>(input).map_err(|e| -> BoxError {
+                Box::new(CodecError::DecodeFailed {
+                    task_id: task_id.clone(),
+                    expected_type: std::any::type_name::<I>(),
+                    source: e,
+                })
+            })?;
             let output = func(decoded_input).await?;
-            codec.encode(&output)
+            codec.encode(&output).map_err(|e| -> BoxError {
+                Box::new(CodecError::EncodeFailed { task_id, source: e })
+            })
         })
     }
 }
@@ -652,6 +673,7 @@ where
 struct LoopFnTaskWrapper<F, I, O, C> {
     func: Arc<F>,
     codec: Arc<C>,
+    task_id: String,
     _phantom: PhantomData<fn(I) -> O>,
 }
 
@@ -670,11 +692,20 @@ where
     fn run(&self, input: Bytes) -> Self::Future {
         let func = Arc::clone(&self.func);
         let codec = Arc::clone(&self.codec);
+        let task_id = self.task_id.clone();
         BytesFuture::new(async move {
-            let decoded_input = codec.decode::<I>(input)?;
+            let decoded_input = codec.decode::<I>(input).map_err(|e| -> BoxError {
+                Box::new(CodecError::DecodeFailed {
+                    task_id: task_id.clone(),
+                    expected_type: std::any::type_name::<I>(),
+                    source: e,
+                })
+            })?;
             let loop_result = func(decoded_input).await?;
             let (decision, inner) = loop_result.into_decision();
-            let inner_bytes = codec.encode(&inner)?;
+            let inner_bytes = codec.encode(&inner).map_err(|e| -> BoxError {
+                Box::new(CodecError::EncodeFailed { task_id, source: e })
+            })?;
             Ok(crate::codec::encode_loop_envelope(decision, &inner_bytes))
         })
     }
@@ -684,6 +715,7 @@ where
 struct TaskWrapper<T, C> {
     task: Arc<T>,
     codec: Arc<C>,
+    task_id: String,
 }
 
 impl<T, C> CoreTask for TaskWrapper<T, C>
@@ -701,10 +733,19 @@ where
     fn run(&self, input: Bytes) -> Self::Future {
         let task = Arc::clone(&self.task);
         let codec = Arc::clone(&self.codec);
+        let task_id = self.task_id.clone();
         BytesFuture::new(async move {
-            let decoded_input = codec.decode::<T::Input>(input)?;
+            let decoded_input = codec.decode::<T::Input>(input).map_err(|e| -> BoxError {
+                Box::new(CodecError::DecodeFailed {
+                    task_id: task_id.clone(),
+                    expected_type: std::any::type_name::<T::Input>(),
+                    source: e,
+                })
+            })?;
             let output = task.run(decoded_input).await?;
-            codec.encode(&output)
+            codec.encode(&output).map_err(|e| -> BoxError {
+                Box::new(CodecError::EncodeFailed { task_id, source: e })
+            })
         })
     }
 }

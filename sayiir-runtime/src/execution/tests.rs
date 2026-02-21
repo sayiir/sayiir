@@ -38,7 +38,7 @@ where
     let c = codec();
     WorkflowContinuation::Task {
         id: id.to_string(),
-        func: Some(to_core_task(f, c)),
+        func: Some(to_core_task(id, f, c)),
         timeout: None,
         retry_policy: None,
         next,
@@ -70,7 +70,7 @@ where
     let c = codec();
     WorkflowContinuation::Task {
         id: id.to_string(),
-        func: Some(to_core_task(f, c)),
+        func: Some(to_core_task(id, f, c)),
         timeout: None,
         retry_policy: Some(retry_policy),
         next,
@@ -92,7 +92,7 @@ where
     let c = codec();
     WorkflowContinuation::Task {
         id: id.to_string(),
-        func: Some(to_core_task(f, c)),
+        func: Some(to_core_task(id, f, c)),
         timeout: Some(timeout),
         retry_policy: Some(retry_policy),
         next,
@@ -390,7 +390,11 @@ async fn test_async_task_failure_propagates() {
 async fn test_async_task_completes_within_timeout() {
     let cont = WorkflowContinuation::Task {
         id: "fast".to_string(),
-        func: Some(to_core_task(|i: u32| async move { Ok(i + 1) }, codec())),
+        func: Some(to_core_task(
+            "fast",
+            |i: u32| async move { Ok(i + 1) },
+            codec(),
+        )),
         timeout: Some(std::time::Duration::from_secs(5)),
         retry_policy: None,
         next: None,
@@ -407,6 +411,7 @@ async fn test_async_task_exceeds_timeout() {
     let cont = WorkflowContinuation::Task {
         id: "slow".to_string(),
         func: Some(to_core_task(
+            "slow",
             |i: u32| async move {
                 // Sleep just long enough to exceed the timeout
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -433,6 +438,7 @@ async fn test_async_task_no_timeout_unlimited() {
     let cont = WorkflowContinuation::Task {
         id: "normal".to_string(),
         func: Some(to_core_task(
+            "normal",
             |i: u32| async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 Ok(i + 1)
@@ -2116,6 +2122,7 @@ async fn test_async_timeout_mid_chain_fails() {
     let slow_task = WorkflowContinuation::Task {
         id: "slow".to_string(),
         func: Some(to_core_task(
+            "slow",
             |i: u32| async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 Ok(i * 2)
@@ -2144,14 +2151,22 @@ async fn test_async_timeout_passes_in_chain() {
     // Both tasks have timeouts but complete within them → chain succeeds
     let second = WorkflowContinuation::Task {
         id: "second".to_string(),
-        func: Some(to_core_task(|i: u32| async move { Ok(i * 2) }, codec())),
+        func: Some(to_core_task(
+            "second",
+            |i: u32| async move { Ok(i * 2) },
+            codec(),
+        )),
         timeout: Some(std::time::Duration::from_secs(5)),
         retry_policy: None,
         next: None,
     };
     let first = WorkflowContinuation::Task {
         id: "first".to_string(),
-        func: Some(to_core_task(|i: u32| async move { Ok(i + 1) }, codec())),
+        func: Some(to_core_task(
+            "first",
+            |i: u32| async move { Ok(i + 1) },
+            codec(),
+        )),
         timeout: Some(std::time::Duration::from_secs(5)),
         retry_policy: None,
         next: Some(Box::new(second)),
@@ -2563,6 +2578,7 @@ fn branch_node(
 ) -> WorkflowContinuation {
     let c = codec();
     let key_task = to_core_task(
+        id,
         move |_input: serde_json::Value| async move { Ok(key.to_string()) },
         c,
     );
@@ -2718,7 +2734,7 @@ fn loop_body_task(
     let c = codec();
     WorkflowContinuation::Task {
         id: id.to_string(),
-        func: Some(to_core_task(f, c)),
+        func: Some(to_core_task(id, f, c)),
         timeout: None,
         retry_policy: None,
         next: None,
@@ -3051,6 +3067,7 @@ async fn test_async_loop_inside_fork_branch() {
 
     // Join sums both branch results
     let join_fn = to_heterogeneous_join_task(
+        "join",
         |outputs: BranchOutputs<JsonCodec>| async move {
             let a: u32 = outputs.get_by_id("loop_a")?;
             let b: u32 = outputs.get_by_id("double")?;

@@ -1,6 +1,6 @@
 //! Typed error for the sayiir runtime layer.
 
-use sayiir_core::error::{BoxError, BuildError, BuildErrors, WorkflowError};
+use sayiir_core::error::{BoxError, BuildError, BuildErrors, CodecError, WorkflowError};
 use sayiir_persistence::BackendError;
 
 /// Typed error for the sayiir runtime layer.
@@ -21,13 +21,26 @@ pub enum RuntimeError {
     #[error(transparent)]
     Backend(#[from] BackendError),
 
-    /// User task execution or codec error (opaque — from user-provided code).
+    /// Codec encode/decode error (schema mismatch, serialization failure).
     #[error(transparent)]
-    Task(#[from] BoxError),
+    Codec(#[from] CodecError),
+
+    /// User task execution error (opaque — from user-provided code).
+    #[error(transparent)]
+    Task(BoxError),
 
     /// Tokio task join error (branch spawn failures).
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
+}
+
+impl From<BoxError> for RuntimeError {
+    fn from(err: BoxError) -> Self {
+        match err.downcast::<CodecError>() {
+            Ok(codec_err) => Self::Codec(*codec_err),
+            Err(other) => Self::Task(other),
+        }
+    }
 }
 
 impl From<BuildError> for RuntimeError {
@@ -41,5 +54,11 @@ impl RuntimeError {
     #[must_use]
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Workflow(WorkflowError::TaskTimedOut { .. }))
+    }
+
+    /// Returns `true` if this error is a codec decode failure (schema mismatch).
+    #[must_use]
+    pub fn is_decode_error(&self) -> bool {
+        matches!(self, Self::Codec(CodecError::DecodeFailed { .. }))
     }
 }

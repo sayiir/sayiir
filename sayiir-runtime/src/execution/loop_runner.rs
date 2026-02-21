@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 
 use bytes::Bytes;
 use sayiir_core::codec::LoopDecision;
-use sayiir_core::error::{BoxError, WorkflowError};
+use sayiir_core::error::{BoxError, CodecError, WorkflowError};
 use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot};
 use sayiir_core::workflow::{MaxIterationsPolicy, WorkflowContinuation};
 use sayiir_persistence::SnapshotStore;
@@ -74,7 +74,11 @@ pub(crate) fn resolve_loop_iteration(
     iteration: u32,
     cfg: &LoopConfig<'_>,
 ) -> Result<ControlFlow<LoopExit, LoopNext>, RuntimeError> {
-    let (decision, inner) = decode_loop_envelope(output).map_err(RuntimeError::from)?;
+    let (decision, inner) = decode_loop_envelope(output).map_err(|e| CodecError::DecodeFailed {
+        task_id: cfg.id.to_string(),
+        expected_type: "LoopEnvelope",
+        source: e,
+    })?;
     match decision {
         LoopDecision::Done => Ok(ControlFlow::Break(LoopExit(inner))),
         LoopDecision::Again => {

@@ -180,7 +180,12 @@ impl PyWorkflowEngine {
             },
             &sayiir_runtime::serialization::JsonCodec,
         )
-        .map_err(|e| PyErr::new::<crate::exceptions::TaskError, _>(e.to_string()))?;
+        .map_err(|e| match &e {
+            sayiir_runtime::RuntimeError::Codec(_) => {
+                PyErr::new::<crate::exceptions::DeserializationError, _>(e.to_string())
+            }
+            _ => PyErr::new::<crate::exceptions::TaskError, _>(e.to_string()),
+        })?;
 
         tracing::info!(workflow_id = %workflow.workflow_id, "workflow execution completed");
 

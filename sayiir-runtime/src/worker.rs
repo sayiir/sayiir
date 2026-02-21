@@ -19,7 +19,7 @@ use futures::FutureExt;
 use sayiir_core::codec::sealed;
 use sayiir_core::codec::{Codec, EnvelopeCodec, LoopDecision};
 use sayiir_core::context::with_context;
-use sayiir_core::error::{BoxError, WorkflowError};
+use sayiir_core::error::{BoxError, CodecError, WorkflowError};
 use sayiir_core::registry::TaskRegistry;
 use sayiir_core::snapshot::{
     ExecutionPosition, SignalKind, SignalRequest, TaskDeadline, WorkflowSnapshot,
@@ -1728,11 +1728,12 @@ where
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        loop_id = %id,
-                                        error = %e,
-                                        "Failed to decode loop result in worker"
-                                    );
+                                    return Err(CodecError::DecodeFailed {
+                                        task_id: id.clone(),
+                                        expected_type: "LoopEnvelope",
+                                        source: e,
+                                    }
+                                    .into());
                                 }
                             }
                         }

@@ -25,3 +25,9 @@ create_exception!(
     WorkflowError,
     "A persistence backend operation failed."
 );
+create_exception!(
+    _sayiir,
+    DeserializationError,
+    WorkflowError,
+    "Schema mismatch: failed to decode a task input or output."
+);

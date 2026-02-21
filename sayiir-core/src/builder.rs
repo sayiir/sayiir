@@ -445,7 +445,7 @@ where
         self.registry
             .maybe_register::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_task_arc(func, codec);
+        let task = to_core_task_arc(id, func, codec);
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
@@ -551,7 +551,7 @@ where
         self.registry
             .maybe_register_loop::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_loop_task_arc(func, codec);
+        let task = to_core_loop_task_arc(id, func, codec);
         let loop_id = crate::workflow::loop_node_id(self.loop_counter);
         self.loop_counter += 1;
 
@@ -664,7 +664,7 @@ where
             metadata.clone(),
         );
 
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_task(id, task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
 
@@ -762,7 +762,7 @@ where
                 metadata.clone(),
             );
 
-        let untyped = wrap_core_loop_task(task, codec);
+        let untyped = wrap_core_loop_task(id, task, codec);
         let timeout = metadata.timeout;
         let retry_policy = metadata.retries;
 
@@ -1290,7 +1290,7 @@ impl<C, Input> BranchCollector<C, Input> {
         let id = T::task_id();
         let codec = Arc::clone(&self.codec);
         let task = Arc::new(task);
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_task(id, task, codec);
         self.branches.push(ErasedBranch {
             id: id.to_string(),
             task: untyped,
@@ -1385,7 +1385,7 @@ where
             metadata,
         );
 
-        let untyped = wrap_core_task(task, codec);
+        let untyped = wrap_core_task(id, task, codec);
         self.branches.push(ErasedBranch {
             id: id.to_string(),
             task: untyped,
@@ -1419,7 +1419,7 @@ where
         self.registry
             .maybe_register_join::<JoinOutput, _, _, _>(id, codec.clone(), &func);
 
-        let join_task_fn = to_heterogeneous_join_task_arc(func, codec);
+        let join_task_fn = to_heterogeneous_join_task_arc(id, func, codec);
 
         let fork_id = WorkflowContinuation::derive_fork_id(
             &self
@@ -1622,7 +1622,7 @@ where
         self.registry
             .maybe_register::<Output, NewOutput, _, _, _>(id, codec.clone(), &func);
 
-        let task = to_core_task_arc(func, codec);
+        let task = to_core_task_arc(id, func, codec);
 
         let new_task = WorkflowContinuation::Task {
             id: id.to_string(),
@@ -1793,7 +1793,7 @@ where
             &key_fn_string,
         );
 
-        let key_fn_task = to_core_task_arc(key_fn_string, codec);
+        let key_fn_task = to_core_task_arc(&key_fn_id, key_fn_string, codec);
 
         RouteBuilder {
             context: self.context,

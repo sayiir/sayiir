@@ -48,5 +48,9 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "BackendError",
         m.py().get_type::<exceptions::BackendError>(),
     )?;
+    m.add(
+        "DeserializationError",
+        m.py().get_type::<exceptions::DeserializationError>(),
+    )?;
     Ok(())
 }

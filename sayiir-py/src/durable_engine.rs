@@ -126,9 +126,7 @@ impl PyDurableEngine {
                     finalize_execution(result, &mut snapshot, backend.as_ref()).await
                 })
             })
-            .map_err(|e: sayiir_runtime::RuntimeError| {
-                PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
-            })?
+            .map_err(runtime_err_to_py)?
         });
 
         let mut py_status: PyWorkflowStatus = status.into();
@@ -205,9 +203,7 @@ impl PyDurableEngine {
                     }
                 })
             })
-            .map_err(|e: sayiir_runtime::RuntimeError| {
-                PyErr::new::<exceptions::WorkflowError, _>(e.to_string())
-            })?
+            .map_err(runtime_err_to_py)?
         });
 
         let mut py_status: PyWorkflowStatus = status.into();
@@ -291,6 +287,22 @@ impl PyDurableEngine {
 
     fn __repr__(&self) -> String {
         "DurableEngine(...)".to_string()
+    }
+}
+
+/// Convert a `RuntimeError` to a Python exception with proper dispatch.
+fn runtime_err_to_py(e: sayiir_runtime::RuntimeError) -> PyErr {
+    match &e {
+        sayiir_runtime::RuntimeError::Codec(_) => {
+            PyErr::new::<exceptions::DeserializationError, _>(e.to_string())
+        }
+        sayiir_runtime::RuntimeError::Backend(_) => {
+            PyErr::new::<exceptions::BackendError, _>(e.to_string())
+        }
+        sayiir_runtime::RuntimeError::Task(_) => {
+            PyErr::new::<exceptions::TaskError, _>(e.to_string())
+        }
+        _ => PyErr::new::<exceptions::WorkflowError, _>(e.to_string()),
     }
 }
 

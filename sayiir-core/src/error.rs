@@ -3,6 +3,33 @@
 /// Generic boxed error type used throughout the crate.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Errors produced when encoding or decoding task inputs/outputs.
+///
+/// These typed errors carry the task ID and expected type, enabling the runtime
+/// (and future "cascade re-execution") to distinguish schema-mismatch failures
+/// from task logic errors.
+#[derive(Debug, thiserror::Error)]
+pub enum CodecError {
+    /// Failed to decode a task's input (or a loop/branch envelope).
+    #[error("Failed to decode input for task '{task_id}' (expected {expected_type}): {source}")]
+    DecodeFailed {
+        /// The task whose input could not be decoded.
+        task_id: String,
+        /// The Rust type name that was expected (via `std::any::type_name`).
+        expected_type: &'static str,
+        /// The underlying deserialization error.
+        source: BoxError,
+    },
+    /// Failed to encode a task's output.
+    #[error("Failed to encode output for task '{task_id}': {source}")]
+    EncodeFailed {
+        /// The task whose output could not be encoded.
+        task_id: String,
+        /// The underlying serialization error.
+        source: BoxError,
+    },
+}
+
 /// Errors produced during workflow construction (builder / hydration).
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BuildError {
@@ -204,10 +231,6 @@ pub enum WorkflowError {
     /// Cannot resume workflow from saved state.
     #[error("Cannot resume workflow: {0}")]
     ResumeError(String),
-
-    /// Deserialization of binary data failed.
-    #[error("Deserialization error: {0}")]
-    Deserialization(String),
 
     /// A named branch was not found in the outputs.
     #[error("Branch '{0}' not found")]

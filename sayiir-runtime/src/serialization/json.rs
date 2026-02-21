@@ -50,8 +50,7 @@ impl sayiir_core::codec::EnvelopeCodec for JsonCodec {
     }
 
     fn encode_branch_envelope(&self, key: &str, result_bytes: &[u8]) -> Result<Bytes, BoxError> {
-        let result_value: serde_json::Value =
-            serde_json::from_slice(result_bytes).unwrap_or(serde_json::Value::Null);
+        let result_value: serde_json::Value = serde_json::from_slice(result_bytes)?;
         let envelope = serde_json::json!({ "branch": key, "result": result_value });
         Ok(Bytes::from(serde_json::to_vec(&envelope)?))
     }
