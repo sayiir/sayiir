@@ -41,6 +41,7 @@ where
         func: Some(to_core_task(id, f, c)),
         timeout: None,
         retry_policy: None,
+        version: None,
         next,
     }
 }
@@ -52,6 +53,7 @@ fn stub_node(id: &str, next: Option<Box<WorkflowContinuation>>) -> WorkflowConti
         func: None,
         timeout: None,
         retry_policy: None,
+        version: None,
         next,
     }
 }
@@ -73,6 +75,7 @@ where
         func: Some(to_core_task(id, f, c)),
         timeout: None,
         retry_policy: Some(retry_policy),
+        version: None,
         next,
     }
 }
@@ -95,6 +98,7 @@ where
         func: Some(to_core_task(id, f, c)),
         timeout: Some(timeout),
         retry_policy: Some(retry_policy),
+        version: None,
         next,
     }
 }
@@ -110,6 +114,7 @@ fn stub_node_with_retry(
         func: None,
         timeout: None,
         retry_policy: Some(retry_policy),
+        version: None,
         next,
     }
 }
@@ -126,6 +131,7 @@ fn stub_node_with_timeout_and_retry(
         func: None,
         timeout: Some(timeout),
         retry_policy: Some(retry_policy),
+        version: None,
         next,
     }
 }
@@ -356,6 +362,7 @@ async fn test_async_task_no_implementation() {
         func: None,
         timeout: None,
         retry_policy: None,
+        version: None,
         next: None,
     };
 
@@ -397,6 +404,7 @@ async fn test_async_task_completes_within_timeout() {
         )),
         timeout: Some(std::time::Duration::from_secs(5)),
         retry_policy: None,
+        version: None,
         next: None,
     };
 
@@ -422,6 +430,7 @@ async fn test_async_task_exceeds_timeout() {
         // Deadline shorter than the sleep — post-execution check will fail
         timeout: Some(std::time::Duration::from_millis(5)),
         retry_policy: None,
+        version: None,
         next: None,
     };
 
@@ -447,6 +456,7 @@ async fn test_async_task_no_timeout_unlimited() {
         )),
         timeout: None,
         retry_policy: None,
+        version: None,
         next: None,
     };
 
@@ -464,6 +474,7 @@ async fn test_checkpointing_task_timeout() {
         func: None,
         timeout: Some(std::time::Duration::from_millis(10)),
         retry_policy: None,
+        version: None,
         next: None,
     };
 
@@ -504,6 +515,7 @@ async fn test_checkpointing_skipped_tasks_bypass_timeout() {
         func: None,
         timeout: Some(std::time::Duration::from_millis(1)),
         retry_policy: None,
+        version: None,
         next: None,
     };
 
@@ -2131,6 +2143,7 @@ async fn test_async_timeout_mid_chain_fails() {
         )),
         timeout: Some(std::time::Duration::from_millis(5)),
         retry_policy: None,
+        version: None,
         next: None,
     };
     let fast_task = task_node(
@@ -2158,6 +2171,7 @@ async fn test_async_timeout_passes_in_chain() {
         )),
         timeout: Some(std::time::Duration::from_secs(5)),
         retry_policy: None,
+        version: None,
         next: None,
     };
     let first = WorkflowContinuation::Task {
@@ -2169,6 +2183,7 @@ async fn test_async_timeout_passes_in_chain() {
         )),
         timeout: Some(std::time::Duration::from_secs(5)),
         retry_policy: None,
+        version: None,
         next: Some(Box::new(second)),
     };
 
@@ -2195,6 +2210,7 @@ async fn test_checkpointing_timeout_mid_chain() {
         func: None,
         timeout: Some(std::time::Duration::from_millis(10)),
         retry_policy: None,
+        version: None,
         next: None,
     };
     let fast_task = WorkflowContinuation::Task {
@@ -2202,6 +2218,7 @@ async fn test_checkpointing_timeout_mid_chain() {
         func: None,
         timeout: None,
         retry_policy: None,
+        version: None,
         next: Some(Box::new(slow_task)),
     };
 
@@ -2737,6 +2754,7 @@ fn loop_body_task(
         func: Some(to_core_task(id, f, c)),
         timeout: None,
         retry_policy: None,
+        version: None,
         next: None,
     }
 }
@@ -3080,6 +3098,7 @@ async fn test_async_loop_inside_fork_branch() {
         func: Some(join_fn),
         timeout: None,
         retry_policy: None,
+        version: None,
         next: None,
     };
 

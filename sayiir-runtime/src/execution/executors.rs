@@ -298,6 +298,7 @@ fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
                     timeout,
                     retry_policy,
                     next,
+                    ..
                 } => {
                     let output = run_task_with_retry(
                         id,

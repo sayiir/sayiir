@@ -110,6 +110,8 @@ pub enum WorkflowContinuation {
         timeout: Option<std::time::Duration>,
         /// Retry policy for failed task executions.
         retry_policy: Option<RetryPolicy>,
+        /// Schema version string (included in definition hash).
+        version: Option<String>,
         /// Next node in the chain.
         next: Option<Box<WorkflowContinuation>>,
     },
@@ -382,6 +384,13 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Set the schema version on a specific task node found by ID.
+    pub fn set_task_version(&mut self, target_id: &str, ver: Option<String>) {
+        if let Some(WorkflowContinuation::Task { version, .. }) = self.find_task_mut(target_id) {
+            *version = ver;
+        }
+    }
+
     /// Look up the retry policy configured on a specific task by ID.
     #[must_use]
     pub fn get_task_retry_policy(&self, task_id: &str) -> Option<&RetryPolicy> {
@@ -409,12 +418,14 @@ impl WorkflowContinuation {
                 id,
                 timeout,
                 retry_policy,
+                version,
                 next,
                 ..
             } => SerializableContinuation::Task {
                 id: id.clone(),
                 timeout_ms: timeout.map(|d| d.as_millis() as u64),
                 retry_policy: retry_policy.clone(),
+                version: version.clone(),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
             WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
@@ -545,6 +556,9 @@ pub enum SerializableContinuation {
         /// Optional retry policy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_policy: Option<RetryPolicy>,
+        /// Schema version string (included in definition hash).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
         /// Next node in the chain.
         next: Option<Box<SerializableContinuation>>,
     },
@@ -643,6 +657,7 @@ impl SerializableContinuation {
                 id,
                 timeout_ms,
                 retry_policy,
+                version,
                 next,
             } => {
                 let func = registry
@@ -657,6 +672,7 @@ impl SerializableContinuation {
                     func: Some(func),
                     timeout: timeout_ms.map(std::time::Duration::from_millis),
                     retry_policy: retry_policy.clone(),
+                    version: version.clone(),
                     next,
                 })
             }
@@ -834,6 +850,7 @@ impl SerializableContinuation {
                     id,
                     timeout_ms,
                     retry_policy,
+                    version,
                     next,
                 } => {
                     hasher.update(b"T:"); // Tag for Task
@@ -849,6 +866,10 @@ impl SerializableContinuation {
                         hasher.update(rp.initial_delay.as_millis().to_string().as_bytes());
                         hasher.update(b":");
                         hasher.update(rp.backoff_multiplier.to_string().as_bytes());
+                    }
+                    if let Some(v) = version {
+                        hasher.update(b":v:");
+                        hasher.update(v.as_bytes());
                     }
                     hasher.update(b";");
                     if let Some(n) = next {
@@ -1722,10 +1743,12 @@ mod tests {
             id: "step1".to_string(),
             timeout_ms: None,
             retry_policy: None,
+            version: None,
             next: Some(Box::new(SerializableContinuation::Task {
                 id: "step1".to_string(), // Duplicate!
                 timeout_ms: None,
                 retry_policy: None,
+                version: None,
                 next: None,
             })),
         };
@@ -2095,6 +2118,119 @@ mod tests {
             "timeout_ms should be absent when None: {json}"
         );
     }
+
+    #[test]
+    fn test_task_version_changes_definition_hash() {
+        use crate::context::WorkflowContext;
+        use crate::task::TaskMetadata;
+        use crate::workflow::SerializableWorkflow;
+        use std::sync::Arc;
+
+        // Workflow without version
+        let ctx1 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf_no_version: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx1)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        // Workflow with version "1.0"
+        let ctx2 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf_v1: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx2)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                version: Some("1.0".into()),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        // Workflow with version "2.0"
+        let ctx3 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf_v2: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx3)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                version: Some("2.0".into()),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        // Same version produces same hash
+        let ctx4 = WorkflowContext::new("workflow", Arc::new(DummyCodec), Arc::new(()));
+        let wf_v1_again: SerializableWorkflow<_, u32> = WorkflowBuilder::new(ctx4)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                version: Some("1.0".into()),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        assert_ne!(
+            wf_no_version.definition_hash(),
+            wf_v1.definition_hash(),
+            "Adding version should change hash"
+        );
+        assert_ne!(
+            wf_v1.definition_hash(),
+            wf_v2.definition_hash(),
+            "Different versions should produce different hashes"
+        );
+        assert_eq!(
+            wf_v1.definition_hash(),
+            wf_v1_again.definition_hash(),
+            "Same version should produce same hash"
+        );
+    }
+
+    #[test]
+    fn test_version_absent_in_serialization_when_none() {
+        use crate::context::WorkflowContext;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        let serializable = workflow.to_serializable();
+        let json = serde_json::to_string(&serializable.continuation).unwrap();
+        assert!(
+            !json.contains("version"),
+            "version should be absent when None: {json}"
+        );
+    }
+
+    #[test]
+    fn test_version_present_in_serialization_when_set() {
+        use crate::context::WorkflowContext;
+        use crate::task::TaskMetadata;
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step1", |i: u32| async move { Ok(i + 1) })
+            .with_metadata(TaskMetadata {
+                version: Some("3.0".into()),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        let serializable = workflow.to_serializable();
+        let json = serde_json::to_string(&serializable.continuation).unwrap();
+        assert!(
+            json.contains(r#""version":"3.0""#),
+            "version should be present in JSON: {json}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2119,6 +2255,7 @@ mod proptests {
             id,
             timeout_ms: None,
             retry_policy: None,
+            version: None,
             next: None,
         });
 
@@ -2137,6 +2274,7 @@ mod proptests {
                     id,
                     timeout_ms,
                     retry_policy: None,
+                    version: None,
                     next,
                 }),
             // Fork with branches and optional join
@@ -2234,6 +2372,7 @@ mod proptests {
                 id,
                 timeout_ms: None,
                 retry_policy: None,
+                version: None,
                 next: None,
             })
             .boxed();
@@ -2249,6 +2388,7 @@ mod proptests {
                 id: id_clone.clone(),
                 timeout_ms: None,
                 retry_policy: None,
+                version: None,
                 next,
             }),
             // Fork with 0..3 branches (each gets unique prefix) and optional join
@@ -2441,12 +2581,14 @@ mod proptests {
             SerializableContinuation::Task {
                 timeout_ms,
                 retry_policy,
+                version,
                 next,
                 ..
             } => SerializableContinuation::Task {
                 id: dup_id.to_string(),
                 timeout_ms: *timeout_ms,
                 retry_policy: retry_policy.clone(),
+                version: version.clone(),
                 next: next.clone(),
             },
             SerializableContinuation::Fork { branches, join, .. } => {

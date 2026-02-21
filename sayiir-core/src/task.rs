@@ -40,6 +40,10 @@ pub struct TaskMetadata {
     pub retries: Option<RetryPolicy>,
     /// Tags for categorization and filtering.
     pub tags: Vec<String>,
+    /// Schema version string. Included in the definition hash so that
+    /// bumping this value forces a new workflow version, preventing
+    /// in-flight workflows from deserializing stale cached results.
+    pub version: Option<String>,
 }
 
 /// Configuration for retrying failed task executions.

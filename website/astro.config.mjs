@@ -83,7 +83,7 @@ export default defineConfig({
               slug: "guides/postgres-production",
             },
             {
-              label: "Serialization & Versioning",
+              label: "Serialization & Migration",
               slug: "guides/serialization-and-versioning",
             },
           ],

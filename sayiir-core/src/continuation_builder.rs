@@ -90,6 +90,7 @@ fn build_chain(chain: &[(String, TaskMetadata)]) -> Result<Box<WorkflowContinuat
             func: None,
             timeout: metadata.timeout,
             retry_policy: metadata.retries.clone(),
+            version: metadata.version.clone(),
             next: current.map(Box::new),
         });
     }
@@ -292,6 +293,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                 func: None,
                 timeout: metadata.timeout,
                 retry_policy: metadata.retries.clone(),
+                version: metadata.version.clone(),
                 next: current.map(Box::new),
             },
             BuilderTask::Delay {
@@ -336,6 +338,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     func: None,
                     timeout: join_metadata.timeout,
                     retry_policy: join_metadata.retries.clone(),
+                    version: join_metadata.version.clone(),
                     next: current.map(Box::new),
                 };
 
@@ -385,6 +388,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     func: None,
                     timeout: body_metadata.timeout,
                     retry_policy: body_metadata.retries.clone(),
+                    version: body_metadata.version.clone(),
                     next: None,
                 };
                 WorkflowContinuation::Loop {
