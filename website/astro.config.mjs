@@ -8,7 +8,7 @@ export default defineConfig({
   integrations: [
     mermaid(),
     starlight({
-      plugins: [starlightLinksValidator()],
+      plugins: [starlightLinksValidator({ exclude: ["/playground"] })],
       title: "Sayiir",
       logo: {
         src: "./public/favicon.png",
