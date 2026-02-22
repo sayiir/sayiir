@@ -101,7 +101,7 @@ impl From<PyTaskMetadata> for TaskMetadata {
 ///
 /// Provides read-only access to workflow and task metadata.
 /// Retrieve via `get_task_context()`.
-#[pyclass(frozen)]
+#[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyTaskExecutionContext {
     #[pyo3(get)]
