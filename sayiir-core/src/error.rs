@@ -45,8 +45,8 @@ pub enum BuildError {
     #[error("Branch must have at least one step")]
     EmptyBranch,
 
-    /// A fork has no branches and no join task.
-    #[error("Fork has no branches and no join task")]
+    /// A fork has no branches.
+    #[error("Fork must have at least one branch")]
     EmptyFork,
 
     /// One or more declared branch keys have no corresponding `.branch()` call
@@ -228,8 +228,8 @@ pub enum WorkflowError {
         paused_by: Option<String>,
     },
 
-    /// A fork has no branches and no join task.
-    #[error("Fork has no branches and no join task")]
+    /// A fork has no branches.
+    #[error("Fork must have at least one branch")]
     EmptyFork,
 
     /// A task panicked during execution.
