@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sayiir"
-version = "0.1.0"
+version = "0.2.0"
 description = "Durable workflow engine with Rust core and Python bindings — checkpointing, fork/join, distributed workers"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,7 +34,7 @@ Documentation = "https://docs.sayiir.dev"
 Repository = "https://github.com/sayiir/sayiir"
 Issues = "https://github.com/sayiir/sayiir/issues"
 Changelog = "https://github.com/sayiir/sayiir/releases"
-Discord = "https://discord.gg/MWSzsHeg"
+Discord = "https://discord.gg/A2jWBFZsNK"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
