@@ -32,6 +32,7 @@ Core domain types and traits. Runtime-agnostic — no persistence, no execution 
 - `TaskMetadata` — Metadata (timeout, retries, tags, description)
 - `RetryPolicy` — Retry configuration with exponential backoff
 - `WorkflowContext` — Per-execution context (codec, workflow ID, user metadata)
+- `TaskExecutionContext` — Read-only context available to running tasks (workflow ID, instance ID, task ID, metadata)
 - `WorkflowSnapshot` — Checkpoint of in-flight execution state
 - `TaskRegistry` — Name → factory map for task deserialization
 
@@ -796,6 +797,60 @@ let ctx = WorkflowContext::new(
     Arc::new(()),  // User metadata (can be any type)
 );
 ```
+
+## Task Execution Context
+
+### TaskExecutionContext
+
+Read-only context available from within a running task. Provides access to the workflow ID, instance ID, task ID, and task metadata. Set automatically by the runtime before each task executes.
+
+```rust
+use sayiir_core::context::TaskExecutionContext;
+
+// Access via the task_context! macro (works in both async and sync contexts)
+if let Some(ctx) = task_context!() {
+    println!("Workflow: {}", ctx.workflow_id);
+    println!("Instance: {}", ctx.instance_id);
+    println!("Task: {}", ctx.task_id);
+    if let Some(timeout) = ctx.metadata.timeout {
+        println!("Timeout: {:?}", timeout);
+    }
+}
+```
+
+**Fields:**
+
+- `workflow_id` (Arc\<str\>) — The workflow definition identifier
+- `instance_id` (Arc\<str\>) — The workflow instance identifier (durable) or workflow ID (in-memory)
+- `task_id` (Arc\<str\>) — The current task identifier
+- `metadata` (TaskMetadata) — Task metadata (timeout, retry policy, version, tags, etc.)
+- `workflow_metadata_json` (Option\<Arc\<str\>\>) — Optional JSON-encoded workflow-level metadata
+
+### task_context!()
+
+Macro to access the task execution context from within a running task. Returns `Option<TaskExecutionContext>`.
+
+Tries tokio task-local storage first (async executor paths), then falls back to thread-local storage (sync paths used by Python GIL and Node.js main thread).
+
+```rust
+use sayiir_runtime::task_context;
+
+#[task(id = "process")]
+async fn process(input: Data) -> Result<Output, BoxError> {
+    let ctx = task_context!();
+    if let Some(ctx) = ctx {
+        tracing::info!(
+            workflow = %ctx.workflow_id,
+            instance = %ctx.instance_id,
+            task = %ctx.task_id,
+            "Processing"
+        );
+    }
+    Ok(do_process(input))
+}
+```
+
+The `task_context!` macro is re-exported from `sayiir_runtime` (included in the prelude).
 
 ## Error Types
 

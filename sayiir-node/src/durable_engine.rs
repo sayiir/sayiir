@@ -9,8 +9,9 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
+use sayiir_core::context::{TaskExecutionContext, with_thread_local_task_context};
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_core::workflow::{FlatWorkflowStatus, WorkflowStatus};
+use sayiir_core::workflow::{FlatWorkflowStatus, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
     ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
@@ -132,8 +133,6 @@ impl NapiDurableEngine {
             "starting durable workflow execution"
         );
 
-        let executor = make_task_executor(&env, &task_registry)?;
-
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             self.runtime
@@ -146,6 +145,22 @@ impl NapiDurableEngine {
                         backend.as_ref(),
                     )
                     .await?;
+
+                    let wf_metadata_json: Option<Arc<str>> =
+                        workflow.metadata_json.as_deref().map(Arc::from);
+                    let executor = make_task_executor(
+                        &env,
+                        &task_registry,
+                        &workflow.workflow_id,
+                        &snapshot.instance_id,
+                        &continuation,
+                        wf_metadata_json,
+                    )
+                    .map_err(|e| {
+                        sayiir_runtime::RuntimeError::from(sayiir_core::error::BoxError::from(
+                            e.to_string(),
+                        ))
+                    })?;
 
                     let result = execute_continuation_with_checkpointing(
                         &continuation,
@@ -185,8 +200,6 @@ impl NapiDurableEngine {
             "resuming workflow from checkpoint"
         );
 
-        let executor = make_task_executor(&env, &task_registry)?;
-
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             self.runtime.block_on(async {
@@ -213,6 +226,20 @@ impl NapiDurableEngine {
                         mut snapshot,
                         input_bytes,
                     } => {
+                        let wf_metadata_json: Option<Arc<str>> =
+                            workflow.metadata_json.as_deref().map(Arc::from);
+                        let executor = make_task_executor(
+                            &env,
+                            &task_registry,
+                            &workflow.workflow_id,
+                            &snapshot.instance_id,
+                            &continuation,
+                            wf_metadata_json,
+                        )
+                        .map_err(|e| sayiir_runtime::RuntimeError::from(
+                            sayiir_core::error::BoxError::from(e.to_string()),
+                        ))?;
+
                         let result = execute_continuation_with_checkpointing(
                             &continuation,
                             input_bytes,
@@ -333,10 +360,15 @@ unsafe impl Sync for SendObjectRef {}
 /// the Send+Sync bounds.
 ///
 /// We use `ObjectRef` to hold the task registry across async boundaries.
+/// Sets `TaskExecutionContext` via thread-local before calling the JS task.
 #[allow(clippy::type_complexity)]
-fn make_task_executor(
+fn make_task_executor<'a>(
     env: &Env,
     task_registry: &Object,
+    workflow_id: &str,
+    instance_id: &str,
+    continuation: &'a WorkflowContinuation,
+    workflow_metadata_json: Option<Arc<str>>,
 ) -> Result<
     impl Fn(
         &str,
@@ -348,7 +380,8 @@ fn make_task_executor(
                 > + Send,
         >,
     > + Send
-    + Sync,
+    + Sync
+    + 'a,
 > {
     let send_env = Arc::new(SendEnv(env.raw()));
     let registry_ref = task_registry.create_ref().map_err(|e| {
@@ -358,6 +391,8 @@ fn make_task_executor(
         )
     })?;
     let registry_ref = Arc::new(SendObjectRef(registry_ref));
+    let wf_id: Arc<str> = Arc::from(workflow_id);
+    let inst_id: Arc<str> = Arc::from(instance_id);
 
     Ok(
         move |task_id: &str,
@@ -369,7 +404,14 @@ fn make_task_executor(
                     > + Send,
             >,
         > {
-            let task_id = task_id.to_string();
+            let task_id_owned = task_id.to_string();
+            let task_ctx = TaskExecutionContext {
+                workflow_id: Arc::clone(&wf_id),
+                instance_id: Arc::clone(&inst_id),
+                task_id: Arc::from(task_id),
+                metadata: continuation.build_task_metadata(task_id),
+                workflow_metadata_json: workflow_metadata_json.clone(),
+            };
             let registry_ref = Arc::clone(&registry_ref);
             let send_env = Arc::clone(&send_env);
 
@@ -383,8 +425,10 @@ fn make_task_executor(
                     },
                 )?;
 
-                crate::engine::execute_js_task(&env, &task_id, &task_input, &registry)
-                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
+                with_thread_local_task_context(task_ctx, || {
+                    crate::engine::execute_js_task(&env, &task_id_owned, &task_input, &registry)
+                        .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
+                })
             })
         },
     )

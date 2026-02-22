@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 use std::time::Duration;
 
+use sayiir_core::context::TaskExecutionContext;
 use sayiir_core::task::{RetryPolicy, TaskMetadata};
 
 /// Python-exposed retry policy.
@@ -94,4 +95,82 @@ impl From<PyTaskMetadata> for TaskMetadata {
             version: py.version,
         }
     }
+}
+
+/// Task execution context available from within a running task.
+///
+/// Provides read-only access to workflow and task metadata.
+/// Retrieve via `get_task_context()`.
+#[pyclass(frozen)]
+#[derive(Clone)]
+pub struct PyTaskExecutionContext {
+    #[pyo3(get)]
+    pub workflow_id: String,
+    #[pyo3(get)]
+    pub instance_id: String,
+    #[pyo3(get)]
+    pub task_id: String,
+    #[pyo3(get)]
+    pub metadata: PyTaskMetadata,
+    /// Raw JSON string for workflow metadata (deserialized lazily in the getter).
+    workflow_metadata_json: Option<String>,
+}
+
+#[pymethods]
+impl PyTaskExecutionContext {
+    #[getter]
+    fn workflow_metadata(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.workflow_metadata_json {
+            None => Ok(None),
+            Some(json) => {
+                let json_mod = py.import("json")?;
+                let val = json_mod.call_method1("loads", (json.as_str(),))?;
+                Ok(Some(val.unbind()))
+            }
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TaskExecutionContext(workflow_id='{}', instance_id='{}', task_id='{}')",
+            self.workflow_id, self.instance_id, self.task_id
+        )
+    }
+}
+
+impl From<TaskExecutionContext> for PyTaskExecutionContext {
+    fn from(ctx: TaskExecutionContext) -> Self {
+        Self {
+            workflow_id: ctx.workflow_id.to_string(),
+            instance_id: ctx.instance_id.to_string(),
+            task_id: ctx.task_id.to_string(),
+            metadata: PyTaskMetadata {
+                display_name: ctx.metadata.display_name,
+                description: ctx.metadata.description,
+                timeout_secs: ctx.metadata.timeout.map(|d| d.as_secs_f64()),
+                retries: ctx.metadata.retries.map(|r| PyRetryPolicy {
+                    max_retries: r.max_retries,
+                    initial_delay_secs: r.initial_delay.as_secs_f64(),
+                    backoff_multiplier: f64::from(r.backoff_multiplier),
+                }),
+                tags: Some(ctx.metadata.tags),
+                version: ctx.metadata.version,
+            },
+            workflow_metadata_json: ctx.workflow_metadata_json.map(|s| s.to_string()),
+        }
+    }
+}
+
+/// Get the current task execution context.
+///
+/// Returns `None` if called outside of a task execution.
+///
+/// ```python
+/// ctx = get_task_context()
+/// if ctx is not None:
+///     print(f"Running task {ctx.task_id} in workflow {ctx.workflow_id}")
+/// ```
+#[pyfunction]
+pub fn get_task_context() -> Option<PyTaskExecutionContext> {
+    sayiir_core::context::get_task_context().map(Into::into)
 }

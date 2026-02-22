@@ -48,6 +48,73 @@ The `task()` function attaches metadata to the function without wrapping it. The
 
 **Returns:** `TaskFn<TIn, TOut>` — A branded function with metadata properties.
 
+## Task Execution Context
+
+### getTaskContext()
+
+Get the current task execution context from within a running task. Returns `null` if called outside of a task execution.
+
+```typescript
+import { task, getTaskContext } from "sayiir";
+
+const myTask = task("my-task", (data: { value: number }) => {
+  const ctx = getTaskContext();
+  if (ctx) {
+    console.log(`Running task ${ctx.taskId} in workflow ${ctx.workflowId}`);
+    console.log(`Instance: ${ctx.instanceId}`);
+  }
+  return { result: data.value * 2 };
+});
+```
+
+**Returns:** `TaskExecutionContext | null`
+
+### TaskExecutionContext
+
+Read-only context available from within a running task. Provides access to workflow and task metadata.
+
+```typescript
+interface TaskExecutionContext {
+  workflowId: string;
+  instanceId: string;
+  taskId: string;
+  metadata: TaskMetadata;
+  workflowMetadata?: Record<string, unknown> | null;
+}
+
+interface TaskMetadata {
+  displayName?: string;
+  description?: string;
+  timeoutSecs?: number;
+  retries?: {
+    maxRetries: number;
+    initialDelaySecs: number;
+    backoffMultiplier: number;
+    maxDelaySecs?: number;
+  };
+  tags?: string[];
+  version?: string;
+}
+```
+
+**Properties:**
+
+- `workflowId` (string) — The workflow definition identifier
+- `instanceId` (string) — The workflow instance identifier (for durable workflows) or workflow ID (for in-memory runs)
+- `taskId` (string) — The current task identifier
+- `metadata` (TaskMetadata) — Task metadata (timeout, retries, tags, version, etc.)
+
+```typescript
+const fetchData = task("fetch-data", async (url: string) => {
+  const ctx = getTaskContext();
+  if (ctx) {
+    console.log(`Timeout: ${ctx.metadata.timeoutSecs}s`);
+    console.log(`Tags: ${ctx.metadata.tags}`);
+  }
+  return doFetch(url);
+}, { timeout: "30s", retries: 3, tags: ["io"] });
+```
+
 ## Flow Builder
 
 ### flow\<TInput\>(name)

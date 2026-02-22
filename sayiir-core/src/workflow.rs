@@ -409,6 +409,30 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Build a [`TaskMetadata`](crate::task::TaskMetadata) from the fields
+    /// available on the continuation node for the given task.
+    ///
+    /// Only `timeout`, `retries`, and `version` are populated — display name,
+    /// description, and tags are left as defaults since they are not stored in
+    /// the continuation tree.
+    #[must_use]
+    pub fn build_task_metadata(&self, task_id: &str) -> crate::task::TaskMetadata {
+        match self.find_task(task_id) {
+            Some(WorkflowContinuation::Task {
+                timeout,
+                retry_policy,
+                version,
+                ..
+            }) => crate::task::TaskMetadata {
+                timeout: *timeout,
+                retries: retry_policy.clone(),
+                version: version.clone(),
+                ..Default::default()
+            },
+            _ => crate::task::TaskMetadata::default(),
+        }
+    }
+
     /// Convert to a serializable representation (strips out task implementations).
     #[must_use]
     pub fn to_serializable(&self) -> SerializableContinuation {

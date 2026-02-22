@@ -8,8 +8,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
+use sayiir_core::context::{TaskExecutionContext, with_thread_local_task_context};
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_core::workflow::WorkflowStatus;
+use sayiir_core::workflow::{WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_runtime::{
     ResumeOutcome, execute_continuation_with_checkpointing, finalize_execution, prepare_resume,
@@ -99,6 +100,9 @@ impl PyDurableEngine {
             "starting durable workflow execution"
         );
 
+        let workflow_id = workflow.workflow_id.clone();
+        let workflow_metadata_json: Option<Arc<str>> =
+            workflow.metadata_json.as_deref().map(Arc::from);
         let (status, output_bytes) = with_backend!(self, |backend| {
             let backend = Arc::clone(backend);
             py.detach(|| {
@@ -112,7 +116,14 @@ impl PyDurableEngine {
                     )
                     .await?;
 
-                    let executor = make_task_executor(&registry);
+                    let snap_instance_id = snapshot.instance_id.clone();
+                    let executor = make_task_executor(
+                        &registry,
+                        &workflow_id,
+                        &snap_instance_id,
+                        &continuation,
+                        workflow_metadata_json.clone(),
+                    );
                     let result = execute_continuation_with_checkpointing(
                         &continuation,
                         input_bytes,
@@ -152,6 +163,9 @@ impl PyDurableEngine {
     ) -> PyResult<PyWorkflowStatus> {
         let continuation = Arc::clone(&workflow.continuation);
         let definition_hash = workflow.definition_hash.clone();
+        let workflow_id = workflow.workflow_id.clone();
+        let workflow_metadata_json: Option<Arc<str>> =
+            workflow.metadata_json.as_deref().map(Arc::from);
         let registry = Arc::new(task_registry);
 
         tracing::info!(
@@ -187,7 +201,14 @@ impl PyDurableEngine {
                             mut snapshot,
                             input_bytes,
                         } => {
-                            let executor = make_task_executor(&registry);
+                            let snap_instance_id = snapshot.instance_id.clone();
+                            let executor = make_task_executor(
+                                &registry,
+                                &workflow_id,
+                                &snap_instance_id,
+                                &continuation,
+                                workflow_metadata_json.clone(),
+                            );
                             let result = execute_continuation_with_checkpointing(
                                 &continuation,
                                 input_bytes,
@@ -314,9 +335,14 @@ fn backend_err_to_py(e: sayiir_persistence::BackendError) -> PyErr {
 /// Build the task executor callback for `execute_continuation_with_checkpointing`.
 ///
 /// Returns a closure that acquires the GIL and delegates to `execute_python_task`.
+/// Sets `TaskExecutionContext` via thread-local before calling the Python task.
 #[allow(clippy::type_complexity)]
-fn make_task_executor(
-    registry: &Arc<Py<PyDict>>,
+fn make_task_executor<'a>(
+    registry: &'a Arc<Py<PyDict>>,
+    workflow_id: &'a str,
+    instance_id: &'a str,
+    continuation: &'a WorkflowContinuation,
+    workflow_metadata_json: Option<Arc<str>>,
 ) -> impl Fn(
     &str,
     Bytes,
@@ -324,14 +350,23 @@ fn make_task_executor(
     Box<dyn std::future::Future<Output = Result<Bytes, sayiir_core::error::BoxError>> + Send>,
 > + Send
 + Sync
-+ '_ {
++ 'a {
     move |task_id: &str, task_input: Bytes| {
         let reg = Arc::clone(registry);
-        let task_id = task_id.to_string();
+        let task_id_owned = task_id.to_string();
+        let task_ctx = TaskExecutionContext {
+            workflow_id: Arc::from(workflow_id),
+            instance_id: Arc::from(instance_id),
+            task_id: Arc::from(task_id),
+            metadata: continuation.build_task_metadata(task_id),
+            workflow_metadata_json: workflow_metadata_json.clone(),
+        };
         Box::pin(async move {
             Python::try_attach(|py| {
-                execute_python_task(py, &task_id, &task_input, reg.bind(py))
-                    .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
+                with_thread_local_task_context(task_ctx, || {
+                    execute_python_task(py, &task_id_owned, &task_input, reg.bind(py))
+                        .map_err(|e| -> sayiir_core::error::BoxError { e.to_string().into() })
+                })
             })
             .unwrap_or_else(|| Err("Failed to acquire Python GIL".into()))
         })

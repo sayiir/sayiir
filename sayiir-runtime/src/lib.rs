@@ -55,7 +55,7 @@
 //! - [`sayiir_core`] — via `sayiir_runtime::persistence` (through `sayiir_persistence`)
 //! - [`sayiir_persistence`] — as [`persistence`]
 //! - [`task`] and [`workflow!`] — from `sayiir-macros`
-//! - [`sayiir_ctx!`] — context macro from `sayiir-core`
+//! - [`task_context!`] — context macro from `sayiir-core`
 //!
 //! For the full README with architecture diagrams and detailed configuration,
 //! see the [crate README](https://crates.io/crates/sayiir-runtime).
@@ -89,7 +89,7 @@ pub use worker::{
 };
 
 pub use sayiir_core::branch_key::BranchKey;
-pub use sayiir_core::sayiir_ctx;
+pub use sayiir_core::task_context;
 #[cfg(feature = "macros")]
 pub use sayiir_macros::{BranchKey, task, workflow};
 pub use sayiir_persistence as persistence;

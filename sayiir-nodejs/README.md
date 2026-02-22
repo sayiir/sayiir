@@ -158,6 +158,53 @@ const workflow = flow<{ id: number }>("checkout")
 const result = await runWorkflow(workflow, { id: 1 });
 ```
 
+### Loops
+
+Repeat a task until it signals completion with `LoopResult.done()`.
+
+```typescript
+import { task, flow, LoopResult, runWorkflow } from "sayiir";
+
+const refine = task("refine", (draft: string) => {
+  const improved = improve(draft);
+  return isGoodEnough(improved)
+    ? LoopResult.done(improved)
+    : LoopResult.again(improved);
+});
+
+const workflow = flow<string>("iterative")
+  .then(initialDraft)
+  .loop(refine, { maxIterations: 5 })
+  .then(publish)
+  .build();
+
+const result = await runWorkflow(workflow, "rough draft");
+```
+
+The body task returns `LoopResult.again(value)` to continue iterating or `LoopResult.done(value)` to exit. When `maxIterations` is reached, the default behavior is to fail; pass `onMax: "exit_with_last"` to exit with the last value instead.
+
+### Task execution context
+
+Access workflow and task metadata from within a running task using `getTaskContext()`.
+
+```typescript
+import { task, getTaskContext } from "sayiir";
+
+const fetchData = task("fetch-data", async (url: string) => {
+  const ctx = getTaskContext();
+  if (ctx) {
+    console.log(`Running task ${ctx.taskId} in workflow ${ctx.workflowId}`);
+    console.log(`Instance: ${ctx.instanceId}`);
+    console.log(`Timeout: ${ctx.metadata.timeoutSecs}s`);
+    console.log(`Tags: ${ctx.metadata.tags}`);
+    console.log(`Workflow metadata:`, ctx.workflowMetadata);
+  }
+  return doFetch(url);
+}, { timeout: "30s", tags: ["io"] });
+```
+
+`getTaskContext()` returns a `TaskExecutionContext` with `workflowId`, `instanceId`, `taskId`, `metadata` (timeout, retries, tags, version, etc.), and `workflowMetadata` (the object passed via `flow("name", { metadata: {...} })`), or `null` if called outside of a task execution.
+
 ### Delays and signals
 
 ```typescript
@@ -254,10 +301,15 @@ const processPayment = task("process-payment", (order) => {
 
 - **`task(id, fn, opts?)`** — Create a named task. Optional: `timeout`, `retries`, `retry`, `tags`, `description`, `input`/`output` (Zod schemas).
 
+### Task Context
+
+- **`getTaskContext()`** — Returns a `TaskExecutionContext` with `workflowId`, `instanceId`, `taskId`, `metadata`, and `workflowMetadata`, or `null` outside of task execution.
+
 ### Flow Builder
 
 - **`flow<TInput>(name)`** — Create a new type-safe flow builder.
 - **`.then(fn)`** / **`.then(id, fn, opts?)`** — Append a task step. Accepts `task()` functions, plain functions, or lambdas.
+- **`.loop(fn, opts?)`** / **`.loop(id, fn, opts?)`** — Add a loop. Body returns `LoopResult.again(value)` or `LoopResult.done(value)`. Options: `maxIterations` (default: 10), `onMax` (`"fail"` | `"exit_with_last"`).
 - **`.fork(branches)`** — Start parallel branches. Takes an array of `branch()` definitions.
 - **`.join(id, fn)`** — Merge branches with a combining function.
 - **`.delay(id, duration)`** — Durable delay (`"30s"`, `"5m"`, `"1h"`, or milliseconds).
@@ -293,6 +345,11 @@ if (status.status === "completed") {
 
 Variants: `completed`, `in_progress`, `failed`, `cancelled`, `paused`, `waiting`, `awaiting_signal`.
 
+### Loop Control
+
+- **`LoopResult.again(value)`** — Continue iterating with a new value.
+- **`LoopResult.done(value)`** — Exit the loop with a final value.
+
 ### Backends
 
 - **`new InMemoryBackend()`** — In-memory storage for development and testing.
@@ -300,15 +357,12 @@ Variants: `completed`, `in_progress`, `failed`, `cancelled`, `paused`, `waiting`
 
 ## Architecture
 
-```
-Your TypeScript code       Sayiir (Rust)              Storage
-┌──────────────┐    ┌─────────────────────┐    ┌──────────────┐
-│  task()       │───>│  Orchestration      │───>│  Checkpoint  │
-│  functions   │    │  Checkpointing      │    │  after each  │
-│              │<───│  Crash recovery     │<───│  task        │
-└──────────────┘    │  Fork/join/branch   │    └──────────────┘
-                    │  Serialization      │
-                    └─────────────────────┘
+```mermaid
+graph LR
+    A["Your TypeScript code<br/><b>task()</b> functions"] -->|input| B["Sayiir · Rust<br/>Orchestration<br/>Checkpointing<br/>Crash recovery<br/>Fork/join/branch<br/>Loops &amp; routing<br/>Serialization"]
+    B -->|checkpoint<br/>after each task| C["Storage"]
+    C -->|resume| B
+    B -->|output| A
 ```
 
 TypeScript provides task implementations. Rust handles everything else: building the execution graph, running tasks in order, checkpointing results, recovering from crashes, and managing parallel branches.

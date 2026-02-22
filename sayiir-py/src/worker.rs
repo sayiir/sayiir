@@ -82,6 +82,8 @@ impl PyWorker {
                 wf.definition_hash.clone(),
                 ExternalWorkflow {
                     continuation: Arc::clone(&wf.continuation),
+                    workflow_id: Arc::from(wf.workflow_id.as_str()),
+                    metadata_json: wf.metadata_json.as_deref().map(Arc::from),
                 },
             );
             registries.push((wf.definition_hash.clone(), Arc::new(reg.clone_ref(py))));
@@ -109,9 +111,8 @@ impl PyWorker {
             })
         });
 
-        // Spawn a dedicated thread with a current-thread tokio runtime.
-        // The runtime drives the actor loop (polling + heartbeats) without
-        // holding the GIL. We get back a WorkerHandle for lifecycle control.
+        // Spawn a dedicated thread with a current-thread tokio runtime that
+        // drives the actor loop (polling + heartbeats) without holding the GIL.
         let postgres_url = self.postgres_url.clone();
         let in_memory_backend = match &self.backend_kind {
             BackendKind::InMemory(b) => Some(Arc::clone(b)),
@@ -139,8 +140,7 @@ impl PyWorker {
                     }
                 };
 
-                // Create a fresh backend on the worker's own runtime to avoid
-                // cross-runtime PgPool affinity issues.
+                // Create a fresh backend on worker's runtime (PgPool affinity).
                 let backend_kind = match postgres_url {
                     Some(url) => {
                         match runtime.block_on(PostgresBackend::<JsonCodec>::connect(&url)) {
@@ -151,12 +151,9 @@ impl PyWorker {
                             }
                         }
                     }
-                    None => {
-                        // InMemory backend — no pool affinity issue, reuse the shared Arc.
-                        BackendKind::InMemory(
-                            in_memory_backend.expect("InMemory backend must be set"),
-                        )
-                    }
+                    None => BackendKind::InMemory(
+                        in_memory_backend.expect("InMemory backend must be set"),
+                    ),
                 };
 
                 let worker = PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
@@ -167,12 +164,11 @@ impl PyWorker {
                 let rt_handle = runtime.handle().clone();
                 let handle =
                     worker.spawn_with_executor(poll_interval, external_workflows, executor);
-                let join_handle = handle.clone();
-                let _ = handle_tx.send(Ok((handle, rt_handle)));
+                let _ = handle_tx.send(Ok((handle.clone(), rt_handle)));
 
                 // Drive the runtime until the worker shuts down.
                 runtime.block_on(async {
-                    let _ = join_handle.join().await;
+                    let _ = handle.join().await;
                 });
             })
             .map_err(|e| {

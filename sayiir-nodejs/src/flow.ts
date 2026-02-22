@@ -6,7 +6,7 @@
  *
  * ```ts
  * const wf = flow<number>("welcome")
- *   .then("fetch", (id) => getUser(id))       // id: number -> User
+ *   .then("load", (id) => getUser(id))         // id: number -> User
  *   .then("greet", (user) => `Hi ${user.name}`) // user: User -> string
  *   .build();                                    // Workflow<number, string>
  * ```

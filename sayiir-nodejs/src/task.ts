@@ -8,7 +8,12 @@
 
 import type { RetryPolicy, TaskOptions, ZodLike } from "./types.js";
 import { parseDuration } from "./duration.js";
-import type { NapiRetryPolicy, NapiTaskMetadata } from "./native.js";
+import type {
+  NapiRetryPolicy,
+  NapiTaskExecutionContext,
+  NapiTaskMetadata,
+} from "./native.js";
+import { getNative } from "./native.js";
 
 /** Branded type for a registered task function. */
 export interface TaskFn<TIn, TOut> {
@@ -24,7 +29,7 @@ export interface TaskFn<TIn, TOut> {
  * Define a named task with optional configuration.
  *
  * ```ts
- * const fetchUser = task("fetch-user", async (id: number) => {
+ * const getUser = task("get-user", async (id: number) => {
  *   return await db.getUser(id);
  * }, { timeout: "30s", retries: 3 });
  * ```
@@ -110,4 +115,23 @@ function wrapWithValidation<TIn, TOut>(
     }
     return outputSchema.parse(result);
   };
+}
+
+/** Task execution context available from within a running task. */
+export type TaskExecutionContext = NapiTaskExecutionContext;
+
+/**
+ * Get the current task execution context.
+ *
+ * Returns `null` if called outside of a task execution.
+ *
+ * ```ts
+ * const ctx = getTaskContext();
+ * if (ctx) {
+ *   console.log(`Running task ${ctx.taskId} in workflow ${ctx.workflowId}`);
+ * }
+ * ```
+ */
+export function getTaskContext(): TaskExecutionContext | null {
+  return getNative().getTaskContext();
 }

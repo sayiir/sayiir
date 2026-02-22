@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/sayiir/sayiir/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
+[![Socket Badge](https://badge.socket.dev/pypi/package/sayiir)](https://badge.socket.dev/pypi/package/sayiir)
 
 Write plain Python functions. Sayiir makes them durable — automatic checkpointing, crash recovery, and parallel execution with zero infrastructure.
 
@@ -182,6 +183,53 @@ workflow = (
 )
 ```
 
+### Loops
+
+Repeat a task until it signals completion with `LoopResult.done()`.
+
+```python
+from sayiir import task, Flow, LoopResult, run_workflow
+
+@task
+def refine(draft: str) -> dict:
+    improved = improve(draft)
+    if is_good_enough(improved):
+        return LoopResult.done(improved).to_dict()
+    return LoopResult.again(improved).to_dict()
+
+workflow = (
+    Flow("iterative")
+    .then(initial_draft)
+    .loop(refine, max_iterations=5)
+    .then(publish)
+    .build()
+)
+result = run_workflow(workflow, "rough draft")
+```
+
+The body task returns `LoopResult.again(value)` to continue iterating or `LoopResult.done(value)` to exit. When `max_iterations` is reached, the default behavior is to fail; pass `on_max="exit_with_last"` to exit with the last value instead.
+
+### Task execution context
+
+Access workflow and task metadata from within a running task using `get_task_context()`.
+
+```python
+from sayiir import task, get_task_context
+
+@task(timeout="30s", tags=["io"])
+def fetch_data(url: str) -> dict:
+    ctx = get_task_context()
+    if ctx is not None:
+        print(f"Running task {ctx.task_id} in workflow {ctx.workflow_id}")
+        print(f"Instance: {ctx.instance_id}")
+        print(f"Timeout: {ctx.metadata.timeout_secs}s")
+        print(f"Tags: {ctx.metadata.tags}")
+        print(f"Workflow metadata: {ctx.workflow_metadata}")
+    return do_fetch(url)
+```
+
+`get_task_context()` returns a `TaskExecutionContext` with `workflow_id`, `instance_id`, `task_id`, `metadata` (timeout, retries, tags, version, etc.), and `workflow_metadata` (the dict passed via `Flow("name", metadata={...})`), or `None` if called outside of a task execution.
+
 ### Pydantic integration
 
 ```python
@@ -265,14 +313,21 @@ def process_payment(order: dict) -> dict:
 
 - **`Flow(name)`** — Create a new workflow builder.
 - **`.then(task_fn, *, name=None)`** — Append a task to the workflow. Accepts `@task`-decorated functions, plain functions, or lambdas. Use `name` to set an explicit task ID.
+- **`.loop(task_fn, *, max_iterations=10, on_max="fail", name=None)`** — Add a loop. Body returns `LoopResult.again(value)` or `LoopResult.done(value)`.
 - **`.fork()`** — Start parallel branches. Returns a `ForkBuilder`.
 - **`.branch(task_fn, ...)`** — Add a branch (one or more chained tasks).
 - **`.join(task_fn)`** — Merge parallel branches. Join function receives `dict[str, value]`.
+- **`.delay(name, duration)`** — Add a durable delay (`"30s"`, `"5m"`, `"1h"`, seconds, or `timedelta`).
+- **`.wait_for_signal(signal_name, *, timeout=None)`** — Wait for an external signal.
 - **`.route(key_fn, *, keys=["a", "b"])`** — Start conditional branching. Returns a `BranchBuilder`.
 - **`BranchBuilder.branch(key, *tasks)`** — Add a named branch for a routing key.
 - **`BranchBuilder.default_branch(*tasks)`** — Set the fallback branch for unmatched keys.
 - **`BranchBuilder.done()`** — Finish branching and return to the `Flow` builder.
 - **`.build()`** — Finalize and return a `Workflow`.
+
+### Task Context
+
+- **`get_task_context()`** — Returns a `TaskExecutionContext` with `workflow_id`, `instance_id`, `task_id`, `metadata`, and `workflow_metadata`, or `None` outside of task execution.
 
 ### Execution
 
@@ -282,6 +337,7 @@ def process_payment(order: dict) -> dict:
 - **`cancel_workflow(instance_id, backend, reason=None, cancelled_by=None)`** — Cancel a running workflow.
 - **`pause_workflow(instance_id, backend, reason=None, paused_by=None)`** — Pause a running workflow.
 - **`unpause_workflow(instance_id, backend)`** — Unpause a paused workflow.
+- **`send_signal(instance_id, signal_name, payload, backend)`** — Send an external signal.
 
 ### WorkflowStatus
 
@@ -295,6 +351,12 @@ def process_payment(order: dict) -> dict:
 
 - **`RetryPolicy(max_retries=2, initial_delay_secs=1.0, backoff_multiplier=2.0)`** — Exponential backoff retry policy for tasks.
 
+### Loop Control
+
+- **`LoopResult.again(value)`** — Continue iterating with a new value.
+- **`LoopResult.done(value)`** — Exit the loop with a final value.
+- **`OnMax.FAIL`** / **`OnMax.EXIT_WITH_LAST`** — Policy when max iterations is reached.
+
 ### Backends
 
 - **`InMemoryBackend()`** — In-memory storage for development and testing (default).
@@ -302,15 +364,12 @@ def process_payment(order: dict) -> dict:
 
 ## Architecture
 
-```
-Your Python code          Sayiir (Rust)              Storage
-┌──────────────┐    ┌─────────────────────┐    ┌──────────────┐
-│  @task       │───>│  Orchestration      │───>│  Checkpoint  │
-│  functions   │    │  Checkpointing      │    │  after each  │
-│              │<───│  Crash recovery     │<───│  task        │
-└──────────────┘    │  Fork/join/branch   │    └──────────────┘
-                    │  Serialization      │
-                    └─────────────────────┘
+```mermaid
+graph LR
+    A["Your Python code<br/><b>@task</b> functions"] -->|input| B["Sayiir · Rust<br/>Orchestration<br/>Checkpointing<br/>Crash recovery<br/>Fork/join/branch<br/>Loops &amp; routing<br/>Serialization"]
+    B -->|checkpoint<br/>after each task| C["Storage"]
+    C -->|resume| B
+    B -->|output| A
 ```
 
 Python provides task implementations. Rust handles everything else: building the execution graph, running tasks in order, checkpointing results, recovering from crashes, and managing parallel branches.

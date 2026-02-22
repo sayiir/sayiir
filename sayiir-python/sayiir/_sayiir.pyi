@@ -200,6 +200,21 @@ class PyWorkerHandle:
     ) -> None: ...
     def __repr__(self) -> str: ...
 
+class PyTaskExecutionContext:
+    """Task execution context available from within a running task."""
+
+    workflow_id: str
+    instance_id: str
+    task_id: str
+    metadata: PyTaskMetadata
+    workflow_metadata: dict[str, Any] | None
+
+    def __repr__(self) -> str: ...
+
+def get_task_context() -> PyTaskExecutionContext | None:
+    """Get the current task execution context. Returns None outside of a task."""
+    ...
+
 # Exception hierarchy
 class WorkflowError(RuntimeError):
     """Base exception for Sayiir workflow errors."""

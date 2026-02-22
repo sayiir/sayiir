@@ -16,7 +16,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use sayiir_core::codec::sealed;
 use sayiir_core::codec::{Codec, EnvelopeCodec};
-use sayiir_core::context::{WorkflowContext, with_context};
+use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
@@ -213,21 +213,17 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        with_context(context.clone(), || async move {
-            let result = Self::execute_with_checkpointing(
-                continuation,
-                input_bytes,
-                &mut snapshot,
-                Arc::clone(&backend),
-                context,
-            )
-            .await;
+        let result = Self::execute_with_checkpointing(
+            continuation,
+            input_bytes,
+            &mut snapshot,
+            Arc::clone(&backend),
+            context,
+        )
+        .await;
 
-            let (status, _output) =
-                finalize_execution(result, &mut snapshot, backend.as_ref()).await?;
-            Ok(status)
-        })
-        .await
+        let (status, _output) = finalize_execution(result, &mut snapshot, backend.as_ref()).await?;
+        Ok(status)
     }
 
     /// Resume a workflow from a saved snapshot.
@@ -287,24 +283,20 @@ where
         let continuation = workflow.continuation();
         let backend = Arc::clone(&self.backend);
 
-        with_context(context.clone(), || async move {
-            // Get the last completed task's output or initial input
-            let input_bytes = get_resume_input(&snapshot)?;
+        // Get the last completed task's output or initial input
+        let input_bytes = get_resume_input(&snapshot)?;
 
-            let result = Self::execute_with_checkpointing(
-                continuation,
-                input_bytes,
-                &mut snapshot,
-                Arc::clone(&backend),
-                context,
-            )
-            .await;
+        let result = Self::execute_with_checkpointing(
+            continuation,
+            input_bytes,
+            &mut snapshot,
+            Arc::clone(&backend),
+            context,
+        )
+        .await;
 
-            let (status, _output) =
-                finalize_execution(result, &mut snapshot, backend.as_ref()).await?;
-            Ok(status)
-        })
-        .await
+        let (status, _output) = finalize_execution(result, &mut snapshot, backend.as_ref()).await?;
+        Ok(status)
     }
 
     /// Execute continuation with checkpointing after each task (iterative, no boxing).
@@ -629,7 +621,7 @@ where
                 let branch_instance_id = instance_id.clone();
                 let ctx_for_work = context.clone();
 
-                set.spawn(with_context(context.clone(), || async move {
+                set.spawn(async move {
                     let result = Self::execute_branch_with_checkpoint(
                         &branch,
                         branch_input,
@@ -639,7 +631,7 @@ where
                     )
                     .await?;
                     Ok((branch_id, result))
-                }));
+                });
             }
         }
 
@@ -693,7 +685,7 @@ where
             let branch_instance_id = instance_id.to_string();
             let ctx_for_work = context.clone();
 
-            set.spawn(with_context(context.clone(), || async move {
+            set.spawn(async move {
                 let result = Self::execute_branch_with_checkpoint(
                     &branch,
                     branch_input,
@@ -703,7 +695,7 @@ where
                 )
                 .await?;
                 Ok((id, result))
-            }));
+            });
         }
 
         let mut branch_results: Vec<(String, Bytes)> = Vec::with_capacity(set.len());

@@ -28,6 +28,8 @@ mod worker;
 fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<task::PyRetryPolicy>()?;
     m.add_class::<task::PyTaskMetadata>()?;
+    m.add_class::<task::PyTaskExecutionContext>()?;
+    m.add_function(wrap_pyfunction!(task::get_task_context, m)?)?;
     m.add_class::<flow::PyFlowBuilder>()?;
     m.add_class::<flow::PyWorkflow>()?;
     m.add_class::<engine::PyWorkflowEngine>()?;

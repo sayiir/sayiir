@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What's planned for Sayiir — workflow context, observability, child workflows, edge runtimes, and more
+description: What's planned for Sayiir — shared state, observability, child workflows, edge runtimes, and more
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
@@ -46,13 +46,16 @@ These features are stable and production-ready across Rust, Python, and Node.js:
   <Card title="PostgreSQL backend" icon="approve-check-circle">
     Production-grade persistence with ACID transactions, claim-based distribution, and snapshot history.
   </Card>
+  <Card title="Task execution context" icon="approve-check-circle">
+    Read-only access to workflow ID, instance ID, task ID, and task metadata from within running tasks. All three bindings.
+  </Card>
 </CardGrid>
 
 ---
 
 ## What's coming
 
-### Workflow Context (Shared State)
+### Workflow Context (Shared Mutable State)
 
 **Status:** Planned
 

@@ -20,6 +20,15 @@ export interface NapiTaskMetadata {
   timeoutSecs?: number;
   retries?: NapiRetryPolicy;
   tags?: string[];
+  version?: string;
+}
+
+export interface NapiTaskExecutionContext {
+  workflowId: string;
+  instanceId: string;
+  taskId: string;
+  metadata: NapiTaskMetadata;
+  workflowMetadata?: Record<string, unknown> | null;
 }
 
 export interface NapiBranchTask {
@@ -148,6 +157,7 @@ export interface NapiWorkerHandle {
 }
 
 export interface NativeAddon {
+  getTaskContext(): NapiTaskExecutionContext | null;
   NapiFlowBuilder: new (name: string) => NapiFlowBuilder;
   NapiWorkflowEngine: new () => NapiWorkflowEngine;
   NapiContinuationStepper: new (
