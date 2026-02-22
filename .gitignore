@@ -17,3 +17,6 @@ docs/plans/
 node_modules/
 
 id_ssh*
+
+playground/codapi
+playground/codapi-cli
