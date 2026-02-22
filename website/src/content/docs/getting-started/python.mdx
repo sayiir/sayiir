@@ -3,6 +3,8 @@ title: Python Quick Start
 description: Get started with Sayiir in Python in 5 minutes — simple durable workflows with zero learning curve. pip install, define tasks, run.
 ---
 
+import RunCode from '../../../components/RunCode.astro';
+
 ## Installation
 
 ```bash
@@ -13,8 +15,7 @@ pip install sayiir
 
 Define tasks with `@task` and chain them with `Flow`:
 
-```python
-from sayiir import task, Flow, run_workflow
+<RunCode lang="python" code={`from sayiir import task, Flow, run_workflow
 
 @task
 def fetch_user(user_id: int) -> dict:
@@ -26,8 +27,7 @@ def send_email(user: dict) -> str:
 
 workflow = Flow("welcome").then(fetch_user).then(send_email).build()
 result = run_workflow(workflow, 42)
-print(result)  # "Sent welcome to Alice"
-```
+print(result)`} />
 
 ## Make it durable
 

@@ -1,0 +1,7 @@
+{
+  "run": {
+    "engine": "docker",
+    "entry": "main.py",
+    "steps": [{ "box": "sayiir-python", "command": ["python", "main.py"] }]
+  }
+}

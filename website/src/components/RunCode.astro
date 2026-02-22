@@ -1,0 +1,197 @@
+---
+interface Props {
+  lang: "python" | "node";
+  code: string;
+}
+
+const { lang, code } = Astro.props;
+const trimmed = code.trim();
+---
+
+<div class="run-code" data-lang={lang} data-code={trimmed}>
+  <div class="run-code-toolbar">
+    <kbd>Ctrl+Enter</kbd>
+    <button class="run-code-btn" data-run>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+      Run
+    </button>
+  </div>
+
+  <div class="run-code-editor">
+    <pre class="run-code-fallback"><code>{trimmed}</code></pre>
+  </div>
+
+  <div class="run-code-output">
+    <div class="run-code-output-header">
+      <span>Output</span>
+      <span class="run-code-status"></span>
+    </div>
+    <div class="run-code-output-body"></div>
+  </div>
+</div>
+
+<script>
+  import { runCode } from "./codapi-client";
+
+  function initRunCode(container: HTMLElement) {
+    if (container.dataset.initialized) return;
+    container.dataset.initialized = "true";
+
+    const lang = container.dataset.lang!;
+    const initialCode = container.dataset.code!;
+    const editorEl = container.querySelector(".run-code-editor")!;
+    const fallback = editorEl.querySelector(".run-code-fallback");
+    const btn = container.querySelector("[data-run]") as HTMLButtonElement;
+    const outputPanel = container.querySelector(".run-code-output") as HTMLElement;
+    const statusEl = container.querySelector(".run-code-status") as HTMLElement;
+    const bodyEl = container.querySelector(".run-code-output-body") as HTMLElement;
+
+    let editorView: any = null;
+    let isRunning = false;
+
+    function getCode(): string {
+      if (editorView) return editorView.state.doc.toString();
+      return initialCode;
+    }
+
+    async function handleRun() {
+      if (isRunning) return;
+      isRunning = true;
+
+      const svg = btn.querySelector("svg") as SVGElement;
+      if (svg) svg.style.display = "none";
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      btn.insertBefore(spinner, btn.firstChild);
+      btn.disabled = true;
+
+      outputPanel.classList.add("visible");
+      statusEl.textContent = "";
+      statusEl.className = "run-code-status";
+      bodyEl.textContent = "";
+      bodyEl.className = "run-code-output-body";
+
+      try {
+        const result = await runCode(lang, getCode());
+        if (result.ok) {
+          bodyEl.textContent = result.stdout || "(no output)";
+          statusEl.textContent = `\u2713 ${result.duration}ms`;
+          statusEl.classList.add("success");
+        } else {
+          bodyEl.textContent = result.stderr || result.stdout || "Unknown error";
+          bodyEl.classList.add("has-error");
+          statusEl.textContent = "\u2717 failed";
+          statusEl.classList.add("error");
+        }
+      } catch (err: any) {
+        bodyEl.textContent = `Connection error: ${err.message}`;
+        bodyEl.classList.add("has-error");
+        statusEl.textContent = "\u2717 error";
+        statusEl.classList.add("error");
+      } finally {
+        spinner.remove();
+        const svg = btn.querySelector("svg") as SVGElement;
+        if (svg) svg.style.display = "";
+        btn.disabled = false;
+        isRunning = false;
+      }
+    }
+
+    btn.addEventListener("click", handleRun);
+
+    // Lazy-load CodeMirror when scrolled into view
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0].isIntersecting) return;
+        observer.disconnect();
+        loadCodeMirror();
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(container);
+
+    async function loadCodeMirror() {
+      const [
+        { EditorView, keymap, lineNumbers, highlightActiveLine, highlightSpecialChars },
+        { EditorState },
+        { defaultKeymap, history, historyKeymap },
+        { syntaxHighlighting, defaultHighlightStyle, bracketMatching },
+        { oneDark },
+      ] = await Promise.all([
+        import("@codemirror/view"),
+        import("@codemirror/state"),
+        import("@codemirror/commands"),
+        import("@codemirror/language"),
+        import("@codemirror/theme-one-dark"),
+      ]);
+
+      let langExtension;
+      if (lang === "python") {
+        const { python } = await import("@codemirror/lang-python");
+        langExtension = python();
+      } else {
+        const { javascript } = await import("@codemirror/lang-javascript");
+        langExtension = javascript();
+      }
+
+      const isDark =
+        document.documentElement.dataset.theme !== "light" &&
+        !document.documentElement.classList.contains("sl-theme-light");
+
+      const extensions = [
+        lineNumbers(),
+        highlightActiveLine(),
+        highlightSpecialChars(),
+        history(),
+        bracketMatching(),
+        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        langExtension,
+        keymap.of([
+          ...defaultKeymap,
+          ...historyKeymap,
+          {
+            key: "Ctrl-Enter",
+            mac: "Cmd-Enter",
+            run: () => {
+              handleRun();
+              return true;
+            },
+          },
+        ]),
+        EditorView.theme({
+          "&": { fontSize: "0.875rem" },
+          ".cm-content": { padding: "0.5rem 0", fontFamily: "var(--sl-font-mono, monospace)" },
+          ".cm-gutters": {
+            background: "var(--sl-color-gray-6, #1e1e2e)",
+            border: "none",
+            color: "var(--sl-color-gray-3, #94a3b8)",
+          },
+          "&.cm-focused": { outline: "none" },
+        }),
+      ];
+
+      if (isDark) {
+        extensions.push(oneDark);
+      }
+
+      editorView = new EditorView({
+        state: EditorState.create({
+          doc: initialCode,
+          extensions,
+        }),
+      });
+
+      if (fallback) fallback.remove();
+      editorEl.appendChild(editorView.dom);
+    }
+  }
+
+  // Initialize all RunCode instances on the page
+  function initAll() {
+    document.querySelectorAll<HTMLElement>(".run-code").forEach(initRunCode);
+  }
+
+  // Run on initial load and after Astro view transitions
+  initAll();
+  document.addEventListener("astro:after-swap", initAll);
+</script>

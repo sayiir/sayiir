@@ -30,8 +30,9 @@ export default defineConfig({
           },
         },
       ],
-      customCss: ["./src/styles/custom.css"],
+      customCss: ["./src/styles/custom.css", "./src/styles/run-code.css"],
       sidebar: [
+        { label: "Playground", link: "/playground", badge: "New" },
         {
           label: "Getting Started",
           items: [
