@@ -83,9 +83,15 @@
         src: "{{ playbook_dir }}/../sandboxes/"
         dest: "{{ codapi_dir }}/sandboxes/"
         delete: true
-        rsync_opts:
-          - "--chmod=D755,F644"
       notify: Restart codapi
+      tags: [setup, update]
+
+    - name: Set sandbox directory permissions
+      ansible.builtin.file:
+        path: "{{ codapi_dir }}/sandboxes"
+        state: directory
+        mode: "0755"
+        recurse: true
       tags: [setup, update]
 
     # ── Codapi config ──

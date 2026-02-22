@@ -94,11 +94,7 @@ curl -s -H "content-type: application/json" \
 
 Expected output: `{ "id": "...", "ok": true, "stdout": "Hello World\n", "stderr": "" }`
 
-### 5. Test the standalone playground
-
-Open `playground/index.html` in a browser (e.g. via `open playground/index.html` or a local server). The editor should load, and clicking Run should execute code against `localhost:1313`.
-
-### 6. Test the docs-integrated playground
+### 5. Test the docs playground
 
 ```bash
 cd website
@@ -161,25 +157,14 @@ Adjust limits in `codapi.json`:
 
 ## Production Deployment (VPS)
 
-Self-hosted on a VPS with nginx + Cloudflare for TLS. Deployed via Ansible.
-
 ### Prerequisites
 
-- A VPS running Ubuntu 22.04+ (Hetzner CX22 at ~$4/mo is plenty)
+- A VPS running Ubuntu 22.04+
 - SSH key access to the VPS
 - Cloudflare managing DNS for `sayiir.dev` (proxied A record for TLS)
 - Ansible installed locally (`pip install ansible` or `brew install ansible`)
 
-### 1. Configure inventory
-
-Edit `deploy/inventory.ini` — uncomment and set your VPS IP:
-
-```ini
-[codapi]
-play.sayiir.dev ansible_host=<VPS_IP> ansible_user=root
-```
-
-### 2. Review variables
+### 1. Review variables
 
 Defaults in `deploy/group_vars/codapi.yml`:
 
@@ -190,7 +175,7 @@ Defaults in `deploy/group_vars/codapi.yml`:
 | `codapi_cors_origin` | `https://docs.sayiir.dev` | Allowed CORS origin |
 | `codapi_port` | `1313` | Codapi listen port |
 
-### 3. Deploy
+### 2. Deploy
 
 ```bash
 cd playground/deploy
@@ -199,22 +184,7 @@ cd playground/deploy
 ansible-playbook -i inventory.ini playbook.yml
 ```
 
-### 4. Point DNS (Cloudflare)
-
-In Cloudflare, add a proxied A record:
-
-```
-Type: A
-Name: play
-Content: <VPS_IP>
-Proxy status: Proxied (orange cloud)
-```
-
-Cloudflare handles TLS termination. nginx listens on port 80; Cloudflare encrypts the client-facing connection.
-
-Set Cloudflare SSL/TLS mode to **Full** (under SSL/TLS > Overview).
-
-### 5. Verify
+### 3. Verify
 
 ```bash
 curl -s -H "content-type: application/json" \
@@ -281,58 +251,4 @@ systemctl status codapi          # service status
 journalctl -u codapi -f          # codapi logs
 journalctl -u nginx -f           # nginx logs
 docker ps                        # running sandbox containers (short-lived)
-```
-
-### VPS providers
-
-| Provider | Spec | Price |
-|----------|------|-------|
-| Hetzner CX22 | 2 vCPU, 4 GB RAM | ~$4/mo |
-| DigitalOcean Basic | 1 vCPU, 2 GB RAM | $6/mo |
-| Vultr Cloud Compute | 1 vCPU, 2 GB RAM | $6/mo |
-
-### Why self-hosted?
-
-SaaS code execution services (Codapi Cloud, Judge0, Piston, JDoodle) only offer stock language runtimes. None support custom Docker images with pre-installed packages. A $4/mo VPS gives sub-second execution with zero per-run install overhead.
-
-## File Structure
-
-```
-playground/
-  index.html          # Standalone playground (can be opened directly)
-  sayiir.d.ts         # Canonical type declarations for Monaco intellisense
-  codapi               # Codapi server binary (not committed)
-  codapi-cli           # Codapi CLI binary (not committed)
-  codapi.json          # Server config (local dev)
-  codapi.service       # systemd unit template
-  sandboxes/
-    sayiir-python/
-      Dockerfile       # Python 3.13 + sayiir
-      commands.json    # How to run: python main.py
-      box.json         # Docker image name
-    sayiir-node/
-      Dockerfile       # Node 22 + sayiir
-      commands.json    # How to run: node main.js
-      box.json         # Docker image name
-  deploy/
-    playbook.yml       # Ansible playbook (end-to-end VPS deployment)
-    inventory.ini      # Target hosts
-    group_vars/
-      codapi.yml       # Variables (version, domain, CORS, sandboxes)
-    templates/
-      codapi-nginx.conf.j2  # nginx reverse proxy + CORS
-      codapi.json.j2        # Production server config
-
-website/
-  .env                 # PUBLIC_CODAPI_URL=http://localhost:1313
-  .env.production      # PUBLIC_CODAPI_URL=https://play.sayiir.dev
-  src/
-    components/
-      RunCode.astro         # Inline CodeMirror snippet component
-      codapi-client.ts      # Shared HTTP client for Codapi
-      playground-examples.ts # Example code (Python + Node.js)
-    pages/
-      playground.astro      # Full Monaco playground page at /playground
-    styles/
-      run-code.css          # RunCode component styles
 ```
