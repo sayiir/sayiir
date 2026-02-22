@@ -12,6 +12,10 @@ server {
     }
 
     location / {
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+
         proxy_pass http://127.0.0.1:{{ codapi_port }};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
