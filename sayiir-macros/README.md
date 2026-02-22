@@ -65,6 +65,8 @@ let workflow = workflow! {
 | `(step \|\| step), join` | Parallel fork |
 | `delay "5s"` | Durable delay |
 | `signal "name"` | Wait for external signal |
+| `loop task N` | Loop body task up to N iterations |
+| `flow expr` | Inline a child workflow |
 | `route key_fn { "k" => [...] }` | Conditional branch |
 
 ### Fields

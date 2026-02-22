@@ -7,13 +7,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::error::BuildError;
 use crate::task::TaskMetadata;
 use crate::workflow::WorkflowContinuation;
 
 /// Validate that a duration value is finite and non-negative.
-fn validate_duration(secs: f64, label: &str) -> Result<(), String> {
+fn validate_duration(secs: f64, label: &str) -> Result<(), BuildError> {
     if !secs.is_finite() || secs < 0.0 {
-        return Err(format!("{label} must be a finite non-negative number"));
+        return Err(BuildError::InvalidDuration(label.to_string()));
     }
     Ok(())
 }
@@ -22,6 +23,7 @@ fn validate_duration(secs: f64, label: &str) -> Result<(), String> {
 ///
 /// Binding crates collect these from their language-specific APIs, then pass
 /// them to [`build_continuation`] to produce the [`WorkflowContinuation`] tree.
+#[derive(Clone)]
 pub enum BuilderTask {
     /// A single sequential task.
     Sequential {
@@ -77,12 +79,19 @@ pub enum BuilderTask {
         /// What to do when `max_iterations` is reached.
         on_max: crate::workflow::MaxIterationsPolicy,
     },
+    /// A child workflow node (inline composition).
+    ChildWorkflow {
+        /// Unique child workflow identifier.
+        child_id: String,
+        /// The child's builder tasks (built separately).
+        child_tasks: Vec<BuilderTask>,
+    },
 }
 
 /// Build a task chain from a slice of `(id, metadata)` pairs.
 ///
 /// Returns the chain head boxed, or an error if the chain is empty.
-fn build_chain(chain: &[(String, TaskMetadata)]) -> Result<Box<WorkflowContinuation>, String> {
+fn build_chain(chain: &[(String, TaskMetadata)]) -> Result<Box<WorkflowContinuation>, BuildError> {
     let mut current: Option<WorkflowContinuation> = None;
     for (id, metadata) in chain.iter().rev() {
         current = Some(WorkflowContinuation::Task {
@@ -94,9 +103,7 @@ fn build_chain(chain: &[(String, TaskMetadata)]) -> Result<Box<WorkflowContinuat
             next: current.map(Box::new),
         });
     }
-    current
-        .map(Box::new)
-        .ok_or_else(|| "Each branch must have at least one task".to_string())
+    current.map(Box::new).ok_or(BuildError::EmptyBranch)
 }
 
 /// High-level builder that both binding crates (`sayiir-node`, `sayiir-py`)
@@ -144,13 +151,13 @@ impl FlowBuilder {
         branches: Vec<Vec<(String, TaskMetadata)>>,
         join_id: String,
         join_metadata: TaskMetadata,
-    ) -> Result<(), String> {
+    ) -> Result<(), BuildError> {
         if branches.is_empty() {
-            return Err("Fork must have at least one branch".to_string());
+            return Err(BuildError::EmptyFork);
         }
-        for (i, branch) in branches.iter().enumerate() {
+        for branch in &branches {
             if branch.is_empty() {
-                return Err(format!("Branch {i} must have at least one task"));
+                return Err(BuildError::EmptyBranch);
             }
         }
         self.tasks.push(BuilderTask::Fork {
@@ -166,7 +173,7 @@ impl FlowBuilder {
     /// # Errors
     ///
     /// Returns an error if `duration_secs` is negative or non-finite.
-    pub fn add_delay(&mut self, delay_id: String, duration_secs: f64) -> Result<(), String> {
+    pub fn add_delay(&mut self, delay_id: String, duration_secs: f64) -> Result<(), BuildError> {
         validate_duration(duration_secs, "delay duration")?;
         self.tasks.push(BuilderTask::Delay {
             delay_id,
@@ -185,7 +192,7 @@ impl FlowBuilder {
         signal_id: String,
         signal_name: String,
         timeout_secs: Option<f64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), BuildError> {
         if let Some(t) = timeout_secs {
             validate_duration(t, "timeout")?;
         }
@@ -208,9 +215,10 @@ impl FlowBuilder {
         body_metadata: TaskMetadata,
         max_iterations: u32,
         on_max: crate::workflow::MaxIterationsPolicy,
-    ) -> Result<String, String> {
+    ) -> Result<String, BuildError> {
         if max_iterations == 0 {
-            return Err("max_iterations must be at least 1".to_string());
+            let loop_id = format!("loop_{}", self.loop_counter);
+            return Err(BuildError::InvalidMaxIterations(loop_id));
         }
         let loop_id = format!("loop_{}", self.loop_counter);
         self.loop_counter += 1;
@@ -233,13 +241,13 @@ impl FlowBuilder {
         &mut self,
         branches: Vec<(String, Vec<(String, TaskMetadata)>)>,
         default: Option<Vec<(String, TaskMetadata)>>,
-    ) -> Result<String, String> {
+    ) -> Result<String, BuildError> {
         if branches.is_empty() {
-            return Err("route must have at least one branch".to_string());
+            return Err(BuildError::EmptyBranch);
         }
-        for (key, chain) in &branches {
+        for (_, chain) in &branches {
             if chain.is_empty() {
-                return Err(format!("Branch '{key}' must have at least one task"));
+                return Err(BuildError::EmptyBranch);
             }
         }
         let branch_id = format!("branch_{}", self.branch_counter);
@@ -252,12 +260,35 @@ impl FlowBuilder {
         Ok(branch_id)
     }
 
+    /// Add a child workflow (inline composition).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `child_tasks` is empty.
+    pub fn add_child_workflow(&mut self, child_id: String, child_tasks: Vec<BuilderTask>) {
+        self.tasks.push(BuilderTask::ChildWorkflow {
+            child_id,
+            child_tasks,
+        });
+    }
+
+    /// Read access to the collected builder tasks.
+    #[must_use]
+    pub fn tasks(&self) -> &[BuilderTask] {
+        &self.tasks
+    }
+
     /// Build the final [`WorkflowContinuation`].
     ///
     /// # Errors
     ///
     /// Returns an error if the task list is empty or any branch chain is empty.
-    pub fn build(&self) -> Result<WorkflowContinuation, String> {
+    ///
+    /// Note: unlike the typed Rust [`WorkflowBuilder`], this does **not** reject
+    /// duplicate task IDs. Binding-level workflows commonly reuse the same task
+    /// function (and thus ID) at multiple positions in a pipeline — the task
+    /// registry maps ID → callable, so duplicates simply re-execute the same task.
+    pub fn build(&self) -> Result<WorkflowContinuation, BuildError> {
         build_continuation(&self.tasks)
     }
 }
@@ -270,18 +301,15 @@ impl Default for FlowBuilder {
 
 /// Build a [`WorkflowContinuation`] from a list of builder tasks.
 ///
-/// Returns string errors — binding crates map these to their native error
-/// types (e.g. `napi::Error`, `PyErr`).
-///
 /// # Errors
 ///
 /// Returns an error if:
 /// - `tasks` is empty
 /// - Any fork or branch chain is empty
 #[allow(clippy::too_many_lines)]
-pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation, String> {
+pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation, BuildError> {
     if tasks.is_empty() {
-        return Err("Workflow must have at least one task".to_string());
+        return Err(BuildError::EmptyWorkflow);
     }
 
     let mut current: Option<WorkflowContinuation> = None;
@@ -331,7 +359,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                         let cont = build_chain(chain)?;
                         Ok(Arc::new(*cont))
                     })
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, BuildError>>()?;
 
                 let join_cont = WorkflowContinuation::Task {
                     id: join_id.clone(),
@@ -356,7 +384,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                 let branch_map: HashMap<String, Box<WorkflowContinuation>> = branches
                     .iter()
                     .map(|(key, chain)| Ok((key.clone(), build_chain(chain)?)))
-                    .collect::<Result<_, String>>()?;
+                    .collect::<Result<_, BuildError>>()?;
 
                 let default_cont = default
                     .as_ref()
@@ -379,9 +407,7 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                 on_max,
             } => {
                 if *max_iterations == 0 {
-                    return Err(format!(
-                        "Loop '{loop_id}': max_iterations must be at least 1"
-                    ));
+                    return Err(BuildError::InvalidMaxIterations(loop_id.clone()));
                 }
                 let body = WorkflowContinuation::Task {
                     id: body_task_id.clone(),
@@ -399,8 +425,19 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     next: current.map(Box::new),
                 }
             }
+            BuilderTask::ChildWorkflow {
+                child_id,
+                child_tasks,
+            } => {
+                let child_cont = build_continuation(child_tasks)?;
+                WorkflowContinuation::ChildWorkflow {
+                    id: child_id.clone(),
+                    child: Arc::new(child_cont),
+                    next: current.map(Box::new),
+                }
+            }
         });
     }
 
-    current.ok_or_else(|| "Failed to build workflow".to_string())
+    current.ok_or(BuildError::EmptyWorkflow)
 }

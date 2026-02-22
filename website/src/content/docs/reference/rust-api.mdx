@@ -230,10 +230,13 @@ let workflow = workflow! {
 | `task_name` | Reference to a `#[task]`-generated struct | `validate, charge` |
 | `name(param: Type) { expr }` | Inline task | `double(x: i32) { Ok(x * 2) }` |
 | `a \|\| b` | Parallel fork | `email \|\| inventory, finalize` |
-| `route key_fn { ... }` | Conditional branch | See below |
 | `delay "5s"` | Durable delay (auto ID) | `delay "5s"` |
 | `delay "wait_24h" "5s"` | Durable delay (custom ID) | `delay "wait_24h" "24h"` |
 | `signal "name"` | Wait for external signal | `signal "approval"` |
+| `loop task N` | Loop body task up to N iterations | `loop refine 10` |
+| `loop task N exit_with_last` | Loop with exit-on-max policy | `loop poll 100 exit_with_last` |
+| `flow expr` | Inline a child workflow | `flow child_workflow` |
+| `route key_fn { ... }` | Conditional branch | See below |
 | `,` | Sequential separator | `a, b, c` |
 
 ### Examples
@@ -551,6 +554,30 @@ Configure task registry.
 ```rust
 let builder = WorkflowBuilder::new(context)
     .with_existing_registry(registry);
+```
+
+#### then_flow(child) / then_serializable_flow(child)
+
+Inline a child workflow. The child's entire continuation tree is embedded as a single step. Use `then_flow` for non-serializable workflows and `then_serializable_flow` when both parent and child have registries (merges the child's task registry into the parent's).
+
+```rust
+let child = WorkflowBuilder::new(child_ctx)
+    .with_registry()
+    .then("double", |x: u32| async move { Ok(x * 2) })
+    .build()?;
+
+let parent = WorkflowBuilder::new(parent_ctx)
+    .with_registry()
+    .then("add_ten", |x: u32| async move { Ok(x + 10) })
+    .then_serializable_flow(child)
+    .build()?;
+```
+
+In the `workflow!` macro, use the `flow` keyword:
+
+```rust
+let child = workflow! { name: "child", steps: [double] }.unwrap();
+let parent = workflow! { name: "parent", steps: [add_ten, flow child] }.unwrap();
 ```
 
 #### build()

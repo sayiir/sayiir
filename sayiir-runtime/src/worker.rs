@@ -1482,6 +1482,13 @@ where
                 next.as_ref()
                     .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
             }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                if Self::find_task_id_in_continuation(child, task_id) {
+                    return true;
+                }
+                next.as_ref()
+                    .is_some_and(|n| Self::find_task_id_in_continuation(n, task_id))
+            }
         }
     }
 
@@ -1580,6 +1587,17 @@ where
                             return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
                         }
                     }
+                    WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                        if Self::find_task_id_in_continuation(child, task_id) {
+                            current = child;
+                            continue;
+                        }
+                        if let Some(next_cont) = next {
+                            current = next_cont;
+                        } else {
+                            return Err(WorkflowError::TaskNotFound(task_id.to_string()).into());
+                        }
+                    }
                 }
             }
         }
@@ -1633,6 +1651,12 @@ where
             }
             WorkflowContinuation::Loop { body, next, .. } => {
                 Self::update_position_after_task(body, completed_task_id, snapshot);
+                if let Some(next_cont) = next {
+                    Self::update_position_after_task(next_cont, completed_task_id, snapshot);
+                }
+            }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                Self::update_position_after_task(child, completed_task_id, snapshot);
                 if let Some(next_cont) = next {
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
                 }
@@ -1775,6 +1799,12 @@ where
                         Self::resolve_loops_recursive(join, snapshot, backend).await?;
                     }
                 }
+                WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                    Self::resolve_loops_recursive(child, snapshot, backend).await?;
+                    if let Some(next) = next {
+                        Self::resolve_loops_recursive(next, snapshot, backend).await?;
+                    }
+                }
             }
             Ok(())
         })
@@ -1829,6 +1859,14 @@ where
             }
             WorkflowContinuation::Loop { id, next, .. } => {
                 // Loop is complete when the loop node itself has a cached result
+                if snapshot.get_task_result(id).is_none() {
+                    return false;
+                }
+                next.as_ref()
+                    .is_none_or(|n| Self::is_workflow_complete(n, snapshot))
+            }
+            WorkflowContinuation::ChildWorkflow { id, next, .. } => {
+                // ChildWorkflow is complete when the node itself has a cached result
                 if snapshot.get_task_result(id).is_none() {
                     return false;
                 }

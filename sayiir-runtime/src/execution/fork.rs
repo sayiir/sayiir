@@ -505,6 +505,26 @@ where
                     Ok(ControlFlow::Continue(output))
                 }
             }
+            WorkflowContinuation::ChildWorkflow { id, child, .. } => {
+                if let Some(result) = snapshot.get_task_result(id) {
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let output = Box::pin(execute_branch_with_checkpointing(
+                        child,
+                        current_input.clone(),
+                        instance_id,
+                        backend,
+                        execute_task,
+                        envelope_codec,
+                    ))
+                    .await?;
+
+                    snapshot.mark_task_completed(id.clone(), output.clone());
+                    backend.save_snapshot(&snapshot).await?;
+
+                    Ok(ControlFlow::Continue(output))
+                }
+            }
         };
 
         match step? {

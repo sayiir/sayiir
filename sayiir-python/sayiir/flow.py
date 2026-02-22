@@ -102,9 +102,11 @@ class Workflow:
         self,
         inner: "PyWorkflow",
         task_registry: dict[str, Callable[..., Any]],
+        builder: "PyFlowBuilder",
     ):
         self._inner = inner
         self._task_registry = task_registry
+        self._builder = builder
 
     @property
     def workflow_id(self) -> str:
@@ -342,6 +344,7 @@ class Flow:
         self._name = name
         self._builder = PyFlowBuilder(name)
         self._task_registry: dict[str, Callable[..., Any]] = {}
+        self._child_counter = 0
         if metadata is not None:
             self._builder.set_metadata_json(_json.dumps(metadata))
 
@@ -540,10 +543,32 @@ class Flow:
         self._builder.add_loop(task_id, metadata, max_iterations, on_max)
         return self
 
+    def then_flow(self, child_workflow: "Workflow") -> "Flow":
+        """Compose another workflow inline as a child.
+
+        The child workflow's tasks execute as a sub-pipeline: the current
+        step's output feeds into the child's first task, and the child's
+        final output continues to the next step.
+
+        Args:
+            child_workflow: A built ``Workflow`` to compose inline.
+
+        Returns:
+            The Flow instance for chaining.
+        """
+        child_id = f"child_{self._child_counter}"
+        self._child_counter += 1
+        # Merge child task registry into parent (parent takes precedence)
+        for key, value in child_workflow._task_registry.items():
+            self._task_registry.setdefault(key, value)
+        # Tell native builder about the child
+        self._builder.add_child_workflow(child_id, child_workflow._builder)
+        return self
+
     def fork(self) -> "ForkBuilder":
         """Start a fork for parallel execution."""
         return ForkBuilder(self)
 
     def build(self) -> Workflow:
         """Build the workflow."""
-        return Workflow(self._builder.build(), self._task_registry)
+        return Workflow(self._builder.build(), self._task_registry, self._builder)

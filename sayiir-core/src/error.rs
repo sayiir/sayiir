@@ -45,8 +45,8 @@ pub enum BuildError {
     #[error("Branch must have at least one step")]
     EmptyBranch,
 
-    /// A fork has no branches and no join task.
-    #[error("Fork has no branches and no join task")]
+    /// A fork has no branches.
+    #[error("Fork must have at least one branch")]
     EmptyFork,
 
     /// One or more declared branch keys have no corresponding `.branch()` call
@@ -71,6 +71,14 @@ pub enum BuildError {
     /// A loop's `max_iterations` was set to zero.
     #[error("Loop '{0}': max_iterations must be at least 1")]
     InvalidMaxIterations(String),
+
+    /// The workflow has no tasks.
+    #[error("Workflow must have at least one task")]
+    EmptyWorkflow,
+
+    /// A duration value is not finite or is negative.
+    #[error("{0} must be a finite non-negative number")]
+    InvalidDuration(String),
 
     /// The workflow definition hash doesn't match during hydration.
     #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
@@ -220,8 +228,8 @@ pub enum WorkflowError {
         paused_by: Option<String>,
     },
 
-    /// A fork has no branches and no join task.
-    #[error("Fork has no branches and no join task")]
+    /// A fork has no branches.
+    #[error("Fork must have at least one branch")]
     EmptyFork,
 
     /// A task panicked during execution.

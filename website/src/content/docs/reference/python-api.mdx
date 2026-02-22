@@ -259,6 +259,40 @@ workflow = (
 
 **Returns:** ForkBuilder instance
 
+#### .then_flow(workflow)
+
+Inline a child workflow. The child's entire pipeline runs as a single composition step — its output becomes the input to the next step. Task registries are merged automatically.
+
+```python
+from sayiir import task, Flow, run_workflow
+
+@task
+def double(x: int) -> int:
+    return x * 2
+
+@task
+def add_ten(x: int) -> int:
+    return x + 10
+
+# Child workflow
+child = Flow("child").then(double).build()
+
+# Parent inlines the child
+parent = (
+    Flow("parent")
+    .then(add_ten)
+    .then_flow(child)
+    .build()
+)
+
+result = run_workflow(parent, 5)  # (5 + 10) * 2 = 30
+```
+
+**Parameters:**
+- `workflow` (Workflow) — A built workflow whose input matches the current output type
+
+**Returns:** Flow instance with the child's output type
+
 #### .route(key_fn, *, keys)
 
 Start conditional branching based on a routing key. The `keys` parameter declares all valid branch keys upfront — Sayiir validates `.branch()` calls against this set immediately and checks exhaustiveness at `.done()`.

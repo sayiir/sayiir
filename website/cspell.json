@@ -69,7 +69,8 @@
     "Ollama",
     "fieldless",
     "myhost",
-    "resumability"
+    "resumability",
+    "inlines"
   ],
   "flagWords": [],
   "dictionaries": ["softwareTerms", "typescript", "python", "rust", "node"]

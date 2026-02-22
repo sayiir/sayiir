@@ -3528,3 +3528,86 @@ async fn test_checkpointing_loop_iteration_counter_persisted() {
     );
     assert_eq!(persisted.loop_iteration("loop_0"), 0);
 }
+
+// ========================================================================
+// Child Workflow tests
+// ========================================================================
+
+#[test]
+fn test_sync_child_workflow_basic() {
+    // parent: add_one → child(double → add_ten)
+    let child_double = stub_node("double", None);
+    let child_add_ten = stub_node("add_ten", Some(Box::new(child_double)));
+    let child_cont = Arc::new(child_add_ten);
+
+    let child_wf = WorkflowContinuation::ChildWorkflow {
+        id: "child_0".into(),
+        child: child_cont,
+        next: None,
+    };
+    let parent = stub_node("add_one", Some(Box::new(child_wf)));
+
+    let input = encode_u32(5);
+    let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let val = decode_u32(&input);
+        match id {
+            "add_one" => Ok(encode_u32(val + 1)),
+            "add_ten" => Ok(encode_u32(val + 10)),
+            "double" => Ok(encode_u32(val * 2)),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&parent, input, &callback, &JsonCodec).unwrap();
+    // 5 + 1 = 6, then child: 6 + 10 = 16, 16 * 2 = 32
+    assert_eq!(decode_u32(&result), 32);
+}
+
+#[test]
+fn test_sync_child_workflow_passes_output() {
+    // parent: child(add_one) → double
+    let child_add_one = Arc::new(stub_node("add_one", None));
+    let double = stub_node("double", None);
+
+    let child_wf = WorkflowContinuation::ChildWorkflow {
+        id: "child_0".into(),
+        child: child_add_one,
+        next: Some(Box::new(double)),
+    };
+
+    let input = encode_u32(10);
+    let callback = |id: &str, input: Bytes| -> Result<Bytes, BoxError> {
+        let val = decode_u32(&input);
+        match id {
+            "add_one" => Ok(encode_u32(val + 1)),
+            "double" => Ok(encode_u32(val * 2)),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&child_wf, input, &callback, &JsonCodec).unwrap();
+    // child: 10 + 1 = 11, then 11 * 2 = 22
+    assert_eq!(decode_u32(&result), 22);
+}
+
+#[test]
+fn test_sync_child_workflow_failure_propagates() {
+    let child_fail = Arc::new(stub_node("fail_task", None));
+
+    let child_wf = WorkflowContinuation::ChildWorkflow {
+        id: "child_0".into(),
+        child: child_fail,
+        next: None,
+    };
+
+    let input = encode_u32(1);
+    let callback = |id: &str, _input: Bytes| -> Result<Bytes, BoxError> {
+        match id {
+            "fail_task" => Err("child task failed".into()),
+            _ => Err(format!("Unknown task: {id}").into()),
+        }
+    };
+
+    let result = execute_continuation_sync(&child_wf, input, &callback, &JsonCodec);
+    assert!(result.is_err());
+}

@@ -62,6 +62,11 @@ class PyFlowBuilder:
         max_iterations: int = 10,
         on_max: str | OnMax = "fail",
     ) -> str: ...
+    def add_child_workflow(
+        self,
+        child_id: str,
+        child_builder: PyFlowBuilder,
+    ) -> None: ...
     def build(self) -> PyWorkflow: ...
 
 class PyWorkflow:

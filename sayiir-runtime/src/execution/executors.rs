@@ -205,6 +205,21 @@ where
                     .into());
                 }
             }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                let output = execute_continuation_sync(
+                    child,
+                    current_input.clone(),
+                    execute_task,
+                    envelope_codec,
+                )?;
+                match next {
+                    Some(next_cont) => {
+                        current = next_cont;
+                        current_input = output;
+                    }
+                    None => return Ok(output),
+                }
+            }
         }
     }
 }
@@ -398,6 +413,18 @@ fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
                         &mut NoHooks,
                     )
                     .await?;
+                    match next {
+                        Some(next_cont) => {
+                            current = next_cont;
+                            current_input = output;
+                        }
+                        None => return Ok(output),
+                    }
+                }
+                WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                    let output =
+                        execute_async_inner(child, current_input.clone(), false, envelope_codec)
+                            .await?;
                     match next {
                         Some(next_cont) => {
                             current = next_cont;
@@ -723,6 +750,28 @@ where
                             max_iterations: *max_iterations,
                         })),
                     }
+                }
+            }
+            WorkflowContinuation::ChildWorkflow { id, child, .. } => {
+                check_guards(backend, &snapshot.instance_id, Some(id)).await?;
+
+                if let Some(result) = snapshot.get_task_result(id) {
+                    Ok(ControlFlow::Continue(result.output.clone()))
+                } else {
+                    let output = Box::pin(execute_continuation_with_checkpointing(
+                        child,
+                        current_input.clone(),
+                        snapshot,
+                        backend,
+                        execute_task,
+                        envelope_codec,
+                    ))
+                    .await?;
+
+                    snapshot.mark_task_completed(id.clone(), output.clone());
+                    backend.save_snapshot(snapshot).await?;
+
+                    Ok(ControlFlow::Continue(output))
                 }
             }
         };

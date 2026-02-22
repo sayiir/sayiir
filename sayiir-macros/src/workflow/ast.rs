@@ -80,6 +80,14 @@ pub enum WorkflowStep {
         span: Span,
     },
 
+    /// Child workflow composition (inline).
+    /// e.g. `flow child_workflow`
+    Flow {
+        /// The expression producing a `SerializableWorkflow`.
+        expr: Expr,
+        span: Span,
+    },
+
     /// Conditional branch based on a routing key.
     /// e.g. `route classify_key { "billing" => [handle_billing], _ => [fallback] }`
     /// or   `route classify_key -> Intent { Billing => [handle_billing], _ => [fallback] }`

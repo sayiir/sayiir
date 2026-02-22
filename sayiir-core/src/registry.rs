@@ -105,6 +105,16 @@ impl TaskRegistry {
         }
     }
 
+    /// Merge all entries from another registry into this one.
+    ///
+    /// Existing entries are **not** overwritten — the parent's registrations
+    /// take precedence over the child's in case of ID collisions.
+    pub fn merge(&mut self, other: Self) {
+        for (id, entry) in other.tasks {
+            self.tasks.entry(id).or_insert(entry);
+        }
+    }
+
     /// Register a task implementing `CoreTask`.
     ///
     /// This method accepts any type implementing `CoreTask`, including:

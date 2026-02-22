@@ -327,6 +327,34 @@ const workflow = flow<number>("approval")
 
 **Returns:** `Flow<TInput, TSignal>` — Output type becomes the signal payload type.
 
+### .thenFlow(workflow)
+
+Inline a child workflow. The child's entire pipeline runs as a single composition step — its output becomes the input to the next step. Task registries are merged automatically.
+
+```typescript
+import { flow, task } from "sayiir";
+
+const double = task("double", (x: number) => x * 2);
+const addTen = task("add-ten", (x: number) => x + 10);
+
+// Child workflow
+const childWorkflow = flow<number>("child")
+  .then(double)
+  .build();
+
+// Parent inlines the child
+const parent = flow<number>("parent")
+  .then(addTen)
+  .thenFlow(childWorkflow)
+  .then("format", (x) => `Result: ${x}`)
+  .build();
+```
+
+**Parameters:**
+- `workflow` (Workflow\<TLast, TOut\>) — A built workflow whose input type matches the current output type
+
+**Returns:** `Flow<TInput, Awaited<TOut>>` — Flow continues with the child's output type.
+
 ### .route(keyFn, keys)
 
 Start conditional branching based on a routing key. The key function receives the current output and returns one of the declared keys. The `keys` array declares all valid branch keys upfront — TypeScript narrows the key type so `.branch()` only accepts declared values, and `.done()` checks exhaustiveness.
