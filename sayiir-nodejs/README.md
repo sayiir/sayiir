@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/sayiir/sayiir/blob/main/LICENSE)
 [![Node.js 18+](https://img.shields.io/badge/node-18+-339933.svg)](https://nodejs.org)
-[![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
+[![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/A2jWBFZsNK)
 
 Write plain TypeScript functions. Sayiir makes them durable — automatic checkpointing, crash recovery, and parallel execution with zero infrastructure.
 
@@ -381,5 +381,9 @@ MIT
 - [Documentation](https://docs.sayiir.dev/getting-started/nodejs/)
 - [Examples](https://github.com/sayiir/sayiir/tree/main/examples)
 - [GitHub](https://github.com/sayiir/sayiir)
-- [Discord](https://discord.gg/MWSzsHeg)
+- [Discord](https://discord.gg/A2jWBFZsNK)
 - [Roadmap](https://github.com/sayiir/sayiir/blob/main/ROADMAP.md)
+
+---
+
+> ⭐ If you find Sayiir useful, [give us a star on GitHub](https://github.com/sayiir/sayiir) ⭐

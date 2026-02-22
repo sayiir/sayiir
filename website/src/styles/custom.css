@@ -1,3 +1,9 @@
+/* ── Bigger social icons (header + mobile menu) ── */
+.social-icons a svg {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
 :root {
   --sl-color-accent-low: #1a1a2e;
   --sl-color-accent: #6366f1;

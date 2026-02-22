@@ -16,7 +16,7 @@ export default defineConfig({
       favicon: "/favicon.png",
       social: [
         { label: "GitHub", icon: "github", href: "https://github.com/sayiir/sayiir" },
-        { label: "Discord", icon: "discord", href: "https://discord.gg/MWSzsHeg" },
+        { label: "Discord", icon: "discord", href: "https://discord.gg/A2jWBFZsNK" },
       ],
       editLink: {
         baseUrl: "https://github.com/sayiir/sayiir/edit/main/website/",
