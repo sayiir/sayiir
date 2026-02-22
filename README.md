@@ -25,6 +25,7 @@
 - &#128737; **Durable** — Automatic checkpointing & crash recovery with pluggable persistence
 - &#129520; **Multi-language** — Type-safe Python, TypeScript, and Rust bindings
 - &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL
+- &#9208; **Workflow control** — Cancel, pause, and resume running workflow instances
 
 ---
 

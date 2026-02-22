@@ -139,6 +139,12 @@ export default defineConfig({
             { label: "Platform Overview", slug: "server", badge: "Soon" },
           ],
         },
+        {
+          label: "Changelog",
+          items: [
+            { label: "v0.2", slug: "changelog/v02", badge: "Latest" },
+          ],
+        },
         { label: "Roadmap", slug: "roadmap" },
       ],
     }),

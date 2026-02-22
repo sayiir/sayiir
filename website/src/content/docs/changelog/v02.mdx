@@ -1,0 +1,114 @@
+---
+title: What's New in v0.2
+description: User-facing API changes in Sayiir v0.2 compared to v0.1 — loops, conditional routing, workflow composition, task execution context, and Rust builder improvements.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">
+These docs cover **Sayiir v0.2.0** — the latest release. If you're upgrading from v0.1, this page lists every user-facing change.
+</Aside>
+
+Sayiir v0.2 is backward-compatible. Existing v0.1 workflows continue to work without changes. New features are additive — adopt them incrementally.
+
+---
+
+## New features
+
+### Loops with exit conditions
+
+Iterative workflows are now a first-class primitive. A loop body runs repeatedly until it returns `LoopResult.done()`, with a configurable max-iterations safety net.
+
+- **`Flow.loop()`** (Python) / **`flow.loop()`** (Node.js) — add a loop step to the workflow
+- **`LoopResult.again(value)`** — continue iterating with `value` as the next input
+- **`LoopResult.done(value)`** — exit the loop, passing `value` to the next step
+- **`max_iterations`** (default: 10) — safety limit to prevent runaway loops
+- **`on_max`** policy — `"fail"` (default) raises an error, `"exit_with_last"` exits gracefully with the last value
+- Each iteration is durably checkpointed
+
+See the [Loops & Iteration](/guides/loops-and-iteration/) guide for details.
+
+---
+
+### Conditional branching
+
+Route workflow execution based on data. A router task returns a string key, and the matching branch executes.
+
+- **`Flow.route()`** — add a routing step with declared keys
+- **`.branch(key, task)`** — define what runs for each key
+- **`.default_branch()`** / **`.defaultBranch()`** — optional fallback for unmatched keys
+- Keys are validated at build time for exhaustiveness
+- Branch output is wrapped in a `BranchEnvelope` containing the matched key and value
+
+See the [Durable Workflows](/guides/durable-workflows/) guide for branching examples.
+
+---
+
+### Workflow composition
+
+Build modular pipelines by inlining child workflows as sub-steps.
+
+- **`Flow.then_flow(child)`** (Python) / **`flow.thenFlow(child)`** (Node.js) — inline a child workflow's task graph
+- Task registries from parent and child merge automatically
+- The child's input type must match the previous step's output type
+
+See the [Composing Workflows](/guides/composing-workflows/) guide for details.
+
+---
+
+### Task execution context
+
+Tasks can access read-only metadata about the current execution at runtime.
+
+- **`get_task_context()`** (Python) / **`getTaskContext()`** (Node.js) — returns context or `None`/`undefined` outside a running task
+- Available properties: `workflow_id`, `instance_id`, `task_id`, `metadata`, `workflow_metadata`
+- Context is read-only
+
+---
+
+## New exports
+
+**Python** — new imports from `sayiir`:
+`LoopResult`, `OnMax`, `get_task_context`, `TaskExecutionContext`
+
+**Node.js** — new exports from `"sayiir"`:
+`LoopResult`, `getTaskContext`, and types `LoopOptions`, `BranchEnvelope`, `TaskExecutionContext`
+
+---
+
+## API changes
+
+### Rust: `workflow!` macro improvements
+
+The `workflow!` macro now supports loops, child workflows, and the infallible builder pattern:
+
+- **`loop task_name N`** — loop a task up to N iterations (fails on max by default)
+- **`loop task_name N exit_with_last`** — loop with graceful exit on max iterations
+- **`flow expr`** — inline a child workflow, merging its task registry automatically
+
+### Rust: infallible builder methods
+
+In v0.1, most builder methods (`then_registered`, `branch_registered`, `join_registered`, `route_registered`) returned `Result<..., BuildError>`, requiring `?` or `.unwrap()` at every step.
+
+In v0.2, all builder methods are **infallible**. Errors are accumulated internally and reported together when `.build()` is called. This means:
+
+- Chaining builder calls no longer requires `?` after each step
+- `.build()` returns `Result<Workflow, BuildErrors>` — a single point where all validation errors surface
+- `BuildErrors` (plural) replaces `BuildError`, collecting every issue found during construction
+
+### Rust crate versions
+
+Update your `Cargo.toml` dependencies from `0.1` to `0.2`:
+
+| Crate | Version |
+|-------|---------|
+| `sayiir-runtime` | `0.2` |
+| `sayiir-persistence` | `0.2` |
+| `sayiir-postgres` | `0.2` |
+
+---
+
+## Breaking changes
+
+- **Rust only:** Builder methods no longer return `Result`. If your code used `?` on intermediate builder calls, remove them — errors now surface at `.build()`. The error type changed from `BuildError` to `BuildErrors`.
+- **Python / Node.js:** No breaking changes. All v0.1 APIs work unchanged.
