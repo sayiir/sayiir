@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/sayiir/sayiir/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
+[![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/A2jWBFZsNK)
 [![Socket Badge](https://badge.socket.dev/pypi/package/sayiir)](https://badge.socket.dev/pypi/package/sayiir)
 
 Write plain Python functions. Sayiir makes them durable — automatic checkpointing, crash recovery, and parallel execution with zero infrastructure.
@@ -390,5 +390,9 @@ MIT
 - [Documentation](https://docs.sayiir.dev/getting-started/python/)
 - [Examples](https://github.com/sayiir/sayiir/tree/main/examples)
 - [GitHub](https://github.com/sayiir/sayiir)
-- [Discord](https://discord.gg/MWSzsHeg)
+- [Discord](https://discord.gg/A2jWBFZsNK)
 - [Roadmap](https://github.com/sayiir/sayiir/blob/main/ROADMAP.md)
+
+---
+
+> ⭐ If you find Sayiir useful, [give us a star on GitHub](https://github.com/sayiir/sayiir) ⭐

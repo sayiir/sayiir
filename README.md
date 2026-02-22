@@ -3,7 +3,7 @@
 **Durable, fast workflow engine that feels like writing normal code.** Graph-based, continuation-driven execution with a Rust core and Python/Node.js bindings — no DSL, no replay, workflows from your plain code.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/MWSzsHeg)
+[![Discord](https://img.shields.io/badge/Discord-Join-7289da)](https://discord.gg/A2jWBFZsNK)
 
 [![crates.io](https://img.shields.io/crates/v/sayiir-core.svg)](https://crates.io/crates/sayiir-core)
 [![docs.rs](https://docs.rs/sayiir-core/badge.svg)](https://docs.rs/sayiir-core)
@@ -20,17 +20,21 @@
 
 > Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
 
+- &#9889; **Zero orchestration** — No separate server or infra to deploy; [enterprise server](https://docs.sayiir.dev/roadmap/) in active development for when you need one
+- &#129408; **Rust core** — High-performance, memory-safe workflow engine
+- &#128737; **Durable** — Automatic checkpointing & crash recovery with pluggable persistence
+- &#129520; **Multi-language** — Type-safe Python, TypeScript, and Rust bindings
+- &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL
+
 ---
 
 ## Why Sayiir?
 
-&#9889;&ensp;**Fast by design.** Rust-native orchestration with no replay overhead — resume from the last checkpoint, not from the beginning of your workflow history. JSON by default, swap to zero-copy rkyv or any binary format of your choice via the pluggable codec abstraction.
+&#9889;&ensp;**No replay overhead.** Resume from the last checkpoint, not from the beginning of your workflow history. JSON by default, swap to zero-copy rkyv or any binary format via the pluggable codec abstraction.
 
-&#128274;&ensp;**No deterministic replay.** Continuation-based execution — Sayiir checkpoints after each task and resumes from the last checkpoint. Your code can call any API, use any library, with zero determinism constraints.
+&#128274;&ensp;**No determinism constraints.** Continuation-based execution means your code can call any API, use any library — no purity rules, no sandboxing.
 
-&#128230;&ensp;**A library, not a platform.** Import it, define your task graph, run it. No separate infrastructure to deploy or operate.
-
-&#9997;&ensp;**Minimal learning curve.** Clean, typed, idiomatic APIs in Python, TypeScript, and Rust. No DSL to learn, no YAML to write — just familiar language patterns with sensible defaults that get out of your way.
+&#9997;&ensp;**Minimal learning curve.** Familiar language patterns with sensible defaults that get out of your way. No DSL, no YAML — just code.
 
 #### 🐍 Python
 
@@ -119,8 +123,6 @@ const status = runDurableWorkflow(workflow, instanceId, 42, PostgresBackend.conn
 
 <a href="https://docs.sayiir.dev/getting-started/nodejs/"><img src="https://img.shields.io/badge/Try_it_live-▶-00C853" alt="Try it live" height="20"></a>
 
-No annotations. No YAML. No separate worker processes. Just code.
-
 ---
 
 ## Documentation
@@ -136,7 +138,8 @@ No annotations. No YAML. No separate worker processes. Just code.
 [How It Works](https://docs.sayiir.dev/concepts/how-it-works/) &#183;
 [Architecture](https://docs.sayiir.dev/concepts/architecture/) &#183;
 [Guides](https://docs.sayiir.dev/guides/durable-workflows/) &#183;
-[Tutorials](https://docs.sayiir.dev/tutorials/order-processing-python/)
+[Tutorials](https://docs.sayiir.dev/tutorials/order-processing-python/) &#183;
+[Examples](https://github.com/sayiir/sayiir/tree/main/examples)
 
 **Reference**&ensp;
 [Python API](https://docs.sayiir.dev/reference/python-api/) &#183;
@@ -164,7 +167,7 @@ No annotations. No YAML. No separate worker processes. Just code.
 
 We're looking for **contributors**, **maintainers**, **sponsors**, and **early adopters**.
 
-[![Discord](https://img.shields.io/badge/Discord-Join%20us-7289da?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/MWSzsHeg)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-7289da?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/A2jWBFZsNK)
 
 [GitHub Issues](https://github.com/sayiir/sayiir/issues) — Bugs and feature requests&ensp;&#183;&ensp;PRs welcome — check `good first issue` labels&ensp;&#183;&ensp;[CONTRIBUTING.md](CONTRIBUTING.md)
 

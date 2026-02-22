@@ -170,5 +170,5 @@ Issues labeled `good first issue` are a great starting point.
 
 ## Community
 
-- [Discord](https://discord.gg/MWSzsHeg) — questions, feedback, discussion
+- [Discord](https://discord.gg/A2jWBFZsNK) — questions, feedback, discussion
 - [GitHub Issues](https://github.com/sayiir/sayiir/issues) — bugs and feature requests
