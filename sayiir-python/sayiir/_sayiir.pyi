@@ -63,7 +63,9 @@ class PyFlowBuilder:
         on_max: str | OnMax = "fail",
     ) -> str: ...
     def add_child_workflow(
-        self, child_id: str, child_builder: PyFlowBuilder,
+        self,
+        child_id: str,
+        child_builder: PyFlowBuilder,
     ) -> None: ...
     def build(self) -> PyWorkflow: ...
 

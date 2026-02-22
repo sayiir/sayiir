@@ -32,9 +32,7 @@ class TestThenFlow:
 
     def test_output_flows_through(self):
         child = Flow("child").then(add_ten).build()
-        parent = (
-            Flow("parent").then(add_one).then_flow(child).then(double).build()
-        )
+        parent = Flow("parent").then(add_one).then_flow(child).then(double).build()
         # 5 + 1 = 6, child: 6 + 10 = 16, then 16 * 2 = 32
         assert run_workflow(parent, 5) == 32
 
