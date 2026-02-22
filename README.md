@@ -20,11 +20,11 @@
 
 > Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
 
-&#9889;&ensp;**Zero orchestration** — No separate server or infra to deploy; [enterprise server](https://docs.sayiir.dev/roadmap/) in active development for when you need one&ensp;
-&#129408;&ensp;**Rust core** — High-performance, memory-safe workflow engine&ensp;
-&#128737;&ensp;**Durable** — Automatic checkpointing & crash recovery with pluggable persistence&ensp;
-&#129520;&ensp;**Multi-language** — Type-safe Python, TypeScript, and Rust bindings
-&#10024;&ensp;**Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL
+- &#9889; **Zero orchestration** — No separate server or infra to deploy; [enterprise server](https://docs.sayiir.dev/roadmap/) in active development for when you need one
+- &#129408; **Rust core** — High-performance, memory-safe workflow engine
+- &#128737; **Durable** — Automatic checkpointing & crash recovery with pluggable persistence
+- &#129520; **Multi-language** — Type-safe Python, TypeScript, and Rust bindings
+- &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL
 
 ---
 
