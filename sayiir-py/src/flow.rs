@@ -87,14 +87,14 @@ impl PyFlowBuilder {
     ) -> PyResult<()> {
         self.inner
             .add_signal(signal_id, signal_name, timeout_secs)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// Add a durable delay.
     fn delay(&mut self, delay_id: String, seconds: f64) -> PyResult<()> {
         self.inner
             .add_delay(delay_id, seconds)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// Add a fork with branches (each branch is a chain of tasks) and a join.
@@ -126,7 +126,7 @@ impl PyFlowBuilder {
                 join_id,
                 join_metadata.map(Into::into).unwrap_or_default(),
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// Add a conditional branch node.
@@ -162,7 +162,7 @@ impl PyFlowBuilder {
         });
         self.inner
             .add_branch(branches, default)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// Add a loop node.
@@ -193,7 +193,7 @@ impl PyFlowBuilder {
                 max_iterations,
                 on_max,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// Add a child workflow (inline composition).
@@ -208,7 +208,7 @@ impl PyFlowBuilder {
         let continuation = self
             .inner
             .build()
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let serializable = continuation.to_serializable();
         let definition_hash = serializable.compute_definition_hash();
 

@@ -340,8 +340,10 @@ export class Flow<TInput, TLast = TInput> {
    */
   thenFlow<TOut>(workflow: Workflow<TLast, TOut>): Flow<TInput, Awaited<TOut>> {
     const childId = `child_${this._childCounter++}`;
-    // Merge child task registry into parent
-    Object.assign(this._taskRegistry, workflow._taskRegistry);
+    // Merge child task registry into parent (parent takes precedence)
+    for (const [key, value] of Object.entries(workflow._taskRegistry)) {
+      this._taskRegistry[key] ??= value;
+    }
     // Tell native builder about the child
     this._builder.addChildWorkflow(childId, workflow._builder);
     return this as unknown as Flow<TInput, Awaited<TOut>>;

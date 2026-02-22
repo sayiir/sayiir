@@ -72,6 +72,14 @@ pub enum BuildError {
     #[error("Loop '{0}': max_iterations must be at least 1")]
     InvalidMaxIterations(String),
 
+    /// The workflow has no tasks.
+    #[error("Workflow must have at least one task")]
+    EmptyWorkflow,
+
+    /// A duration value is not finite or is negative.
+    #[error("{0} must be a finite non-negative number")]
+    InvalidDuration(String),
+
     /// The workflow definition hash doesn't match during hydration.
     #[error("Workflow definition mismatch: expected hash '{expected}', found '{found}'")]
     DefinitionMismatch {

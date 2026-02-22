@@ -558,8 +558,9 @@ class Flow:
         """
         child_id = f"child_{self._child_counter}"
         self._child_counter += 1
-        # Merge child task registry into parent
-        self._task_registry.update(child_workflow._task_registry)
+        # Merge child task registry into parent (parent takes precedence)
+        for key, value in child_workflow._task_registry.items():
+            self._task_registry.setdefault(key, value)
         # Tell native builder about the child
         self._builder.add_child_workflow(child_id, child_workflow._builder)
         return self
