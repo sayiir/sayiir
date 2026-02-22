@@ -40,8 +40,19 @@ export async function runCode(
     }),
   });
 
-  const data = await res.json();
   const duration = Math.round(performance.now() - start);
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    return {
+      ok: false,
+      stdout: "",
+      stderr: `Server error ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`,
+      duration,
+    };
+  }
+
+  const data = await res.json();
 
   return {
     ok: data.ok,

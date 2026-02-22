@@ -29,7 +29,6 @@
   },
   "devDependencies": {
     "cspell": "^9.6.4",
-    "playwright": "^1.58.2",
     "starlight-links-validator": "^0.19.2"
   }
 }

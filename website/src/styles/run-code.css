@@ -14,7 +14,7 @@
 }
 
 .run-code .cm-editor {
-  font-size: 0.875rem;
+  font-size: 0.75rem;
   max-height: 400px;
 }
 
@@ -138,12 +138,12 @@
 /* Fallback pre/code styling before CodeMirror loads */
 .run-code-fallback {
   margin: 0;
-  padding: 0.75rem 1rem;
+  padding: 0.5rem 1rem;
   background: var(--rc-bg);
   overflow-x: auto;
   font-family: var(--sl-font-mono, monospace);
-  font-size: 0.875rem;
-  line-height: 1.6;
+  font-size: 0.75rem;
+  line-height: 1.2;
   color: var(--rc-text);
 }
 

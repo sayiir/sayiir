@@ -8,9 +8,8 @@ const { lang, code } = Astro.props;
 const trimmed = code.trim();
 ---
 
-<div class="run-code" data-lang={lang} data-code={trimmed}>
+<div class="run-code" data-lang={lang}>
   <div class="run-code-toolbar">
-    <kbd>Ctrl+Enter</kbd>
     <button class="run-code-btn" data-run>
       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
       Run
@@ -38,7 +37,7 @@ const trimmed = code.trim();
     container.dataset.initialized = "true";
 
     const lang = container.dataset.lang!;
-    const initialCode = container.dataset.code!;
+    const initialCode = container.querySelector<HTMLElement>(".run-code-fallback code")!.textContent!;
     const editorEl = container.querySelector(".run-code-editor")!;
     const fallback = editorEl.querySelector(".run-code-fallback");
     const btn = container.querySelector("[data-run]") as HTMLButtonElement;
@@ -159,8 +158,9 @@ const trimmed = code.trim();
           },
         ]),
         EditorView.theme({
-          "&": { fontSize: "0.875rem" },
-          ".cm-content": { padding: "0.5rem 0", fontFamily: "var(--sl-font-mono, monospace)" },
+          "&": { fontSize: "0.75rem" },
+          ".cm-content": { padding: "0.25rem 0", fontFamily: "var(--sl-font-mono, monospace)" },
+          ".cm-line": { padding: "0", lineHeight: "1.2" },
           ".cm-gutters": {
             background: "var(--sl-color-gray-6, #1e1e2e)",
             border: "none",

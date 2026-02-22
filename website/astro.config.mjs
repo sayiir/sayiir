@@ -64,7 +64,7 @@ export default defineConfig({
               slug: "guides/signals-and-events",
             },
             {
-              label: "Parallel Workflows",
+              label: "Parallel & Conditional Workflows",
               slug: "guides/parallel-workflows",
             },
             {

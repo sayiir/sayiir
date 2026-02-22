@@ -1,0 +1,80 @@
+---
+interface Props {
+  text: string;
+  target: string;
+}
+
+const { text, target } = Astro.props;
+---
+
+<a class="scroll-hint" href={target}>
+  <span class="scroll-hint-text">{text}</span>
+  <svg class="scroll-hint-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="6 9 12 15 18 9" />
+  </svg>
+</a>
+
+<style>
+  .scroll-hint {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    margin: 1.5rem auto 0.5rem;
+    text-decoration: none;
+    color: var(--sl-color-gray-3);
+    transition: color 0.2s;
+  }
+
+  .scroll-hint:hover {
+    color: var(--sl-color-text);
+  }
+
+  .scroll-hint-text {
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+  }
+
+  .scroll-hint-arrow {
+    animation: bounce 2s ease infinite;
+  }
+
+  @keyframes bounce {
+    0%, 20%, 50%, 80%, 100% {
+      transform: translateY(0);
+    }
+    40% {
+      transform: translateY(6px);
+    }
+    60% {
+      transform: translateY(3px);
+    }
+  }
+</style>
+
+<script>
+  function initScrollHint() {
+    document.querySelectorAll<HTMLAnchorElement>(".scroll-hint").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        const target = document.querySelector(el.getAttribute("href")!);
+        if (target) {
+          target.scrollIntoView({ behavior: "smooth" });
+        }
+      });
+
+      // Fade out once user scrolls past
+      const observer = new IntersectionObserver(
+        ([entry]) => {
+          el.style.opacity = entry.isIntersecting ? "1" : "0";
+          el.style.pointerEvents = entry.isIntersecting ? "auto" : "none";
+        },
+        { threshold: 0 },
+      );
+      observer.observe(el);
+    });
+  }
+
+  initScrollHint();
+  document.addEventListener("astro:after-swap", initScrollHint);
+</script>

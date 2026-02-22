@@ -1,5 +1,6 @@
 ---
 import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+import SplashNav from "../components/SplashNav.astro";
 ---
 
 <StarlightPage
@@ -10,6 +11,7 @@ import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
     hero: { tagline: "Edit the code and hit Run — no install needed." },
   }}
 >
+  <SplashNav />
   <div id="playground-root">
     <iframe
       id="playground-frame"
@@ -28,7 +30,7 @@ import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
     const isLight =
       document.documentElement.dataset.theme === "light" ||
       document.documentElement.classList.contains("sl-theme-light");
-    iframe.contentWindow.postMessage({ type: "theme", theme: isLight ? "light" : "dark" }, "*");
+    iframe.contentWindow.postMessage({ type: "theme", theme: isLight ? "light" : "dark" }, window.location.origin);
   }
 
   // Send theme once iframe loads, and auto-focus so keyboard shortcuts work
@@ -49,8 +51,12 @@ import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
 <style>
   /* Reduce hero padding so the editor is closer to the title */
   :global(.hero) {
-    padding-block: 1rem !important;
+    padding-block: 0.5rem !important;
     text-align: center;
+  }
+
+  :global(.hero h1) {
+    margin-block-start: 1rem !important;
   }
 
   #playground-root {

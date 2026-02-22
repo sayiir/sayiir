@@ -17,28 +17,32 @@ hero:
       link: /getting-started/rust/
       icon: right-arrow
       variant: minimal
-    - text: What's New in v0.2
-      link: /changelog/v02/
-      icon: document
-      variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import SplashNav from '../../components/SplashNav.astro';
+import ScrollHint from '../../components/ScrollHint.astro';
+
+<SplashNav />
 
 <CardGrid>
   <Card title="Zero Learning Curve" icon="rocket">
-    Clean, typed, idiomatic APIs in Python, TypeScript, and Rust. No DSL to learn, no YAML to write — just familiar language patterns with sensible defaults that get out of your way.
+    Clean, typed, idiomatic APIs in Python, TypeScript, and Rust. No DSL, no YAML — just familiar patterns.
   </Card>
-  <Card title="Simple — Library Not Platform" icon="puzzle">
-    `pip install sayiir`, `pnpm add sayiir`, or add a Cargo dependency. No orchestrator to deploy, no infrastructure to manage.
+  <Card title="Library Not Platform" icon="puzzle">
+    `pip install sayiir`, `pnpm add sayiir`, or add a Cargo dep. No orchestrator to deploy.
   </Card>
-  <Card title="Fast — Native Rust Performance" icon="star">
-    Rust core with no replay overhead. JSON by default, swap to zero-copy rkyv or any binary format via the pluggable codec abstraction.
+  <Card title="Native Rust Performance" icon="star">
+    Rust core, no replay overhead. JSON by default, swap to zero-copy rkyv or any binary codec.
   </Card>
   <Card title="Pluggable & Lightweight" icon="setting">
-    Swap backends, codecs, and runners. InMemory for tests, Postgres for production. Minimal footprint.
+    Swap backends, codecs, runners. InMemory for tests, Postgres for production.
   </Card>
 </CardGrid>
+
+<ScrollHint text="See it in action" target="#code-examples" />
+
+<div id="code-examples"></div>
 
 ## Python
 
@@ -101,7 +105,7 @@ let workflow = workflow! {
 
 ---
 
-## Need More?
+<LinkCard title="What's New in v0.2" href="/changelog/v02/" description="Latest release notes and changes." />
 
 <Card title="Sayiir Server — Coming Soon" icon="laptop">
   Same workflows, same code — plus a managed platform with a **web dashboard**, **multi-tenancy**, **scheduled triggers**, **observability**, and **Kubernetes-native deployment**. [Learn more →](/server/)

@@ -3,8 +3,6 @@ title: Python Quick Start
 description: Get started with Sayiir in Python in 5 minutes — simple durable workflows with zero learning curve. pip install, define tasks, run.
 ---
 
-import RunCode from '../../../components/RunCode.astro';
-
 ## Installation
 
 ```bash
@@ -15,7 +13,8 @@ pip install sayiir
 
 Define tasks with `@task` and chain them with `Flow`:
 
-<RunCode lang="python" code={`from sayiir import task, Flow, run_workflow
+```python
+from sayiir import task, Flow, run_workflow
 
 @task
 def fetch_user(user_id: int) -> dict:
@@ -27,7 +26,8 @@ def send_email(user: dict) -> str:
 
 workflow = Flow("welcome").then(fetch_user).then(send_email).build()
 result = run_workflow(workflow, 42)
-print(result)`} />
+print(result)  # "Sent welcome to Alice"
+```
 
 ## Make it durable
 
@@ -88,6 +88,54 @@ result = run_workflow(workflow, {"order_id": 1, "amount": 99.99})
 ```
 
 Pydantic models are serialized and deserialized automatically at each checkpoint boundary.
+
+## Inline lambdas
+
+You don't need `@task` for every step — pass inline functions directly:
+
+```python
+from sayiir import Flow, run_workflow
+
+workflow = (
+    Flow("quick")
+    .then("double", lambda x: x * 2)
+    .then("format", lambda x: f"Result: {x}")
+    .build()
+)
+
+result = run_workflow(workflow, 21)
+# "Result: 42"
+```
+
+Use `@task` when you need metadata (retries, timeouts, tags) or want to reuse a task across workflows.
+
+## Parallel execution
+
+Use `.fork()` and `.join()` to run branches in parallel:
+
+```python
+from sayiir import task, Flow, branch, run_workflow
+
+@task
+def validate_payment(order: dict) -> dict:
+    return {"payment": "valid"}
+
+@task
+def check_inventory(order: dict) -> dict:
+    return {"stock": "available"}
+
+workflow = (
+    Flow("checkout")
+    .fork([
+        branch("payment", validate_payment),
+        branch("inventory", check_inventory),
+    ])
+    .join("finalize", lambda results: {**results[0], **results[1]})
+    .build()
+)
+
+result = run_workflow(workflow, {"id": 1})
+```
 
 ## Next steps
 
