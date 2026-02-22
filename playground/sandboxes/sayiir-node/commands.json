@@ -1,0 +1,12 @@
+{
+  "run": {
+    "engine": "docker",
+    "entry": "main.js",
+    "steps": [{ "box": "sayiir-node", "command": ["node", "main.js"] }]
+  },
+  "run-esm": {
+    "engine": "docker",
+    "entry": "main.mjs",
+    "steps": [{ "box": "sayiir-node", "command": ["node", "main.mjs"] }]
+  }
+}

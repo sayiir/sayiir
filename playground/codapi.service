@@ -1,0 +1,15 @@
+[Unit]
+Description=Codapi - code sandbox server
+After=network.target
+
+[Service]
+Type=simple
+User=codapi
+WorkingDirectory=/opt/codapi
+ExecStart=/opt/codapi/codapi
+Restart=on-failure
+StandardOutput=file:/opt/codapi/codapi.log
+StandardError=file:/opt/codapi/codapi.log
+
+[Install]
+WantedBy=multi-user.target

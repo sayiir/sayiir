@@ -1,0 +1,75 @@
+---
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+import SplashNav from "../components/SplashNav.astro";
+---
+
+<StarlightPage
+  frontmatter={{
+    title: "Playground",
+    description: "Try Sayiir in the browser — edit the code and hit Run, no install needed.",
+    template: "splash",
+    hero: { tagline: "Edit the code and hit Run — no install needed." },
+  }}
+>
+  <SplashNav />
+  <div id="playground-root">
+    <iframe
+      id="playground-frame"
+      src="/playground-frame"
+      title="Sayiir Playground"
+      sandbox="allow-scripts allow-same-origin"
+    ></iframe>
+  </div>
+</StarlightPage>
+
+<script>
+  // Sync Starlight theme changes to the iframe
+  function sendTheme() {
+    const iframe = document.getElementById("playground-frame") as HTMLIFrameElement;
+    if (!iframe?.contentWindow) return;
+    const isLight =
+      document.documentElement.dataset.theme === "light" ||
+      document.documentElement.classList.contains("sl-theme-light");
+    iframe.contentWindow.postMessage({ type: "theme", theme: isLight ? "light" : "dark" }, window.location.origin);
+  }
+
+  // Send theme once iframe loads, and auto-focus so keyboard shortcuts work
+  const iframe = document.getElementById("playground-frame") as HTMLIFrameElement;
+  iframe?.addEventListener("load", () => {
+    sendTheme();
+    iframe.focus();
+  });
+
+  // Watch for Starlight theme toggles
+  new MutationObserver(sendTheme).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme", "class"],
+  });
+
+</script>
+
+<style>
+  /* Reduce hero padding so the editor is closer to the title */
+  :global(.hero) {
+    padding-block: 0.5rem !important;
+    text-align: center;
+  }
+
+  :global(.hero h1) {
+    margin-block-start: 1rem !important;
+  }
+
+  #playground-root {
+    max-width: var(--sl-content-width, 45rem);
+    margin: 0 auto;
+    padding-inline: 1rem;
+  }
+
+  #playground-frame {
+    width: 100%;
+    height: 560px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+  }
+</style>

@@ -89,6 +89,54 @@ result = run_workflow(workflow, {"order_id": 1, "amount": 99.99})
 
 Pydantic models are serialized and deserialized automatically at each checkpoint boundary.
 
+## Inline lambdas
+
+You don't need `@task` for every step — pass inline functions directly:
+
+```python
+from sayiir import Flow, run_workflow
+
+workflow = (
+    Flow("quick")
+    .then("double", lambda x: x * 2)
+    .then("format", lambda x: f"Result: {x}")
+    .build()
+)
+
+result = run_workflow(workflow, 21)
+# "Result: 42"
+```
+
+Use `@task` when you need metadata (retries, timeouts, tags) or want to reuse a task across workflows.
+
+## Parallel execution
+
+Use `.fork()` and `.join()` to run branches in parallel:
+
+```python
+from sayiir import task, Flow, branch, run_workflow
+
+@task
+def validate_payment(order: dict) -> dict:
+    return {"payment": "valid"}
+
+@task
+def check_inventory(order: dict) -> dict:
+    return {"stock": "available"}
+
+workflow = (
+    Flow("checkout")
+    .fork([
+        branch("payment", validate_payment),
+        branch("inventory", check_inventory),
+    ])
+    .join("finalize", lambda results: {**results[0], **results[1]})
+    .build()
+)
+
+result = run_workflow(workflow, {"id": 1})
+```
+
 ## Next steps
 
 - [Retries & Timeouts](/guides/retries-and-timeouts/) — exponential backoff, timeout behavior

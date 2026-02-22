@@ -1,0 +1,152 @@
+.run-code {
+  --rc-bg: var(--sl-color-gray-6, #1e1e2e);
+  --rc-border: var(--sl-color-gray-5, #2e2e4a);
+  --rc-text: var(--sl-color-white, #e2e8f0);
+  --rc-muted: var(--sl-color-gray-3, #94a3b8);
+  --rc-accent: var(--sl-color-accent, #6366f1);
+  --rc-success: #22c55e;
+  --rc-error: #ef4444;
+
+  border: 1px solid var(--rc-border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1rem 0;
+}
+
+.run-code .cm-editor {
+  font-size: 0.75rem;
+  max-height: 400px;
+}
+
+.run-code .cm-editor.cm-focused {
+  outline: none;
+}
+
+.run-code-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--rc-bg);
+  border-bottom: 1px solid var(--rc-border);
+}
+
+.run-code-toolbar kbd {
+  font-family: inherit;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid var(--rc-border);
+  color: var(--rc-muted);
+}
+
+.run-code-btn {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0.35rem 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--rc-accent);
+  color: #fff;
+  transition: opacity 0.15s;
+}
+
+.run-code-btn:hover {
+  opacity: 0.9;
+}
+
+.run-code-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.run-code-btn .spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: rc-spin 0.6s linear infinite;
+  display: inline-block;
+}
+
+@keyframes rc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.run-code-output {
+  border-top: 1px solid var(--rc-border);
+  display: none;
+}
+
+.run-code-output.visible {
+  display: block;
+}
+
+.run-code-output-header {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--rc-muted);
+  padding: 0.4rem 0.75rem;
+  background: var(--rc-bg);
+  border-bottom: 1px solid var(--rc-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.run-code-status {
+  font-family: var(--sl-font-mono, monospace);
+  font-size: 0.7rem;
+}
+
+.run-code-status.success {
+  color: var(--rc-success);
+}
+
+.run-code-status.error {
+  color: var(--rc-error);
+}
+
+.run-code-output-body {
+  font-family: var(--sl-font-mono, monospace);
+  font-size: 0.82rem;
+  line-height: 1.6;
+  padding: 0.6rem 0.75rem;
+  background: var(--rc-bg);
+  min-height: 32px;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--rc-text);
+}
+
+.run-code-output-body.has-error {
+  color: var(--rc-error);
+}
+
+/* Fallback pre/code styling before CodeMirror loads */
+.run-code-fallback {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  background: var(--rc-bg);
+  overflow-x: auto;
+  font-family: var(--sl-font-mono, monospace);
+  font-size: 0.75rem;
+  line-height: 1.2;
+  color: var(--rc-text);
+}
+
+.run-code-fallback code {
+  font-family: inherit;
+}

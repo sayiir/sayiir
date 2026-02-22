@@ -8,7 +8,7 @@ export default defineConfig({
   integrations: [
     mermaid(),
     starlight({
-      plugins: [starlightLinksValidator()],
+      plugins: [starlightLinksValidator({ exclude: ["/playground"] })],
       title: "Sayiir",
       logo: {
         src: "./public/favicon.png",
@@ -30,8 +30,9 @@ export default defineConfig({
           },
         },
       ],
-      customCss: ["./src/styles/custom.css"],
+      customCss: ["./src/styles/custom.css", "./src/styles/run-code.css"],
       sidebar: [
+        { label: "Playground", link: "/playground", badge: "New" },
         {
           label: "Getting Started",
           items: [
@@ -63,7 +64,7 @@ export default defineConfig({
               slug: "guides/signals-and-events",
             },
             {
-              label: "Parallel Workflows",
+              label: "Parallel & Conditional Workflows",
               slug: "guides/parallel-workflows",
             },
             {
@@ -137,6 +138,12 @@ export default defineConfig({
           label: "Sayiir Server",
           items: [
             { label: "Platform Overview", slug: "server", badge: "Soon" },
+          ],
+        },
+        {
+          label: "Changelog",
+          items: [
+            { label: "v0.2", slug: "changelog/v02", badge: "Latest" },
           ],
         },
         { label: "Roadmap", slug: "roadmap" },

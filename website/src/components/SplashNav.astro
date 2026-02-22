@@ -1,0 +1,186 @@
+---
+/**
+ * Collapsible navigation menu for splash pages (no sidebar).
+ * Fixed-position button in the header area + dropdown overlay.
+ */
+interface NavItem {
+  label: string;
+  href: string;
+}
+interface NavGroup {
+  label: string;
+  items: NavItem[];
+}
+
+const groups: NavGroup[] = [
+  {
+    label: "Getting Started",
+    items: [
+      { label: "Python", href: "/getting-started/python/" },
+      { label: "Node.js", href: "/getting-started/nodejs/" },
+      { label: "Rust", href: "/getting-started/rust/" },
+    ],
+  },
+  {
+    label: "Learn",
+    items: [
+      { label: "How It Works", href: "/concepts/how-it-works/" },
+      { label: "Architecture", href: "/concepts/architecture/" },
+      { label: "Playground", href: "/playground/" },
+    ],
+  },
+  {
+    label: "Guides",
+    items: [
+      { label: "Durable Workflows", href: "/guides/durable-workflows/" },
+      { label: "Retries & Timeouts", href: "/guides/retries-and-timeouts/" },
+      { label: "Parallel Workflows", href: "/guides/parallel-workflows/" },
+      { label: "Signals & Events", href: "/guides/signals-and-events/" },
+    ],
+  },
+  {
+    label: "Reference",
+    items: [
+      { label: "Python API", href: "/reference/python-api/" },
+      { label: "Node.js API", href: "/reference/nodejs-api/" },
+      { label: "Rust API", href: "/reference/rust-api/" },
+    ],
+  },
+];
+---
+
+<div id="splash-nav-wrapper">
+  <button class="splash-nav-btn" id="splash-nav-toggle" aria-expanded="false" aria-controls="splash-nav-overlay">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    Docs
+  </button>
+
+  <div class="splash-nav-overlay" id="splash-nav-overlay">
+    <ul>
+      {groups.map((group) => (
+        <li>
+          <div class="splash-nav-group">{group.label}</div>
+          <ul>
+            {group.items.map((item) => (
+              <li><a href={item.href}>{item.label}</a></li>
+            ))}
+          </ul>
+        </li>
+      ))}
+    </ul>
+  </div>
+</div>
+
+<style>
+  #splash-nav-wrapper {
+    position: fixed;
+    top: 0.6rem;
+    left: 0.75rem;
+    z-index: 10;
+  }
+
+  .splash-nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: var(--sl-color-bg);
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 6px;
+    color: var(--sl-color-text);
+    cursor: pointer;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.8rem;
+    font-family: inherit;
+  }
+
+  .splash-nav-btn:hover {
+    border-color: var(--sl-color-text);
+  }
+
+  .splash-nav-overlay {
+    display: none;
+    position: absolute;
+    top: calc(100% + 0.35rem);
+    left: 0;
+    width: 18rem;
+    max-height: calc(100vh - 4rem);
+    overflow-y: auto;
+    background: var(--sl-color-bg);
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+    padding: 0.75rem;
+  }
+
+  .splash-nav-overlay.open {
+    display: block;
+  }
+
+  .splash-nav-overlay ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .splash-nav-overlay li {
+    margin: 0;
+  }
+
+  .splash-nav-overlay a {
+    display: block;
+    padding: 0.25rem 0.5rem;
+    color: var(--sl-color-text);
+    text-decoration: none;
+    font-size: 0.85rem;
+    border-radius: 4px;
+  }
+
+  .splash-nav-overlay a:hover {
+    background: var(--sl-color-gray-6);
+  }
+
+  .splash-nav-group {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--sl-color-gray-3);
+    padding: 0.4rem 0.5rem 0.15rem;
+    margin-top: 0.4rem;
+  }
+
+  .splash-nav-group:first-child,
+  li:first-child .splash-nav-group {
+    margin-top: 0;
+  }
+</style>
+
+<script>
+  function initSplashNav() {
+    const btn = document.getElementById("splash-nav-toggle");
+    const overlay = document.getElementById("splash-nav-overlay");
+    if (!btn || !overlay) return;
+
+    btn.addEventListener("click", () => {
+      const open = overlay.classList.toggle("open");
+      btn.setAttribute("aria-expanded", String(open));
+    });
+
+    document.addEventListener("click", (e) => {
+      if (!btn.contains(e.target as Node) && !overlay.contains(e.target as Node)) {
+        overlay.classList.remove("open");
+        btn.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        overlay.classList.remove("open");
+        btn.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
+  initSplashNav();
+  document.addEventListener("astro:after-swap", initSplashNav);
+</script>

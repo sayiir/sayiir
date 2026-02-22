@@ -1,0 +1,726 @@
+---
+// Standalone playground frame — rendered WITHOUT Starlight layout.
+// Embedded via iframe in playground.astro for CSS isolation.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const codapiUrl = import.meta.env.PUBLIC_CODAPI_URL || "http://localhost:1313";
+const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts"), "utf-8");
+---
+
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <style is:global>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --accent: #6366f1;
+      --accent-hover: #818cf8;
+      --accent-low: #1a1a2e;
+      --bg: #0f0f1a;
+      --bg-surface: #181828;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --border: #2e2e4a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+    }
+
+    html[data-theme="light"] {
+      --accent: #4f46e5;
+      --accent-hover: #6366f1;
+      --accent-low: #e0e7ff;
+      --bg: #ffffff;
+      --bg-surface: #f8fafc;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 10px 10px 0 0;
+      padding: 0.5rem 0.75rem;
+      flex-shrink: 0;
+    }
+
+    .tabs { display: flex; gap: 0; }
+
+    .tab {
+      padding: 0.4rem 0.9rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+      font-family: var(--font-sans);
+    }
+
+    .tab:hover { color: var(--text); background: var(--accent-low); }
+    .tab.active { color: var(--accent); background: var(--accent-low); }
+
+    .toolbar-actions { display: flex; align-items: center; gap: 0.5rem; }
+
+    .file-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      padding: 0.25rem 0.5rem;
+      background: var(--bg);
+      border-radius: 4px;
+    }
+
+    .btn {
+      font-family: var(--font-sans);
+      font-size: 0.8rem;
+      font-weight: 500;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      padding: 0.45rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: background 0.15s, transform 0.1s;
+    }
+
+    .btn:active { transform: scale(0.97); }
+
+    .btn-run { background: var(--accent); color: #fff; }
+    .btn-run:hover { background: var(--accent-hover); }
+    .btn-run:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .btn-reset {
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    .btn-reset:hover { color: var(--text); border-color: var(--text-muted); }
+
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Editor ── */
+    .editor-wrapper {
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+      height: 300px;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    #editor { width: 100%; height: 100%; }
+
+    /* ── Output ── */
+    .output-wrapper {
+      border: 1px solid var(--border);
+      border-radius: 0 0 10px 10px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .output-header {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      padding: 0.5rem 0.75rem;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .output-status { font-family: var(--font-mono); font-size: 0.7rem; }
+    .output-status.success { color: var(--success); }
+    .output-status.error { color: var(--error); }
+
+    .output-body {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.6;
+      padding: 0.75rem 1rem;
+      background: var(--bg);
+      min-height: 80px;
+      max-height: 200px;
+      overflow-y: auto;
+      box-sizing: content-box;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text-muted);
+    }
+
+    .output-body.has-content { color: var(--text); }
+    .output-body.has-error { color: var(--error); }
+
+    /* ── Examples ── */
+    .examples { padding: 0.75rem 0; flex-shrink: 0; }
+    .examples h2 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: var(--text-muted);
+    }
+    .example-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .chip {
+      font-size: 0.78rem;
+      font-family: var(--font-sans);
+      padding: 0.35rem 0.8rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .chip:hover, .chip.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-low);
+    }
+  </style>
+</head>
+<body>
+  <div id="frame-root">
+    <div class="toolbar">
+      <div class="tabs">
+        <button class="tab active" data-lang="python">Python</button>
+        <button class="tab" data-lang="node">Node.js</button>
+      </div>
+      <div class="toolbar-actions">
+        <span class="file-label" id="file-label">main.py</span>
+        <button class="btn btn-reset" id="reset-btn">Reset</button>
+        <button class="btn btn-run" id="run-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+          Run
+        </button>
+      </div>
+    </div>
+
+    <div class="editor-wrapper">
+      <div id="editor"></div>
+    </div>
+
+    <div class="output-wrapper">
+      <div class="output-header">
+        <span>Output</span>
+        <span class="output-status" id="output-status"></span>
+      </div>
+      <div class="output-body" id="output">Click Run or press Ctrl+Enter</div>
+    </div>
+
+    <div class="examples">
+      <h2>Examples</h2>
+      <div class="example-chips">
+        <button class="chip active" data-example="hello">Hello World</button>
+        <button class="chip" data-example="parallel">Parallel Tasks</button>
+        <button class="chip" data-example="retry">Retries</button>
+        <button class="chip" data-example="routing">Routing</button>
+      </div>
+    </div>
+  </div>
+
+  <script is:inline src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script is:inline define:vars={{ codapiUrl, sayiirDts }}>
+    var CODAPI_URL = codapiUrl + '/v1/exec';
+
+    var LANGS = {
+      python: { monaco: 'python', sandbox: 'sayiir-python', entry: 'main.py', label: 'main.py' },
+      node:   { monaco: 'javascript', sandbox: 'sayiir-node', entry: 'main.js', label: 'main.js' },
+    };
+
+    var EXAMPLES = {
+      python: {
+        hello: 'from sayiir import task, Flow, run_workflow\n\n@task\ndef fetch_user(user_id: int) -> dict:\n    return {"id": user_id, "name": "Alice"}\n\n@task\ndef send_email(user: dict) -> str:\n    return f"Sent welcome to {user[\'name\']}"\n\nworkflow = Flow("welcome").then(fetch_user).then(send_email).build()\nresult = run_workflow(workflow, 42)\nprint(result)',
+        parallel: 'from sayiir import task, Flow, run_workflow\n\n@task\ndef validate_payment(order: dict) -> dict:\n    return {**order, "payment": "valid"}\n\n@task\ndef check_inventory(order: dict) -> dict:\n    return {**order, "stock": "available"}\n\n@task\ndef finalize(results: dict) -> str:\n    return f"Order complete: {results}"\n\nworkflow = (\n    Flow("checkout")\n    .fork()\n        .branch(validate_payment)\n        .branch(check_inventory)\n    .join(finalize)\n    .build()\n)\nprint(run_workflow(workflow, {"id": 1, "item": "Widget"}))',
+        retry: 'from sayiir import task, Flow, run_workflow\n\n@task(timeout="5s", retries=3)\ndef fetch_data(query: str) -> str:\n    return f"Result for: {query}"\n\nworkflow = Flow("search").then(fetch_data).build()\nprint(run_workflow(workflow, "sayiir"))',
+        routing: 'from sayiir import task, Flow, run_workflow\n\n@task\ndef classify(ticket: dict) -> str:\n    return "billing" if ticket["type"] == "invoice" else "tech"\n\n@task\ndef handle_billing(ticket: dict) -> str:\n    return f"Billing handled: ticket #{ticket[\'id\']}"\n\n@task\ndef handle_tech(ticket: dict) -> str:\n    return f"Tech resolved: ticket #{ticket[\'id\']}"\n\nworkflow = (\n    Flow("support")\n    .route(classify, keys=["billing", "tech"])\n        .branch("billing", handle_billing)\n        .branch("tech", handle_tech)\n    .done()\n    .build()\n)\nprint(run_workflow(workflow, {"id": 42, "type": "invoice"}))',
+      },
+      node: {
+        hello: 'const { task, flow, runWorkflow } = require("sayiir");\n\nconst fetchUser = task("fetch-user", (id) => {\n  return { id, name: "Alice" };\n});\n\nconst sendEmail = task("send-email", (user) => {\n  return `Sent welcome to ${user.name}`;\n});\n\nconst workflow = flow("welcome")\n  .then(fetchUser)\n  .then(sendEmail)\n  .build();\n\nrunWorkflow(workflow, 42).then(console.log);',
+        parallel: 'const { task, flow, branch, runDurableWorkflow, InMemoryBackend } = require("sayiir");\n\nconst validatePayment = task("validate-payment", (order) => {\n  return { ...order, payment: "valid" };\n});\n\nconst checkInventory = task("check-inventory", (order) => {\n  return { ...order, stock: "available" };\n});\n\nconst finalize = task("finalize", (results) => {\n  return `Order complete: ${JSON.stringify(results)}`;\n});\n\nconst workflow = flow("checkout")\n  .fork([branch("payment", validatePayment), branch("inventory", checkInventory)])\n  .join("finalize", finalize)\n  .build();\n\nconst backend = new InMemoryBackend();\nconst status = runDurableWorkflow(workflow, "run-1", { id: 1, item: "Widget" }, backend);\nconsole.log(status.output);',
+        retry: 'const { task, flow, runWorkflow } = require("sayiir");\n\nconst fetchData = task("fetch-data", (query) => {\n  return `Result for: ${query}`;\n}, { timeout: "5s", retries: 3 });\n\nconst workflow = flow("search").then(fetchData).build();\nrunWorkflow(workflow, "sayiir").then(console.log);',
+        routing: 'const { task, flow, runDurableWorkflow, InMemoryBackend } = require("sayiir");\n\nconst classify = task("classify", (ticket) => {\n  return ticket.type === "invoice" ? "billing" : "tech";\n});\n\nconst handleBilling = task("handle-billing", (ticket) => {\n  return `Billing handled: ticket #${ticket.id}`;\n});\n\nconst handleTech = task("handle-tech", (ticket) => {\n  return `Tech resolved: ticket #${ticket.id}`;\n});\n\nconst workflow = flow("support")\n  .route(classify, ["billing", "tech"])\n    .branch("billing", handleBilling)\n    .branch("tech", handleTech)\n  .done()\n  .build();\n\nconst backend = new InMemoryBackend();\nconst status = runDurableWorkflow(workflow, "run-1", { id: 42, type: "invoice" }, backend);\nconsole.log(status.output);',
+      },
+    };
+
+    var currentLang = 'python';
+    var currentExample = 'hello';
+    var editor = null;
+    var isRunning = false;
+
+    // ── Theme sync from parent (Starlight) ──
+    window.addEventListener('message', function(e) {
+      if (e.origin !== window.location.origin) return;
+      if (e.data && e.data.type === 'theme') {
+        var theme = e.data.theme;
+        document.documentElement.setAttribute('data-theme', theme);
+        if (editor && typeof monaco !== 'undefined') {
+          monaco.editor.setTheme(theme === 'light' ? 'sayiir-light' : 'sayiir-dark');
+        }
+      }
+    });
+
+    // ── Monaco ──
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+
+    require(['vs/editor/editor.main'], function () {
+      // JS type declarations
+      monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+        noSemanticValidation: false,
+        noSyntaxValidation: false,
+      });
+      monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
+        target: monaco.languages.typescript.ScriptTarget.ES2020,
+        allowNonTsExtensions: true,
+        moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+        module: monaco.languages.typescript.ModuleKind.CommonJS,
+        checkJs: true,
+        allowJs: true,
+        strict: false,
+      });
+      monaco.languages.typescript.javascriptDefaults.addExtraLib(sayiirDts, 'sayiir.d.ts');
+
+      // Themes
+      monaco.editor.defineTheme('sayiir-dark', {
+        base: 'vs-dark', inherit: true,
+        rules: [
+          { token: 'comment', foreground: '6272a4', fontStyle: 'italic' },
+          { token: 'keyword', foreground: 'c792ea' },
+          { token: 'string', foreground: 'a5d6a7' },
+          { token: 'number', foreground: 'f78c6c' },
+          { token: 'type', foreground: '82aaff' },
+          { token: 'function', foreground: '82aaff' },
+        ],
+        colors: {
+          'editor.background': '#1e1e2e',
+          'editor.foreground': '#e2e8f0',
+          'editor.lineHighlightBackground': '#2a2a3e',
+          'editor.selectionBackground': '#3e3e5e',
+          'editorCursor.foreground': '#6366f1',
+          'editorLineNumber.foreground': '#4a4a6a',
+          'editorLineNumber.activeForeground': '#818cf8',
+          'editorWidget.background': '#181828',
+          'editorWidget.border': '#2e2e4a',
+          'editorSuggestWidget.background': '#181828',
+          'editorSuggestWidget.border': '#2e2e4a',
+          'editorSuggestWidget.selectedBackground': '#2a2a3e',
+        },
+      });
+
+      monaco.editor.defineTheme('sayiir-light', {
+        base: 'vs', inherit: true,
+        rules: [
+          { token: 'comment', foreground: '6b7280', fontStyle: 'italic' },
+          { token: 'keyword', foreground: '7c3aed' },
+          { token: 'string', foreground: '16a34a' },
+          { token: 'number', foreground: 'ea580c' },
+          { token: 'type', foreground: '4f46e5' },
+          { token: 'function', foreground: '4f46e5' },
+        ],
+        colors: {
+          'editor.background': '#ffffff',
+          'editor.foreground': '#1e293b',
+          'editor.lineHighlightBackground': '#f1f5f9',
+          'editor.selectionBackground': '#e0e7ff',
+          'editorCursor.foreground': '#4f46e5',
+          'editorLineNumber.foreground': '#cbd5e1',
+          'editorLineNumber.activeForeground': '#4f46e5',
+          'editorWidget.background': '#ffffff',
+          'editorWidget.border': '#e2e8f0',
+          'editorSuggestWidget.background': '#ffffff',
+          'editorSuggestWidget.border': '#e2e8f0',
+          'editorSuggestWidget.selectedBackground': '#f1f5f9',
+        },
+      });
+
+      // Detect initial theme from parent
+      var initialTheme = 'sayiir-dark';
+      try {
+        var parentTheme = window.parent.document.documentElement.dataset.theme;
+        if (parentTheme === 'light' || window.parent.document.documentElement.classList.contains('sl-theme-light')) {
+          initialTheme = 'sayiir-light';
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      } catch (e) { /* cross-origin, default to dark */ }
+
+      editor = monaco.editor.create(document.getElementById('editor'), {
+        value: EXAMPLES.python.hello,
+        language: 'python',
+        theme: initialTheme,
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 12.5,
+        lineHeight: 20,
+        minimap: { enabled: false },
+        scrollBeyondLastLine: false,
+        padding: { top: 12, bottom: 12 },
+        renderLineHighlight: 'line',
+        automaticLayout: true,
+        tabSize: 4,
+        insertSpaces: true,
+        wordWrap: 'on',
+        suggestOnTriggerCharacters: true,
+        quickSuggestions: true,
+        parameterHints: { enabled: true },
+        bracketPairColorization: { enabled: true },
+        smoothScrolling: true,
+        cursorBlinking: 'smooth',
+        cursorSmoothCaretAnimation: 'on',
+        scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8, useShadows: false },
+      });
+
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, handleRun);
+
+      // Register completion/hover/signature providers
+      registerPythonProviders(monaco);
+      registerJSProviders(monaco);
+    });
+
+    function registerPythonProviders(monaco) {
+      var CK = monaco.languages.CompletionItemKind;
+
+      var SAYIIR_PY = [
+        { label: 'task', kind: CK.Function, detail: 'decorator', doc: '@task — mark a function as a workflow task' },
+        { label: 'Flow', kind: CK.Class, detail: 'class', doc: 'Flow(name) — build a workflow' },
+        { label: 'run_workflow', kind: CK.Function, detail: 'function', doc: 'run_workflow(workflow, input) -> Any' },
+        { label: 'run_durable_workflow', kind: CK.Function, detail: 'function', doc: 'run_durable_workflow(workflow, instance_id, input, backend=None) -> WorkflowStatus' },
+        { label: 'InMemoryBackend', kind: CK.Class, detail: 'class', doc: 'InMemoryBackend() — in-memory persistence' },
+        { label: 'PostgresBackend', kind: CK.Class, detail: 'class', doc: 'PostgresBackend(url) — PostgreSQL persistence' },
+        { label: 'RetryPolicy', kind: CK.Class, detail: 'class', doc: 'RetryPolicy(max_retries, initial_delay_secs=1.0, backoff_multiplier=2.0)' },
+        { label: 'send_signal', kind: CK.Function, detail: 'function', doc: 'send_signal(instance_id, signal_name, payload, backend=None)' },
+        { label: 'get_task_context', kind: CK.Function, detail: 'function', doc: 'get_task_context() -> TaskExecutionContext' },
+      ];
+
+      var FLOW_METHODS_PY = [
+        { label: 'then', kind: CK.Method, detail: 'Flow', doc: '.then(task_fn)', insert: 'then(${1:task_fn})' },
+        { label: 'fork', kind: CK.Method, detail: 'ForkBuilder', doc: '.fork()', insert: 'fork()' },
+        { label: 'route', kind: CK.Method, detail: 'BranchBuilder', doc: '.route(key_fn, keys=[...])', insert: 'route(${1:key_fn}, keys=[${2:"a", "b"}])' },
+        { label: 'delay', kind: CK.Method, detail: 'Flow', doc: '.delay(name, duration)', insert: 'delay("${1:name}", "${2:30s}")' },
+        { label: 'wait_for_signal', kind: CK.Method, detail: 'Flow', doc: '.wait_for_signal(signal_name)', insert: 'wait_for_signal("${1:signal_name}")' },
+        { label: 'build', kind: CK.Method, detail: 'Workflow', doc: '.build()', insert: 'build()' },
+        { label: 'branch', kind: CK.Method, detail: 'ForkBuilder', doc: '.branch(task_fn)', insert: 'branch(${1})' },
+        { label: 'join', kind: CK.Method, detail: 'Flow', doc: '.join(task_fn)', insert: 'join(${1:task_fn})' },
+        { label: 'done', kind: CK.Method, detail: 'Flow', doc: '.done()', insert: 'done()' },
+      ];
+
+      function mkCompletion(item, range) {
+        return {
+          label: item.label, kind: item.kind, detail: item.detail,
+          documentation: { value: item.doc },
+          insertText: item.insert || item.label,
+          insertTextRules: item.insert ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+          range: range,
+        };
+      }
+
+      monaco.languages.registerCompletionItemProvider('python', {
+        triggerCharacters: ['.', '(', ' '],
+        provideCompletionItems: function(model, position) {
+          var textUntilPos = model.getValueInRange({
+            startLineNumber: position.lineNumber, startColumn: 1,
+            endLineNumber: position.lineNumber, endColumn: position.column,
+          });
+          var word = model.getWordUntilPosition(position);
+          var range = {
+            startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+            startColumn: word.startColumn, endColumn: word.endColumn,
+          };
+          if (textUntilPos.match(/\.\s*[a-z_]*$/)) {
+            return { suggestions: FLOW_METHODS_PY.map(function(i) { return mkCompletion(i, range); }) };
+          }
+          return { suggestions: SAYIIR_PY.map(function(i) { return mkCompletion(i, range); }) };
+        },
+      });
+
+      // Hover
+      var PY_HOVER = {
+        task: '```python\n@task(name=None, timeout=None, retries=None, tags=None)\n```\nMark a function as a workflow task.',
+        Flow: '```python\nFlow(name: str)\n```\nBuild a workflow. Methods: `.then()` `.fork()` `.route()` `.delay()` `.wait_for_signal()` `.build()`',
+        run_workflow: '```python\nrun_workflow(workflow, input, *, instance_id=None, backend=None) -> Any\n```\nRun a workflow and return the result.',
+        run_durable_workflow: '```python\nrun_durable_workflow(workflow, instance_id, input, backend=None) -> WorkflowStatus\n```\nRun with durable checkpointing.',
+        send_signal: '```python\nsend_signal(instance_id, signal_name, payload, backend=None)\n```\nSend a signal to a waiting workflow.',
+        InMemoryBackend: '```python\nInMemoryBackend()\n```\nIn-memory persistence (non-durable).',
+        PostgresBackend: '```python\nPostgresBackend(url: str)\n```\nPostgreSQL persistence for production.',
+      };
+
+      monaco.languages.registerHoverProvider('python', {
+        provideHover: function(model, position) {
+          var word = model.getWordAtPosition(position);
+          if (!word) return null;
+          var doc = PY_HOVER[word.word];
+          if (!doc) return null;
+          return {
+            range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn),
+            contents: [{ value: doc }],
+          };
+        },
+      });
+
+      // Signature help
+      var PY_SIGS = {
+        Flow: { label: 'Flow(name: str)', params: [{ label: 'name: str', doc: 'Workflow name' }] },
+        run_workflow: {
+          label: 'run_workflow(workflow, input, *, instance_id=None, backend=None)',
+          params: [
+            { label: 'workflow', doc: 'Compiled Workflow' },
+            { label: 'input', doc: 'Input for first task' },
+            { label: 'instance_id=None', doc: 'Optional instance ID' },
+            { label: 'backend=None', doc: 'Optional backend' },
+          ],
+        },
+        task: {
+          label: '@task(name=None, timeout=None, retries=None, tags=None, description=None)',
+          params: [
+            { label: 'name=None', doc: 'Custom task ID' },
+            { label: 'timeout=None', doc: 'Max execution time: "30s", "5m"' },
+            { label: 'retries=None', doc: 'Retry count or RetryPolicy' },
+            { label: 'tags=None', doc: 'Metadata tags' },
+            { label: 'description=None', doc: 'Human-readable description' },
+          ],
+        },
+      };
+
+      monaco.languages.registerSignatureHelpProvider('python', {
+        signatureHelpTriggerCharacters: ['(', ','],
+        provideSignatureHelp: function(model, position) {
+          var text = model.getValueInRange({
+            startLineNumber: 1, startColumn: 1,
+            endLineNumber: position.lineNumber, endColumn: position.column,
+          });
+          var funcName = null;
+          var depth = 0;
+          for (var i = text.length - 1; i >= 0; i--) {
+            if (text[i] === ')') depth++;
+            else if (text[i] === '(') {
+              if (depth === 0) {
+                var m = text.slice(0, i).match(/(\w+)\s*$/);
+                if (m) funcName = m[1];
+                break;
+              }
+              depth--;
+            }
+          }
+          if (!funcName || !PY_SIGS[funcName]) return null;
+          var sig = PY_SIGS[funcName];
+          var insideParen = text.slice(text.lastIndexOf('(') + 1);
+          var activeParam = 0;
+          var d = 0;
+          for (var j = 0; j < insideParen.length; j++) {
+            if (insideParen[j] === '(' || insideParen[j] === '[') d++;
+            else if (insideParen[j] === ')' || insideParen[j] === ']') d--;
+            else if (insideParen[j] === ',' && d === 0) activeParam++;
+          }
+          return {
+            value: {
+              signatures: [{
+                label: sig.label,
+                parameters: sig.params.map(function(p) { return { label: p.label, documentation: { value: p.doc } }; }),
+              }],
+              activeSignature: 0,
+              activeParameter: activeParam,
+            },
+            dispose: function() {},
+          };
+        },
+      });
+    }
+
+    function registerJSProviders(monaco) {
+      var CK = monaco.languages.CompletionItemKind;
+      var SAYIIR_JS = [
+        { label: 'task', kind: CK.Function, detail: 'function', doc: 'task(name, fn, opts?)' },
+        { label: 'flow', kind: CK.Function, detail: 'function', doc: 'flow(name) — build a workflow' },
+        { label: 'branch', kind: CK.Function, detail: 'function', doc: 'branch(name, taskFn)' },
+        { label: 'runWorkflow', kind: CK.Function, detail: 'function', doc: 'runWorkflow(workflow, input) -> Promise<any>' },
+        { label: 'runDurableWorkflow', kind: CK.Function, detail: 'function', doc: 'runDurableWorkflow(workflow, instanceId, input, backend?)' },
+        { label: 'InMemoryBackend', kind: CK.Class, detail: 'class', doc: 'new InMemoryBackend()' },
+        { label: 'PostgresBackend', kind: CK.Class, detail: 'class', doc: 'PostgresBackend.connect(url)' },
+      ];
+      var FLOW_METHODS_JS = [
+        { label: 'then', kind: CK.Method, detail: 'Flow', insert: 'then(${1:taskFn})' },
+        { label: 'fork', kind: CK.Method, detail: 'ForkBuilder', insert: 'fork([${1}])' },
+        { label: 'route', kind: CK.Method, detail: 'BranchBuilder', insert: 'route(${1:keyFn}, [${2:"a", "b"}])' },
+        { label: 'build', kind: CK.Method, detail: 'Workflow', insert: 'build()' },
+        { label: 'join', kind: CK.Method, detail: 'Flow', insert: 'join(${1:taskFn})' },
+        { label: 'done', kind: CK.Method, detail: 'Flow', insert: 'done()' },
+      ];
+
+      monaco.languages.registerCompletionItemProvider('javascript', {
+        triggerCharacters: ['.', ' '],
+        provideCompletionItems: function(model, position) {
+          var textUntilPos = model.getValueInRange({
+            startLineNumber: position.lineNumber, startColumn: 1,
+            endLineNumber: position.lineNumber, endColumn: position.column,
+          });
+          var word = model.getWordUntilPosition(position);
+          var range = {
+            startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+            startColumn: word.startColumn, endColumn: word.endColumn,
+          };
+          if (textUntilPos.match(/\.\s*[a-zA-Z]*$/)) {
+            return {
+              suggestions: FLOW_METHODS_JS.map(function(i) {
+                return {
+                  label: i.label, kind: i.kind, detail: i.detail,
+                  insertText: i.insert || i.label,
+                  insertTextRules: i.insert ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+                  range: range,
+                };
+              }),
+            };
+          }
+          return {
+            suggestions: SAYIIR_JS.map(function(i) {
+              return {
+                label: i.label, kind: i.kind, detail: i.detail,
+                documentation: i.doc ? { value: i.doc } : undefined,
+                insertText: i.label, range: range,
+              };
+            }),
+          };
+        },
+      });
+    }
+
+    // ── Tab switching ──
+    document.querySelectorAll('.tab').forEach(function(tab) {
+      tab.addEventListener('click', function() {
+        var lang = tab.dataset.lang;
+        if (lang === currentLang) return;
+        document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+        currentLang = lang;
+        document.getElementById('file-label').textContent = LANGS[lang].label;
+        var code = EXAMPLES[lang][currentExample] || EXAMPLES[lang].hello;
+        monaco.editor.setModelLanguage(editor.getModel(), LANGS[lang].monaco);
+        editor.setValue(code);
+        clearOutput();
+      });
+    });
+
+    // ── Example chips ──
+    document.querySelectorAll('.chip').forEach(function(chip) {
+      chip.addEventListener('click', function() {
+        var example = chip.dataset.example;
+        document.querySelectorAll('.chip').forEach(function(c) { c.classList.remove('active'); });
+        chip.classList.add('active');
+        currentExample = example;
+        var code = EXAMPLES[currentLang][example];
+        if (code) editor.setValue(code);
+        clearOutput();
+      });
+    });
+
+    // ── Run ──
+    async function handleRun() {
+      if (isRunning || !editor) return;
+      isRunning = true;
+      var btn = document.getElementById('run-btn');
+      var playIcon = btn.querySelector('svg');
+      if (playIcon) playIcon.style.display = 'none';
+      var spinnerEl = document.createElement('span');
+      spinnerEl.className = 'spinner';
+      btn.insertBefore(spinnerEl, btn.firstChild);
+      btn.disabled = true;
+      var output = document.getElementById('output');
+      var status = document.getElementById('output-status');
+      output.textContent = '';
+      output.className = 'output-body';
+      status.textContent = '';
+      status.className = 'output-status';
+      var cfg = LANGS[currentLang];
+      var code = editor.getValue();
+      // Detect ESM syntax for Node.js → use run-esm command + .mjs entry
+      var isEsm = currentLang === 'node' && /^\s*(import |export )/m.test(code);
+      var entry = isEsm ? 'main.mjs' : cfg.entry;
+      var command = isEsm ? 'run-esm' : 'run';
+      var files = {};
+      files[entry] = code;
+      try {
+        var start = performance.now();
+        var res = await fetch(CODAPI_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sandbox: cfg.sandbox, command: command, files: files }),
+        });
+        var data = await res.json();
+        var elapsed = Math.round(performance.now() - start);
+        if (data.ok) {
+          output.textContent = data.stdout || '(no output)';
+          output.classList.add('has-content');
+          status.textContent = '\u2713 ' + elapsed + 'ms';
+          status.classList.add('success');
+        } else {
+          output.textContent = data.stderr || data.stdout || 'Unknown error';
+          output.classList.add('has-error');
+          status.textContent = '\u2717 failed';
+          status.classList.add('error');
+        }
+      } catch (err) {
+        output.textContent = 'Connection error: ' + err.message;
+        output.classList.add('has-error');
+        status.textContent = '\u2717 error';
+        status.classList.add('error');
+      } finally {
+        var spinner = btn.querySelector('.spinner');
+        if (spinner) spinner.remove();
+        if (playIcon) playIcon.style.display = '';
+        btn.disabled = false;
+        isRunning = false;
+      }
+    }
+
+    document.getElementById('run-btn').addEventListener('click', handleRun);
+    document.getElementById('reset-btn').addEventListener('click', function() {
+      var code = EXAMPLES[currentLang][currentExample];
+      if (code && editor) editor.setValue(code);
+      clearOutput();
+    });
+
+    // Global Ctrl+Enter / Cmd+Enter fallback (works even when editor doesn't have focus)
+    document.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleRun();
+      }
+    });
+
+    function clearOutput() {
+      document.getElementById('output').textContent = 'Click Run or press Ctrl+Enter';
+      document.getElementById('output').className = 'output-body';
+      document.getElementById('output-status').textContent = '';
+      document.getElementById('output-status').className = 'output-status';
+    }
+  </script>
+</body>
+</html>

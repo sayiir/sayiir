@@ -25,6 +25,7 @@
 - &#128737; **Durable** — Automatic checkpointing & crash recovery with pluggable persistence
 - &#129520; **Multi-language** — Type-safe Python, TypeScript, and Rust bindings
 - &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL
+- &#9208; **Workflow control** — Cancel, pause, and resume running workflow instances
 
 ---
 
@@ -60,7 +61,7 @@ instance_id = f"welcome-{user_id}"
 status = run_durable_workflow(workflow, instance_id, 42, backend=PostgresBackend("postgresql://localhost/sayiir"))
 ```
 
-<a href="https://gitpod.io/#https://github.com/sayiir/sayiir/tree/main/examples/hello-world-py"><img src="https://img.shields.io/badge/Try_it-Gitpod-FFAE33?logo=gitpod&logoColor=white" alt="Try in Gitpod" height="20"></a>
+<a href="https://docs.sayiir.dev/playground/"><img src="https://img.shields.io/badge/Try_it_live-▶-00C853" alt="Try it live" height="20"></a>
 
 #### 🦀 Rust
 
@@ -93,8 +94,6 @@ let instance_id = format!("welcome-{user_id}");
 runner.run(&workflow, &instance_id, user_id).await?;
 ```
 
-<a href="https://gitpod.io/#https://github.com/sayiir/sayiir/tree/main/examples/hello-world-rs"><img src="https://img.shields.io/badge/Try_it-Gitpod-FFAE33?logo=gitpod&logoColor=white" alt="Try in Gitpod" height="20"></a>
-
 #### <img src="https://img.shields.io/badge/Node.js-339933?logo=nodedotjs&logoColor=white&style=flat-square" height="20">
 
 ```typescript
@@ -121,7 +120,7 @@ const instanceId = `welcome-${42}`;
 const status = runDurableWorkflow(workflow, instanceId, 42, PostgresBackend.connect("postgresql://localhost/sayiir"));
 ```
 
-<a href="https://gitpod.io/#https://github.com/sayiir/sayiir/tree/main/examples/hello-world-node"><img src="https://img.shields.io/badge/Try_it-Gitpod-FFAE33?logo=gitpod&logoColor=white" alt="Try in Gitpod" height="20"></a>
+<a href="https://docs.sayiir.dev/playground/"><img src="https://img.shields.io/badge/Try_it_live-▶-00C853" alt="Try it live" height="20"></a>
 
 ---
 

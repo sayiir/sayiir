@@ -1,0 +1,229 @@
+---
+# Sayiir Playground — Codapi server deployment
+#
+# Full setup:   ansible-playbook -i inventory.ini playbook.yml
+# Update only:  ansible-playbook -i inventory.ini playbook.yml --tags update
+#
+- name: Deploy Codapi playground server
+  hosts: codapi
+  become: true
+  gather_facts: true
+
+  tasks:
+    # ── Docker ──
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name: [docker.io, curl]
+        state: present
+        update_cache: true
+      tags: [setup]
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+      tags: [setup]
+
+    # ── Codapi user ──
+
+    - name: Create codapi system user
+      ansible.builtin.user:
+        name: "{{ codapi_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ codapi_dir }}"
+        create_home: true
+        groups: docker
+        append: true
+      tags: [setup]
+
+    # ── Codapi binary ──
+
+    - name: Check if codapi binary exists
+      ansible.builtin.stat:
+        path: "{{ codapi_dir }}/codapi"
+      register: codapi_binary
+      tags: [setup]
+
+    - name: Download and extract Codapi
+      when: not codapi_binary.stat.exists
+      tags: [setup]
+      block:
+        - name: Download Codapi tarball
+          ansible.builtin.get_url:
+            url: "https://github.com/nalgeon/codapi/releases/download/v{{ codapi_version }}/codapi_{{ codapi_version }}_{{ codapi_arch }}.tar.gz"
+            dest: /tmp/codapi.tar.gz
+            mode: "0644"
+
+        - name: Extract Codapi
+          ansible.builtin.unarchive:
+            src: /tmp/codapi.tar.gz
+            dest: "{{ codapi_dir }}"
+            remote_src: true
+
+        - name: Clean up tarball
+          ansible.builtin.file:
+            path: /tmp/codapi.tar.gz
+            state: absent
+
+    - name: Set codapi directory ownership
+      ansible.builtin.file:
+        path: "{{ codapi_dir }}"
+        owner: "{{ codapi_user }}"
+        group: "{{ codapi_user }}"
+        recurse: true
+      tags: [setup, update]
+
+    # ── Sync sandbox configs ──
+
+    - name: Sync sandbox directories
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../sandboxes/"
+        dest: "{{ codapi_dir }}/sandboxes/"
+        delete: true
+      notify: Restart codapi
+      tags: [setup, update]
+
+    - name: Set sandbox directory permissions
+      ansible.builtin.file:
+        path: "{{ codapi_dir }}/sandboxes"
+        state: directory
+        mode: "0755"
+        recurse: true
+      tags: [setup, update]
+
+    # ── Codapi config ──
+
+    - name: Deploy codapi.json
+      ansible.builtin.template:
+        src: codapi.json.j2
+        dest: "{{ codapi_dir }}/codapi.json"
+        owner: "{{ codapi_user }}"
+        group: "{{ codapi_user }}"
+        mode: "0644"
+      notify: Restart codapi
+      tags: [setup, update]
+
+    # ── Build sandbox Docker images ──
+
+    - name: Build sandbox Docker images
+      community.docker.docker_image:
+        name: "codapi/{{ item.name }}"
+        tag: latest
+        source: build
+        build:
+          path: "{{ codapi_dir }}/{{ item.context }}"
+          dockerfile: "{{ codapi_dir }}/{{ item.dockerfile }}"
+          pull: true
+        force_source: "{{ force_rebuild | default(false) }}"
+      loop: "{{ codapi_sandboxes }}"
+      tags: [setup, update]
+
+    # ── Systemd service ──
+
+    - name: Install codapi systemd service
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../codapi.service"
+        dest: /etc/systemd/system/codapi.service
+        mode: "0644"
+      notify:
+        - Reload systemd
+        - Restart codapi
+      tags: [setup]
+
+    - name: Enable and start codapi
+      ansible.builtin.systemd:
+        name: codapi
+        enabled: true
+        state: started
+      tags: [setup]
+
+    # ── nginx (reverse proxy, TLS via Cloudflare) ──
+
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+      tags: [setup]
+
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+      tags: [setup]
+
+    - name: Deploy nginx site config
+      ansible.builtin.template:
+        src: codapi-nginx.conf.j2
+        dest: "/etc/nginx/sites-available/{{ codapi_domain }}.conf"
+        mode: "0644"
+      notify: Reload nginx
+      tags: [setup, update]
+
+    - name: Enable nginx site
+      ansible.builtin.file:
+        src: "/etc/nginx/sites-available/{{ codapi_domain }}.conf"
+        dest: "/etc/nginx/sites-enabled/{{ codapi_domain }}.conf"
+        state: link
+      notify: Reload nginx
+      tags: [setup]
+
+    - name: Enable and start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+      tags: [setup]
+
+    # ── Flush handlers before smoke test ──
+
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+      tags: [setup, update]
+
+    # ── Smoke test ──
+
+    - name: Wait for Codapi to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ codapi_port }}/v1/exec"
+        method: POST
+        body_format: json
+        body:
+          sandbox: sayiir-python
+          command: run
+          files:
+            main.py: "print('ok')"
+        return_content: true
+        status_code: 200
+      register: smoke_test
+      retries: 5
+      delay: 3
+      until: smoke_test.status == 200
+      tags: [setup, update, test]
+
+    - name: Verify smoke test passed
+      ansible.builtin.assert:
+        that:
+          - smoke_test.json.ok == true
+          - "'ok' in smoke_test.json.stdout"
+        fail_msg: "Smoke test failed: {{ smoke_test.json }}"
+        success_msg: "Smoke test passed"
+      tags: [setup, update, test]
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart codapi
+      ansible.builtin.systemd:
+        name: codapi
+        state: restarted
+
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

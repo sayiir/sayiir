@@ -1,0 +1,1 @@
+../sayiir-nodejs/sayiir.d.ts

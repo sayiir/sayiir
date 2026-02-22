@@ -1,0 +1,20 @@
+codapi_version: "0.13.0"
+codapi_arch: "linux_amd64"
+codapi_dir: /opt/codapi
+codapi_user: codapi
+codapi_port: 1313
+
+# Domain for the reverse proxy (nginx behind Cloudflare)
+codapi_domain: play.sayiir.dev
+
+# CORS: which origin can call the API
+codapi_cors_origin: "https://docs.sayiir.dev"
+
+# Sandbox images to build
+codapi_sandboxes:
+  - name: sayiir-python
+    dockerfile: sandboxes/sayiir-python/Dockerfile
+    context: sandboxes/sayiir-python
+  - name: sayiir-node
+    dockerfile: sandboxes/sayiir-node/Dockerfile
+    context: sandboxes/sayiir-node
