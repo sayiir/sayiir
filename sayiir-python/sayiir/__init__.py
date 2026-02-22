@@ -3,12 +3,13 @@
 All orchestration runs in Rust. Python provides task implementations.
 """
 
-from ._sayiir import BackendError, TaskError, WorkflowError
+from ._sayiir import BackendError, TaskError, WorkflowError, get_task_context
 from ._sayiir import PyDurableEngine as DurableEngine
 from ._sayiir import PyFlowBuilder as FlowBuilder
 from ._sayiir import PyInMemoryBackend as InMemoryBackend
 from ._sayiir import PyPostgresBackend as PostgresBackend
 from ._sayiir import PyRetryPolicy as RetryPolicy
+from ._sayiir import PyTaskExecutionContext as TaskExecutionContext
 from ._sayiir import PyTaskMetadata as TaskMetadata
 from ._sayiir import PyWorkflowEngine as WorkflowEngine
 from ._sayiir import PyWorkflowStatus as WorkflowStatus
@@ -39,7 +40,9 @@ __all__ = [
     "PostgresBackend",
     "RetryPolicy",
     "TaskError",
+    "TaskExecutionContext",
     "TaskMetadata",
+    "get_task_context",
     "Workflow",
     "WorkflowEngine",
     "WorkflowError",

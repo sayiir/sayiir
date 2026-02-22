@@ -19,8 +19,8 @@ export type {
 export { LoopResult, WorkflowError, TaskError, BackendError } from "./types.js";
 
 // Task
-export { task } from "./task.js";
-export type { TaskFn } from "./task.js";
+export { task, getTaskContext } from "./task.js";
+export type { TaskFn, TaskExecutionContext } from "./task.js";
 
 // Flow
 export {

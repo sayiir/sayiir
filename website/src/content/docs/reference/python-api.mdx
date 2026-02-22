@@ -44,6 +44,61 @@ def my_task(input: dict) -> dict:
 
 The decorator attaches metadata to the function without wrapping it. The function can still be called directly for testing.
 
+## Task Execution Context
+
+### get_task_context()
+
+Get the current task execution context from within a running task. Returns `None` if called outside of a task execution.
+
+```python
+from sayiir import get_task_context
+
+@task
+def my_task(data: dict) -> dict:
+    ctx = get_task_context()
+    if ctx is not None:
+        print(f"Running task {ctx.task_id} in workflow {ctx.workflow_id}")
+        print(f"Instance: {ctx.instance_id}")
+    return process(data)
+```
+
+**Returns:** `TaskExecutionContext | None`
+
+### TaskExecutionContext
+
+Read-only context available from within a running task. Provides access to workflow and task metadata.
+
+**Properties:**
+
+- `workflow_id` (str) — The workflow definition identifier
+- `instance_id` (str) — The workflow instance identifier (for durable workflows) or workflow ID (for in-memory runs)
+- `task_id` (str) — The current task identifier
+- `metadata` (TaskMetadata) — Task metadata (timeout, retries, tags, version, etc.)
+- `workflow_metadata` (dict | None) — Workflow-level metadata passed via `Flow("name", metadata={...})`
+
+### TaskMetadata
+
+Metadata attached to a task.
+
+**Properties:**
+
+- `display_name` (str | None) — Human-readable name
+- `description` (str | None) — Task description
+- `timeout_secs` (float | None) — Task timeout in seconds
+- `retries` (RetryPolicy | None) — Retry configuration
+- `tags` (list[str] | None) — Categorization tags
+- `version` (str | None) — Task version string
+
+```python
+@task(timeout="30s", retries=3, tags=["io"])
+def fetch_data(url: str) -> dict:
+    ctx = get_task_context()
+    if ctx:
+        print(f"Timeout: {ctx.metadata.timeout_secs}s")
+        print(f"Tags: {ctx.metadata.tags}")
+    return do_fetch(url)
+```
+
 ## Flow Builder
 
 ### Flow(name)

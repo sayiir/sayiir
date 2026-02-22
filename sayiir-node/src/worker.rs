@@ -113,6 +113,8 @@ impl NapiWorker {
                     wf.definition_hash.clone(),
                     ExternalWorkflow {
                         continuation: Arc::clone(&wf.continuation),
+                        workflow_id: Arc::from(wf.workflow_id.as_str()),
+                        metadata_json: wf.metadata_json.as_deref().map(Arc::from),
                     },
                 )
             })

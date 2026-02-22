@@ -285,7 +285,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
     /// Create a new workflow builder with a context object.
     ///
     /// The context contains the workflow ID, codec and metadata that will be available
-    /// at any execution point via the `sayiir_ctx!` macro.
+    /// at any execution point via the workflow context.
     #[must_use]
     pub fn new(ctx: WorkflowContext<C, M>) -> Self
     where

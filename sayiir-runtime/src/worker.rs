@@ -18,7 +18,7 @@ use chrono;
 use futures::FutureExt;
 use sayiir_core::codec::sealed;
 use sayiir_core::codec::{Codec, EnvelopeCodec, LoopDecision};
-use sayiir_core::context::with_context;
+use sayiir_core::context::{TaskExecutionContext, with_task_context};
 use sayiir_core::error::{BoxError, CodecError, WorkflowError};
 use sayiir_core::registry::TaskRegistry;
 use sayiir_core::snapshot::{
@@ -46,6 +46,10 @@ pub type WorkflowRegistry<C, Input, M> = Vec<(String, Arc<Workflow<C, Input, M>>
 pub struct ExternalWorkflow {
     /// The continuation tree describing the workflow structure.
     pub continuation: Arc<WorkflowContinuation>,
+    /// The workflow definition identifier (e.g. workflow name/ID).
+    pub workflow_id: Arc<str>,
+    /// Optional JSON-encoded workflow-level metadata.
+    pub metadata_json: Option<Arc<str>>,
 }
 
 /// Workflow index keyed by definition hash for O(1) lookup during task dispatch.
@@ -513,7 +517,7 @@ where
                 if let Some(ext_wf) = workflows.get(&task.workflow_definition_hash) {
                     match self
                         .execute_external_task(
-                            &ext_wf.continuation,
+                            ext_wf,
                             &task.workflow_definition_hash,
                             &executor,
                             &task,
@@ -547,11 +551,12 @@ where
     /// Execute a single task using an external executor.
     async fn execute_external_task(
         &self,
-        continuation: &WorkflowContinuation,
+        ext_wf: &ExternalWorkflow,
         definition_hash: &str,
         executor: &ExternalTaskExecutor,
         available_task: &AvailableTask,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        let continuation = &ext_wf.continuation;
         let mut snapshot = self
             .backend
             .load_snapshot(&available_task.instance_id)
@@ -582,18 +587,12 @@ where
         );
 
         let execution_result = self
-            .execute_with_deadline_ext(
-                continuation,
-                executor,
-                available_task,
-                &mut snapshot,
-                &claim,
-            )
+            .execute_with_deadline_ext(ext_wf, executor, available_task, &mut snapshot, &claim)
             .await;
 
         self.settle_execution_result_ext(
             execution_result,
-            continuation,
+            &ext_wf.continuation,
             available_task,
             &mut snapshot,
             claim,
@@ -604,12 +603,13 @@ where
     /// Run the external executor with an optional deadline.
     async fn execute_with_deadline_ext(
         &self,
-        continuation: &WorkflowContinuation,
+        ext_wf: &ExternalWorkflow,
         executor: &ExternalTaskExecutor,
         available_task: &AvailableTask,
         snapshot: &mut WorkflowSnapshot,
         claim: &ActiveTaskClaim<'_, B>,
     ) -> ExecutionOutcome {
+        let continuation = &ext_wf.continuation;
         let task_id = available_task.task_id.clone();
         let input = available_task.input.clone();
 
@@ -622,7 +622,15 @@ where
             None
         };
 
-        let execution_future = executor(&task_id, input);
+        let task_ctx = TaskExecutionContext {
+            workflow_id: Arc::clone(&ext_wf.workflow_id),
+            instance_id: Arc::from(available_task.instance_id.as_str()),
+            task_id: Arc::from(available_task.task_id.as_str()),
+            metadata: continuation.build_task_metadata(&available_task.task_id),
+            workflow_metadata_json: ext_wf.metadata_json.clone(),
+        };
+
+        let execution_future = with_task_context(task_ctx, executor(&task_id, input));
 
         let heartbeat_result = self
             .run_with_heartbeat(
@@ -949,8 +957,15 @@ where
             None
         };
 
-        let context = workflow.context().clone();
-        let execution_future = with_context(context, || async move {
+        let task_ctx = TaskExecutionContext {
+            workflow_id: Arc::clone(&workflow.context().workflow_id),
+            instance_id: Arc::from(available_task.instance_id.as_str()),
+            task_id: Arc::from(task_id.as_str()),
+            metadata: continuation.build_task_metadata(&task_id),
+            workflow_metadata_json: workflow.context().metadata_json.clone(),
+        };
+
+        let execution_future = with_task_context(task_ctx, async move {
             Self::execute_task_by_id(continuation, &task_id, input).await
         });
 

@@ -1,17 +1,40 @@
 //! Workflow execution context.
 //!
 //! [`WorkflowContext`] carries the workflow ID, codec, and user-supplied
-//! metadata through every task execution. With the `tokio` feature it can
-//! also be stored in task-local storage and retrieved via the
-//! [`sayiir_ctx!`](crate::sayiir_ctx) macro.
+//! metadata through every task execution.
+//!
+//! [`TaskExecutionContext`] provides read-only access to workflow and task
+//! metadata from within running tasks. It is set automatically by the
+//! runtime and can be retrieved via [`get_task_context()`] or the
+//! [`task_context!`](crate::task_context) macro.
 
 use std::sync::Arc;
 
+use crate::task::TaskMetadata;
+
+/// Execution context available to a running task.
+///
+/// Provides read-only access to workflow and task metadata. Accessible
+/// from within task functions via task-local storage (Rust) or
+/// language-specific context APIs (Python/Node.js).
+#[derive(Clone, Debug)]
+pub struct TaskExecutionContext {
+    /// The workflow definition identifier.
+    pub workflow_id: Arc<str>,
+    /// The workflow instance identifier.
+    pub instance_id: Arc<str>,
+    /// The current task identifier.
+    pub task_id: Arc<str>,
+    /// Task metadata (timeout, retry policy, version, etc.).
+    pub metadata: TaskMetadata,
+    /// Optional JSON-encoded workflow-level metadata.
+    pub workflow_metadata_json: Option<Arc<str>>,
+}
+
 /// Workflow execution context that provides access to metadata and codec.
 ///
-/// This context is always available as a plain struct. When the `tokio` feature
-/// is enabled, it can also be stored in task-local storage and retrieved via
-/// the [`sayiir_ctx!`](crate::sayiir_ctx) macro.
+/// This context is always available as a plain struct used during workflow
+/// building and by the runner for codec/metadata access.
 pub struct WorkflowContext<C, M> {
     /// The unique workflow identifier.
     pub workflow_id: Arc<str>,
@@ -19,6 +42,8 @@ pub struct WorkflowContext<C, M> {
     pub codec: Arc<C>,
     /// Immutable metadata attached to the workflow.
     pub metadata: Arc<M>,
+    /// Optional JSON-encoded workflow-level metadata for task context.
+    pub metadata_json: Option<Arc<str>>,
 }
 
 impl<C, M> Clone for WorkflowContext<C, M> {
@@ -27,6 +52,7 @@ impl<C, M> Clone for WorkflowContext<C, M> {
             workflow_id: Arc::clone(&self.workflow_id),
             codec: Arc::clone(&self.codec),
             metadata: Arc::clone(&self.metadata),
+            metadata_json: self.metadata_json.clone(),
         }
     }
 }
@@ -38,6 +64,7 @@ impl<C, M> WorkflowContext<C, M> {
             workflow_id: workflow_id.into(),
             codec,
             metadata,
+            metadata_json: None,
         }
     }
 
@@ -60,101 +87,186 @@ impl<C, M> WorkflowContext<C, M> {
     }
 }
 
+use std::cell::RefCell;
+
+std::thread_local! {
+    /// Thread-local fallback for `TaskExecutionContext`.
+    ///
+    /// Used by sync executor paths (Python GIL, Node.js main thread) where
+    /// tokio task-locals are not available.
+    static THREAD_LOCAL_TASK_CTX: RefCell<Option<TaskExecutionContext>> = const { RefCell::new(None) };
+}
+
+/// Set the task execution context in thread-local storage for the duration
+/// of the closure. Clears the context when the closure returns (even on panic).
+pub fn with_thread_local_task_context<R>(ctx: TaskExecutionContext, f: impl FnOnce() -> R) -> R {
+    THREAD_LOCAL_TASK_CTX.with(|cell| {
+        let prev = cell.borrow_mut().replace(ctx);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        *cell.borrow_mut() = prev;
+        match result {
+            Ok(r) => r,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    })
+}
+
+/// Get the task execution context from thread-local storage.
+#[must_use]
+pub fn get_thread_local_task_context() -> Option<TaskExecutionContext> {
+    THREAD_LOCAL_TASK_CTX.with(|cell| cell.borrow().clone())
+}
+
 // ── Task-local context storage (requires tokio) ─────────────────────────
 
 #[cfg(feature = "tokio")]
 mod task_local_ctx {
-    use super::{Arc, WorkflowContext};
-    use crate::codec::Codec;
-
-    /// Type-erased workflow context for task-local storage.
-    struct ErasedContext {
-        inner: Arc<dyn std::any::Any + Send + Sync>,
-    }
-
-    impl ErasedContext {
-        fn new<C, M>(ctx: WorkflowContext<C, M>) -> Self
-        where
-            C: Codec + 'static,
-            M: Send + Sync + 'static,
-        {
-            Self {
-                inner: Arc::new(ctx) as Arc<dyn std::any::Any + Send + Sync>,
-            }
-        }
-
-        fn downcast<C, M>(&self) -> Option<WorkflowContext<C, M>>
-        where
-            C: Codec + 'static,
-            M: Send + Sync + 'static,
-        {
-            self.inner
-                .clone()
-                .downcast::<WorkflowContext<C, M>>()
-                .ok()
-                .map(|arc| {
-                    WorkflowContext::new(
-                        Arc::clone(&arc.workflow_id),
-                        Arc::clone(&arc.codec),
-                        Arc::clone(&arc.metadata),
-                    )
-                })
-        }
-    }
+    use super::TaskExecutionContext;
 
     tokio::task_local! {
-        /// Task-local storage for workflow context.
-        static WORKFLOW_CTX: Option<ErasedContext>;
+        /// Task-local storage for task execution context.
+        static TASK_EXEC_CTX: Option<TaskExecutionContext>;
     }
 
-    /// Set the workflow context in task-local storage and execute the future.
-    ///
-    /// This should be called by the runner before executing tasks.
-    pub async fn with_context<C, M, F, Fut>(ctx: WorkflowContext<C, M>, f: F) -> Fut::Output
-    where
-        C: Codec + 'static,
-        M: Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future,
-    {
-        WORKFLOW_CTX.scope(Some(ErasedContext::new(ctx)), f()).await
+    /// Set the task execution context in task-local storage and execute the future.
+    pub async fn with_task_context<F: std::future::Future>(
+        ctx: TaskExecutionContext,
+        fut: F,
+    ) -> F::Output {
+        TASK_EXEC_CTX.scope(Some(ctx), fut).await
     }
 
-    /// Get the workflow context from task-local storage.
+    /// Get the task execution context from task-local storage.
     ///
-    /// This is used internally by the `sayiir_ctx!` macro.
+    /// Tries the tokio task-local first, then falls back to the thread-local.
     #[must_use]
-    pub fn get_context<C, M>() -> Option<WorkflowContext<C, M>>
-    where
-        C: Codec + 'static,
-        M: Send + Sync + 'static,
-    {
-        WORKFLOW_CTX
-            .try_with(|ctx_opt| ctx_opt.as_ref()?.downcast())
+    pub fn get_task_context() -> Option<TaskExecutionContext> {
+        TASK_EXEC_CTX
+            .try_with(std::clone::Clone::clone)
             .ok()
             .flatten()
+            .or_else(super::get_thread_local_task_context)
     }
 }
 
 #[cfg(feature = "tokio")]
-pub use task_local_ctx::{get_context, with_context};
+pub use task_local_ctx::{get_task_context, with_task_context};
 
-/// Macro to access the workflow context from within a task.
+/// Get the task execution context (non-tokio fallback).
 ///
-/// Requires the `tokio` feature. Returns `Option<WorkflowContext<C, M>>` —
-/// `None` if called outside of workflow execution context.
+/// Delegates to thread-local storage only.
+#[cfg(not(feature = "tokio"))]
+#[must_use]
+pub fn get_task_context() -> Option<TaskExecutionContext> {
+    get_thread_local_task_context()
+}
+
+/// Macro to access the task execution context from within a task.
+///
+/// Returns `Option<TaskExecutionContext>` — `None` if called outside of
+/// task execution context.
 ///
 /// Usage:
 /// ```rust,ignore
-/// if let Some(ctx) = sayiir_ctx!() {
-///     let metadata = ctx.metadata();
-///     let codec = ctx.codec();
+/// if let Some(ctx) = task_context!() {
+///     println!("workflow: {}, task: {}", ctx.workflow_id, ctx.task_id);
 /// }
 /// ```
-#[cfg(feature = "tokio")]
 #[macro_export]
-macro_rules! sayiir_ctx {
+macro_rules! task_context {
     () => {
-        $crate::context::get_context()
+        $crate::context::get_task_context()
     };
+}
+
+#[cfg(all(test, feature = "tokio"))]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::task::TaskMetadata;
+
+    fn make_task_ctx() -> TaskExecutionContext {
+        TaskExecutionContext {
+            workflow_id: Arc::from("wf-1"),
+            instance_id: Arc::from("inst-1"),
+            task_id: Arc::from("task-a"),
+            metadata: TaskMetadata::default(),
+            workflow_metadata_json: None,
+        }
+    }
+
+    #[test]
+    fn thread_local_roundtrip() {
+        assert!(get_thread_local_task_context().is_none());
+
+        let ctx = make_task_ctx();
+        let result = with_thread_local_task_context(ctx.clone(), || {
+            let inner = get_thread_local_task_context().unwrap();
+            assert_eq!(&*inner.workflow_id, "wf-1");
+            assert_eq!(&*inner.instance_id, "inst-1");
+            assert_eq!(&*inner.task_id, "task-a");
+            42
+        });
+        assert_eq!(result, 42);
+
+        // Cleared after scope
+        assert!(get_thread_local_task_context().is_none());
+    }
+
+    #[test]
+    fn thread_local_restores_on_panic() {
+        let ctx = make_task_ctx();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_thread_local_task_context(ctx, || {
+                panic!("boom");
+            })
+        }));
+        assert!(result.is_err());
+        assert!(get_thread_local_task_context().is_none());
+    }
+
+    #[test]
+    fn task_local_roundtrip() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            assert!(get_task_context().is_none());
+
+            let ctx = make_task_ctx();
+            let inner = with_task_context(ctx, async {
+                let c = get_task_context().unwrap();
+                assert_eq!(&*c.task_id, "task-a");
+                c
+            })
+            .await;
+
+            assert_eq!(&*inner.workflow_id, "wf-1");
+        });
+    }
+
+    #[test]
+    fn task_local_falls_back_to_thread_local() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // Set only thread-local, no task-local — should still find it
+            let ctx = make_task_ctx();
+            let result = with_thread_local_task_context(ctx, || get_task_context());
+            assert!(result.is_some());
+            assert_eq!(&*result.unwrap().instance_id, "inst-1");
+        });
+    }
+
+    #[test]
+    fn macro_works() {
+        let ctx = make_task_ctx();
+        with_thread_local_task_context(ctx, || {
+            let c = task_context!().unwrap();
+            assert_eq!(&*c.task_id, "task-a");
+        });
+    }
 }

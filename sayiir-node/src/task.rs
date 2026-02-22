@@ -3,6 +3,7 @@
 use napi_derive::napi;
 use std::time::Duration;
 
+use sayiir_core::context::TaskExecutionContext;
 use sayiir_core::task::{RetryPolicy, TaskMetadata};
 
 /// Retry policy for task execution.
@@ -50,4 +51,53 @@ impl From<NapiTaskMetadata> for TaskMetadata {
             version: n.version,
         }
     }
+}
+
+/// Task execution context available from within a running task.
+///
+/// Provides read-only access to workflow and task metadata.
+/// Retrieve via `getTaskContext()`.
+#[napi(object)]
+#[derive(Clone)]
+pub struct NapiTaskExecutionContext {
+    pub workflow_id: String,
+    pub instance_id: String,
+    pub task_id: String,
+    pub metadata: NapiTaskMetadata,
+    pub workflow_metadata: Option<serde_json::Value>,
+}
+
+impl From<TaskExecutionContext> for NapiTaskExecutionContext {
+    fn from(ctx: TaskExecutionContext) -> Self {
+        let workflow_metadata = ctx
+            .workflow_metadata_json
+            .and_then(|json| serde_json::from_str(&json).ok());
+        Self {
+            workflow_id: ctx.workflow_id.to_string(),
+            instance_id: ctx.instance_id.to_string(),
+            task_id: ctx.task_id.to_string(),
+            metadata: NapiTaskMetadata {
+                display_name: ctx.metadata.display_name,
+                description: ctx.metadata.description,
+                timeout_secs: ctx.metadata.timeout.map(|d| d.as_secs_f64()),
+                retries: ctx.metadata.retries.map(|r| NapiRetryPolicy {
+                    max_retries: r.max_retries,
+                    initial_delay_secs: r.initial_delay.as_secs_f64(),
+                    backoff_multiplier: f64::from(r.backoff_multiplier),
+                    max_delay_secs: r.max_delay.map(|d| d.as_secs_f64()),
+                }),
+                tags: Some(ctx.metadata.tags),
+                version: ctx.metadata.version,
+            },
+            workflow_metadata,
+        }
+    }
+}
+
+/// Get the current task execution context.
+///
+/// Returns `null` if called outside of a task execution.
+#[napi]
+pub fn get_task_context() -> Option<NapiTaskExecutionContext> {
+    sayiir_core::context::get_task_context().map(Into::into)
 }

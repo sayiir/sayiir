@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
 
+use sayiir_core::context::{TaskExecutionContext, with_thread_local_task_context};
 use sayiir_core::workflow::{FlatWorkflowStatus, WorkflowStatus, WorkflowStatusKind};
 use sayiir_runtime::execute_continuation_sync;
 
@@ -159,23 +160,35 @@ impl PyWorkflowEngine {
 
         tracing::info!(workflow_id = %workflow.workflow_id, "starting workflow execution");
 
+        let workflow_id: Arc<str> = Arc::from(workflow.workflow_id.as_str());
+        let workflow_metadata_json: Option<Arc<str>> =
+            workflow.metadata_json.as_deref().map(Arc::from);
         let result = execute_continuation_sync(
             &continuation,
             input_bytes,
             &|task_id, input| {
-                execute_python_task(py, task_id, &input, task_registry).map_err(|e| {
-                    let traceback = e
-                        .traceback(py)
-                        .and_then(|tb| tb.format().ok())
-                        .unwrap_or_default();
+                let task_ctx = TaskExecutionContext {
+                    workflow_id: Arc::clone(&workflow_id),
+                    instance_id: Arc::clone(&workflow_id), // sync path: no instance_id
+                    task_id: Arc::from(task_id),
+                    metadata: continuation.build_task_metadata(task_id),
+                    workflow_metadata_json: workflow_metadata_json.clone(),
+                };
+                with_thread_local_task_context(task_ctx, || {
+                    execute_python_task(py, task_id, &input, task_registry).map_err(|e| {
+                        let traceback = e
+                            .traceback(py)
+                            .and_then(|tb| tb.format().ok())
+                            .unwrap_or_default();
 
-                    // Preserve the Python traceback through the Rust execution loop.
-                    let msg: sayiir_core::error::BoxError = if traceback.is_empty() {
-                        e.to_string().into()
-                    } else {
-                        format!("{e}\n\n{traceback}").into()
-                    };
-                    msg
+                        // Preserve the Python traceback through the Rust execution loop.
+                        let msg: sayiir_core::error::BoxError = if traceback.is_empty() {
+                            e.to_string().into()
+                        } else {
+                            format!("{e}\n\n{traceback}").into()
+                        };
+                        msg
+                    })
                 })
             },
             &sayiir_runtime::serialization::JsonCodec,
