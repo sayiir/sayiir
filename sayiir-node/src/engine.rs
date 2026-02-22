@@ -400,6 +400,13 @@ impl NapiContinuationStepper {
                     Self::flatten(next, steps)?;
                 }
             }
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => {
+                // Flatten child's continuation inline — it's just more steps.
+                Self::flatten(child, steps)?;
+                if let Some(next) = next {
+                    Self::flatten(next, steps)?;
+                }
+            }
         }
         Ok(())
     }

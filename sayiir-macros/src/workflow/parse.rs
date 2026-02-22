@@ -160,6 +160,7 @@ fn parse_step_or_parallel(input: ParseStream) -> syn::Result<WorkflowStep> {
 /// Parse a single step (not parallel).
 fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
     // route classify { ... }  (Ident Ident Brace — check via fork)
+    // flow child_expr          (Ident Expr — check via fork)
     if input.peek(Ident) {
         let fork = input.fork();
         let ident: Ident = fork.parse()?;
@@ -167,6 +168,15 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
             // Consume from real stream
             let _: Ident = input.parse()?;
             return parse_route(input, ident.span());
+        }
+        if ident == "flow" {
+            // Consume from real stream
+            let _: Ident = input.parse()?;
+            let expr: Expr = input.parse()?;
+            return Ok(WorkflowStep::Flow {
+                expr,
+                span: ident.span(),
+            });
         }
     }
 
@@ -267,8 +277,9 @@ fn parse_single_step(input: ParseStream) -> syn::Result<WorkflowStep> {
         });
     }
 
-    Err(input
-        .error("expected a task name, inline task, `delay`, `signal`, `route`, `loop`, or `(`"))
+    Err(input.error(
+        "expected a task name, inline task, `delay`, `signal`, `route`, `loop`, `flow`, or `(`",
+    ))
 }
 
 /// Parse an optional `timeout "30s"` suffix.
@@ -429,6 +440,7 @@ impl WorkflowStep {
             | Self::Delay { span, .. }
             | Self::AwaitSignal { span, .. }
             | Self::Loop { span, .. }
+            | Self::Flow { span, .. }
             | Self::Route { span, .. } => *span,
         }
     }

@@ -276,6 +276,7 @@ pub struct WorkflowBuilder<C, Input, Output, M = (), Cont = NoContinuation, R = 
     last_task_id: Option<String>,
     branch_counter: usize,
     loop_counter: usize,
+    child_counter: usize,
     errors: BuildErrors,
     _phantom: PhantomData<(Input, Output)>,
 }
@@ -299,6 +300,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
             last_task_id: None,
             branch_counter: 0,
             loop_counter: 0,
+            child_counter: 0,
             errors: BuildErrors::new(),
             _phantom: PhantomData,
         }
@@ -411,6 +413,7 @@ impl<C, Input, M> WorkflowBuilder<C, Input, Input, M, NoContinuation, NoRegistry
             last_task_id: None,
             branch_counter: 0,
             loop_counter: 0,
+            child_counter: 0,
             errors: BuildErrors::new(),
             _phantom: PhantomData,
         }
@@ -465,6 +468,7 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -582,6 +586,7 @@ where
             last_task_id: Some(loop_id),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -689,6 +694,7 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -800,6 +806,7 @@ where
             last_task_id: Some(loop_id),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -837,6 +844,7 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -868,6 +876,117 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
+            errors: self.errors,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Inline a child workflow into the pipeline.
+    ///
+    /// The child's entire continuation tree is embedded as a
+    /// `WorkflowContinuation::ChildWorkflow` node. The child's output becomes
+    /// the input to the next step.
+    ///
+    /// For serializable workflows (built with `.with_registry()`), use
+    /// [`then_serializable_flow`](WorkflowBuilder::then_serializable_flow)
+    /// instead so that the child's task registry is merged into the parent's.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let child = WorkflowBuilder::new(child_ctx)
+    ///     .then("double", |i: u32| async move { Ok(i * 2) })
+    ///     .build()?;
+    ///
+    /// let parent = WorkflowBuilder::new(parent_ctx)
+    ///     .then("add_one", |i: u32| async move { Ok(i + 1) })
+    ///     .then_flow(child)
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn then_flow<ChildOutput>(
+        mut self,
+        child: Workflow<C, ChildOutput, M>,
+    ) -> WorkflowBuilder<C, Input, ChildOutput, M, WorkflowContinuation, R> {
+        let child_id = format!("child_{}", self.child_counter);
+        self.child_counter += 1;
+
+        let child_cont = child.into_continuation();
+        let new_node = WorkflowContinuation::ChildWorkflow {
+            id: child_id.clone(),
+            child: Arc::new(child_cont),
+            next: None,
+        };
+
+        let continuation = self.continuation.append(new_node);
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(child_id),
+            branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
+            errors: self.errors,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Child workflow composition with registry merging (only available with `TaskRegistry`).
+impl<C, Input, Output, M, Cont> WorkflowBuilder<C, Input, Output, M, Cont, TaskRegistry>
+where
+    Cont: ContinuationState,
+{
+    /// Inline a serializable child workflow, merging its task registry into the parent's.
+    ///
+    /// This is the serializable counterpart of [`then_flow`](WorkflowBuilder::then_flow).
+    /// The child's task registry entries are merged into the parent's registry so
+    /// that distributed execution can look up all task implementations.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let child = WorkflowBuilder::new(child_ctx)
+    ///     .with_registry()
+    ///     .then("double", |i: u32| async move { Ok(i * 2) })
+    ///     .build()?;
+    ///
+    /// let parent = WorkflowBuilder::new(parent_ctx)
+    ///     .with_registry()
+    ///     .then("add_one", |i: u32| async move { Ok(i + 1) })
+    ///     .then_serializable_flow(child)
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn then_serializable_flow<ChildOutput>(
+        mut self,
+        child: SerializableWorkflow<C, ChildOutput, M>,
+    ) -> WorkflowBuilder<C, Input, ChildOutput, M, WorkflowContinuation, TaskRegistry> {
+        let child_id = format!("child_{}", self.child_counter);
+        self.child_counter += 1;
+
+        let (child_cont, child_registry) = child.into_parts();
+        self.registry.merge(child_registry);
+
+        let new_node = WorkflowContinuation::ChildWorkflow {
+            id: child_id.clone(),
+            child: Arc::new(child_cont),
+            next: None,
+        };
+
+        let continuation = self.continuation.append(new_node);
+
+        WorkflowBuilder {
+            continuation,
+            context: self.context,
+            registry: self.registry,
+            last_task_id: Some(child_id),
+            branch_counter: self.branch_counter,
+            loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -964,6 +1083,7 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1034,6 +1154,7 @@ where
             last_task_id: Some(loop_id),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1153,6 +1274,7 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
             registry: self.registry,
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1167,6 +1289,7 @@ impl<C, Input, Output, M, Cont, R> WorkflowBuilder<C, Input, Output, M, Cont, R>
             registry: self.registry,
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1327,6 +1450,7 @@ pub struct ForkBuilder<C, Input, Output, M, Cont = NoContinuation, R = NoRegistr
     registry: R,
     branch_counter: usize,
     loop_counter: usize,
+    child_counter: usize,
     errors: BuildErrors,
     _phantom: PhantomData<(Input, Output)>,
 }
@@ -1488,6 +1612,7 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1605,6 +1730,7 @@ where
             last_task_id: Some(id.to_string()),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1765,6 +1891,7 @@ pub struct RouteBuilder<C, Input, Output, BranchOut, K, M, Cont, R = NoRegistry>
     default_branch: Option<Box<WorkflowContinuation>>,
     branch_counter: usize,
     loop_counter: usize,
+    child_counter: usize,
     errors: BuildErrors,
     _phantom: PhantomData<(Input, Output, BranchOut, K)>,
 }
@@ -1836,6 +1963,7 @@ where
             default_branch: None,
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1857,6 +1985,7 @@ pub struct RouteRegisteredBuilder<C, Input, Output, BranchOut, M, Cont> {
     default_branch: Option<Box<WorkflowContinuation>>,
     branch_counter: usize,
     loop_counter: usize,
+    child_counter: usize,
     errors: BuildErrors,
     _phantom: PhantomData<(Input, Output, BranchOut)>,
 }
@@ -1894,6 +2023,7 @@ where
             default_branch: None,
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -1994,6 +2124,7 @@ where
             last_task_id: Some(self.branch_id),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }
@@ -2127,6 +2258,7 @@ where
             last_task_id: Some(self.branch_id),
             branch_counter: self.branch_counter,
             loop_counter: self.loop_counter,
+            child_counter: self.child_counter,
             errors: self.errors,
             _phantom: PhantomData,
         }

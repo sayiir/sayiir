@@ -65,6 +65,7 @@ export interface NapiFlowBuilder {
     maxIterations?: number,
     onMax?: string,
   ): string;
+  addChildWorkflow(childId: string, childBuilder: NapiFlowBuilder): void;
   setMetadataJson(json: string): void;
   build(): NapiWorkflow;
 }

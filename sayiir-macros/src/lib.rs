@@ -144,6 +144,9 @@ pub fn derive_branch_key(input: proc_macro::TokenStream) -> proc_macro::TokenStr
 /// - `delay "wait_24h" "5s"` — durable delay with custom ID
 /// - `signal "name"` — wait for external signal
 /// - `signal "name" timeout "30s"` — signal with timeout
+/// - `loop task_name N` — loop body task up to N iterations (default: fail on max)
+/// - `loop task_name N exit_with_last` — loop with exit-on-max policy
+/// - `flow expr` — inline a child workflow (merges its task registry)
 /// - `route key_fn { "k" => [steps], _ => [steps] }` — conditional routing (string keys)
 /// - `route key_fn -> Enum { Variant => [steps], _ => [steps] }` — typed conditional routing
 ///

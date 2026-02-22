@@ -574,6 +574,27 @@ where
                         }
                     }
                 }
+                WorkflowContinuation::ChildWorkflow { id, child, .. } => {
+                    check_guards(backend.as_ref(), &snapshot.instance_id, Some(id)).await?;
+
+                    if let Some(result) = snapshot.get_task_result(id) {
+                        Ok(ControlFlow::Continue(result.output.clone()))
+                    } else {
+                        let output = Box::pin(Self::execute_with_checkpointing(
+                            child,
+                            current_input.clone(),
+                            snapshot,
+                            Arc::clone(&backend),
+                            context.clone(),
+                        ))
+                        .await?;
+
+                        snapshot.mark_task_completed(id.clone(), output.clone());
+                        backend.save_snapshot(snapshot).await?;
+
+                        Ok(ControlFlow::Continue(output))
+                    }
+                }
             };
 
             match step? {
@@ -938,6 +959,25 @@ where
                                 &mut hooks,
                             )
                             .await?;
+                            Ok(ControlFlow::Continue(output))
+                        }
+                    }
+                    WorkflowContinuation::ChildWorkflow { id, child, .. } => {
+                        if let Some(result) = snapshot.get_task_result(id) {
+                            Ok(ControlFlow::Continue(result.output.clone()))
+                        } else {
+                            let output = Box::pin(Self::execute_branch_with_checkpoint(
+                                child,
+                                current_input.clone(),
+                                Arc::clone(&backend),
+                                instance_id.clone(),
+                                context.clone(),
+                            ))
+                            .await?;
+
+                            snapshot.mark_task_completed(id.clone(), output.clone());
+                            backend.save_snapshot(&snapshot).await?;
+
                             Ok(ControlFlow::Continue(output))
                         }
                     }

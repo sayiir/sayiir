@@ -1,11 +1,11 @@
 ---
 title: Roadmap
-description: What's planned for Sayiir — shared state, observability, child workflows, edge runtimes, and more
+description: What's planned for Sayiir — shared state, observability, edge runtimes, and more
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, conditional branching, loops, retries, signals, and crash recovery — all with zero infrastructure.
+Sayiir is a durable workflow engine. It's great at what it does: checkpointed execution, parallel tasks, conditional branching, loops, workflow composition, retries, signals, and crash recovery — all with zero infrastructure.
 
 This page is about what's missing and what we're building next. We're honest about gaps because that's how you decide if Sayiir is right for your use case today, or if you should wait.
 
@@ -43,6 +43,9 @@ These features are stable and production-ready across Rust, Python, and Node.js:
   <Card title="Loops with exit conditions" icon="approve-check-circle">
     Iterative workflows with `LoopResult` (again/done). Max iterations policy, durable checkpointing per iteration.
   </Card>
+  <Card title="Workflow composition" icon="approve-check-circle">
+    Inline child workflows with `then_flow` / `thenFlow`. Task registries merge automatically. Build modular pipelines from reusable sub-workflows.
+  </Card>
   <Card title="PostgreSQL backend" icon="approve-check-circle">
     Production-grade persistence with ACID transactions, claim-based distribution, and snapshot history.
   </Card>
@@ -76,16 +79,6 @@ def search_web(query: dict, ctx: WorkflowContext) -> list[dict]:
     ctx.set("web_results_count", len(results))
     return results
 ```
-
-### Child Workflows
-
-**Status:** Planned
-
-Compose workflows from other workflows.
-
-- `run_child_workflow(workflow, input)` primitive
-- Independent lifecycle (own instance ID, own checkpointing)
-- Parent can wait for child or fire-and-forget
 
 ### Structured Observability
 

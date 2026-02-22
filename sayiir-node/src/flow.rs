@@ -204,6 +204,13 @@ impl NapiFlowBuilder {
             .map_err(|e| Error::new(Status::InvalidArg, e))
     }
 
+    /// Add a child workflow (inline composition).
+    #[napi]
+    pub fn add_child_workflow(&mut self, child_id: String, child_builder: &NapiFlowBuilder) {
+        self.inner
+            .add_child_workflow(child_id, child_builder.inner.tasks().to_vec());
+    }
+
     /// Build the workflow.
     #[napi]
     pub fn build(&self) -> Result<NapiWorkflow> {

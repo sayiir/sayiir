@@ -22,6 +22,7 @@ fn validate_duration(secs: f64, label: &str) -> Result<(), String> {
 ///
 /// Binding crates collect these from their language-specific APIs, then pass
 /// them to [`build_continuation`] to produce the [`WorkflowContinuation`] tree.
+#[derive(Clone)]
 pub enum BuilderTask {
     /// A single sequential task.
     Sequential {
@@ -76,6 +77,13 @@ pub enum BuilderTask {
         max_iterations: u32,
         /// What to do when `max_iterations` is reached.
         on_max: crate::workflow::MaxIterationsPolicy,
+    },
+    /// A child workflow node (inline composition).
+    ChildWorkflow {
+        /// Unique child workflow identifier.
+        child_id: String,
+        /// The child's builder tasks (built separately).
+        child_tasks: Vec<BuilderTask>,
     },
 }
 
@@ -252,6 +260,24 @@ impl FlowBuilder {
         Ok(branch_id)
     }
 
+    /// Add a child workflow (inline composition).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `child_tasks` is empty.
+    pub fn add_child_workflow(&mut self, child_id: String, child_tasks: Vec<BuilderTask>) {
+        self.tasks.push(BuilderTask::ChildWorkflow {
+            child_id,
+            child_tasks,
+        });
+    }
+
+    /// Read access to the collected builder tasks.
+    #[must_use]
+    pub fn tasks(&self) -> &[BuilderTask] {
+        &self.tasks
+    }
+
     /// Build the final [`WorkflowContinuation`].
     ///
     /// # Errors
@@ -396,6 +422,17 @@ pub fn build_continuation(tasks: &[BuilderTask]) -> Result<WorkflowContinuation,
                     body: Box::new(body),
                     max_iterations: *max_iterations,
                     on_max: *on_max,
+                    next: current.map(Box::new),
+                }
+            }
+            BuilderTask::ChildWorkflow {
+                child_id,
+                child_tasks,
+            } => {
+                let child_cont = build_continuation(child_tasks)?;
+                WorkflowContinuation::ChildWorkflow {
+                    id: child_id.clone(),
+                    child: Arc::new(child_cont),
                     next: current.map(Box::new),
                 }
             }

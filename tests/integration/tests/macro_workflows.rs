@@ -642,3 +642,61 @@ async fn workflow_macro_loop_in_pipeline() {
         .unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
 }
+
+#[tokio::test]
+async fn workflow_macro_flow_basic() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // Build child workflow
+    let child: sayiir_core::workflow::SerializableWorkflow<JsonCodec, u32> = workflow! {
+        name: "child",
+        steps: [double]
+    }
+    .unwrap();
+
+    // Parent: add_ten → child(double)
+    let parent = workflow! {
+        name: "flow-test",
+        steps: [add_ten, flow child]
+    }
+    .unwrap();
+
+    // 5 + 10 = 15, child: 15 * 2 = 30
+    let status = runner
+        .run(parent.workflow(), "flow-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+#[tokio::test]
+async fn workflow_macro_flow_in_pipeline() {
+    let (_c, backend) = setup().await;
+    let runner = CheckpointingRunner::new(backend);
+
+    // Build child: double
+    let child: sayiir_core::workflow::SerializableWorkflow<JsonCodec, u32> = workflow! {
+        name: "child-mid",
+        steps: [double]
+    }
+    .unwrap();
+
+    // Parent: add_five → child(double) → add_ten
+    let parent = workflow! {
+        name: "flow-pipeline-test",
+        steps: [
+            add_five(x: u32) { Ok(x + 5) },
+            flow child,
+            add_ten,
+        ]
+    }
+    .unwrap();
+
+    // 5 + 5 = 10, child: 10 * 2 = 20, then 20 + 10 = 30
+    let status = runner
+        .run(parent.workflow(), "flow-pipe-inst-1", 5u32)
+        .await
+        .unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+}

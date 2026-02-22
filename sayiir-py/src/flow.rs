@@ -196,6 +196,12 @@ impl PyFlowBuilder {
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
+    /// Add a child workflow (inline composition).
+    fn add_child_workflow(&mut self, child_id: String, child_builder: &PyFlowBuilder) {
+        self.inner
+            .add_child_workflow(child_id, child_builder.inner.tasks().to_vec());
+    }
+
     /// Build the workflow.
     fn build(&self) -> PyResult<PyWorkflow> {
         tracing::debug!(workflow_id = %self.workflow_id, "building workflow");

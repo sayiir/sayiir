@@ -5,8 +5,9 @@
 //! [`Task`](WorkflowContinuation::Task),
 //! [`Fork`](WorkflowContinuation::Fork),
 //! [`Delay`](WorkflowContinuation::Delay),
-//! [`AwaitSignal`](WorkflowContinuation::AwaitSignal), or
-//! [`Branch`](WorkflowContinuation::Branch).
+//! [`AwaitSignal`](WorkflowContinuation::AwaitSignal),
+//! [`Branch`](WorkflowContinuation::Branch), or
+//! [`ChildWorkflow`](WorkflowContinuation::ChildWorkflow).
 //!
 //! [`SerializableContinuation`] strips out function pointers so the tree
 //! can be persisted and later rehydrated via a [`TaskRegistry`].
@@ -87,6 +88,13 @@ macro_rules! impl_find_duplicate_id {
                                 return Some(id.clone());
                             }
                             collect(body, seen)
+                                .or_else(|| next.as_ref().and_then(|n| collect(n, seen)))
+                        }
+                        $name::ChildWorkflow { id, child, next } => {
+                            if !seen.insert(id.clone()) {
+                                return Some(id.clone());
+                            }
+                            collect(child, seen)
                                 .or_else(|| next.as_ref().and_then(|n| collect(n, seen)))
                         }
                     }
@@ -176,6 +184,15 @@ pub enum WorkflowContinuation {
         /// Continuation after the loop completes.
         next: Option<Box<WorkflowContinuation>>,
     },
+    /// A child workflow node. Executes another workflow's continuation inline.
+    ChildWorkflow {
+        /// Unique child workflow identifier.
+        id: String,
+        /// The child workflow's continuation tree (inlined, not a reference).
+        child: Arc<WorkflowContinuation>,
+        /// Continuation after the child workflow completes.
+        next: Option<Box<WorkflowContinuation>>,
+    },
 }
 
 impl_find_duplicate_id!(
@@ -222,7 +239,8 @@ impl WorkflowContinuation {
             | WorkflowContinuation::Delay { id, .. }
             | WorkflowContinuation::AwaitSignal { id, .. }
             | WorkflowContinuation::Branch { id, .. }
-            | WorkflowContinuation::Loop { id, .. } => id,
+            | WorkflowContinuation::Loop { id, .. }
+            | WorkflowContinuation::ChildWorkflow { id, .. } => id,
         }
     }
 
@@ -235,7 +253,8 @@ impl WorkflowContinuation {
             | Self::Delay { next, .. }
             | Self::AwaitSignal { next, .. }
             | Self::Branch { next, .. }
-            | Self::Loop { next, .. } => next.as_deref(),
+            | Self::Loop { next, .. }
+            | Self::ChildWorkflow { next, .. } => next.as_deref(),
             Self::Fork { join, .. } => join.as_deref(),
         }
     }
@@ -259,6 +278,7 @@ impl WorkflowContinuation {
                 }
             }
             WorkflowContinuation::Loop { body, .. } => body.first_task_id(),
+            WorkflowContinuation::ChildWorkflow { child, .. } => child.first_task_id(),
         }
     }
 
@@ -321,6 +341,9 @@ impl WorkflowContinuation {
             WorkflowContinuation::Loop { body, next, .. } => body
                 .find_task(target_id)
                 .or_else(|| next.as_ref().and_then(|n| n.find_task(target_id))),
+            WorkflowContinuation::ChildWorkflow { child, next, .. } => child
+                .find_task(target_id)
+                .or_else(|| next.as_ref().and_then(|n| n.find_task(target_id))),
         }
     }
 
@@ -364,6 +387,10 @@ impl WorkflowContinuation {
                 if let Some(found) = body.find_task_mut(target_id) {
                     return Some(found);
                 }
+                next.as_mut().and_then(|n| n.find_task_mut(target_id))
+            }
+            WorkflowContinuation::ChildWorkflow { next, .. } => {
+                // Arc child branches cannot be mutated; only search next.
                 next.as_mut().and_then(|n| n.find_task_mut(target_id))
             }
         }
@@ -490,6 +517,13 @@ impl WorkflowContinuation {
                 default: default.as_ref().map(|d| Box::new(d.to_serializable())),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
+            WorkflowContinuation::ChildWorkflow { id, child, next } => {
+                SerializableContinuation::ChildWorkflow {
+                    id: id.clone(),
+                    child: Box::new(child.to_serializable()),
+                    next: next.as_ref().map(|n| Box::new(n.to_serializable())),
+                }
+            }
             WorkflowContinuation::Loop {
                 id,
                 body,
@@ -515,7 +549,8 @@ impl WorkflowContinuation {
             | WorkflowContinuation::Delay { next, .. }
             | WorkflowContinuation::AwaitSignal { next, .. }
             | WorkflowContinuation::Branch { next, .. }
-            | WorkflowContinuation::Loop { next, .. } => match next {
+            | WorkflowContinuation::Loop { next, .. }
+            | WorkflowContinuation::ChildWorkflow { next, .. } => match next {
                 Some(next_box) => next_box.append_to_chain(new_node),
                 None => *next = Some(Box::new(new_node)),
             },
@@ -639,6 +674,15 @@ pub enum SerializableContinuation {
         /// What to do when `max_iterations` is reached.
         on_max: MaxIterationsPolicy,
         /// Continuation after the loop completes.
+        next: Option<Box<SerializableContinuation>>,
+    },
+    /// A child workflow node.
+    ChildWorkflow {
+        /// Unique child workflow identifier.
+        id: String,
+        /// The child workflow's continuation tree.
+        child: Box<SerializableContinuation>,
+        /// Continuation after the child workflow completes.
         next: Option<Box<SerializableContinuation>>,
     },
 }
@@ -800,6 +844,18 @@ impl SerializableContinuation {
                     next,
                 })
             }
+            SerializableContinuation::ChildWorkflow { id, child, next } => {
+                let child = child.to_runnable_unchecked(registry)?;
+                let next = next
+                    .as_ref()
+                    .map(|n| n.to_runnable_unchecked(registry).map(Box::new))
+                    .transpose()?;
+                Ok(WorkflowContinuation::ChildWorkflow {
+                    id: id.clone(),
+                    child: Arc::new(child),
+                    next,
+                })
+            }
         }
     }
 
@@ -845,6 +901,13 @@ impl SerializableContinuation {
                 SerializableContinuation::Loop { id, body, next, .. } => {
                     ids.push(id.as_str());
                     collect(body, ids);
+                    if let Some(n) = next {
+                        collect(n, ids);
+                    }
+                }
+                SerializableContinuation::ChildWorkflow { id, child, next } => {
+                    ids.push(id.as_str());
+                    collect(child, ids);
                     if let Some(n) = next {
                         collect(n, ids);
                     }
@@ -992,6 +1055,17 @@ impl SerializableContinuation {
                     hasher.update(on_max.to_string().as_bytes());
                     hasher.update(b"{");
                     hash_continuation(body, hasher);
+                    hasher.update(b"}");
+                    hasher.update(b";");
+                    if let Some(n) = next {
+                        hash_continuation(n, hasher);
+                    }
+                }
+                SerializableContinuation::ChildWorkflow { id, child, next } => {
+                    hasher.update(b"CW:");
+                    hasher.update(id.as_bytes());
+                    hasher.update(b"{");
+                    hash_continuation(child, hasher);
                     hasher.update(b"}");
                     hasher.update(b";");
                     if let Some(n) = next {
@@ -1199,6 +1273,14 @@ impl<C, Input, M> Workflow<C, Input, M> {
     pub fn metadata(&self) -> &Arc<M> {
         &self.context.metadata
     }
+
+    /// Consume the workflow and return its continuation tree.
+    ///
+    /// Useful for inlining this workflow as a child inside another workflow.
+    #[must_use]
+    pub fn into_continuation(self) -> WorkflowContinuation {
+        self.continuation
+    }
 }
 
 // ============================================================================
@@ -1300,6 +1382,15 @@ impl<C, Input, M> SerializableWorkflow<C, Input, M> {
     #[must_use]
     pub fn registry(&self) -> &TaskRegistry {
         &self.registry
+    }
+
+    /// Consume the workflow and return its continuation tree and task registry.
+    ///
+    /// Useful for inlining this workflow as a child inside another workflow
+    /// while merging task registries.
+    #[must_use]
+    pub fn into_parts(self) -> (WorkflowContinuation, TaskRegistry) {
+        (self.inner.continuation, self.registry)
     }
 
     /// Convert to a serializable state representation.
@@ -2378,6 +2469,15 @@ mod proptests {
                         next,
                     }
                 }),
+            // ChildWorkflow with child and optional next
+            (
+                arb_id(),
+                arb_continuation(depth - 1).prop_map(Box::new),
+                prop::option::of(arb_continuation(depth - 1).prop_map(Box::new)),
+            )
+                .prop_map(|(id, child, next)| {
+                    SerializableContinuation::ChildWorkflow { id, child, next }
+                }),
         ]
         .boxed()
     }
@@ -2513,7 +2613,7 @@ mod proptests {
             },
             // Loop with body and optional next
             {
-                let id_l = id;
+                let id_l = id.clone();
                 let prefix_l = prefix.to_string();
                 let body = arb_unique_continuation(depth - 1, &format!("{prefix_l}lb_"))
                     .prop_map(Box::new);
@@ -2542,6 +2642,24 @@ mod proptests {
                             next,
                         }
                     })
+            },
+            // ChildWorkflow with child and optional next
+            {
+                let id_cw = id;
+                let prefix_cw = prefix.to_string();
+                let child = arb_unique_continuation(depth - 1, &format!("{prefix_cw}cc_"))
+                    .prop_map(Box::new);
+                let next = prop::option::of(
+                    arb_unique_continuation(depth - 1, &format!("{prefix_cw}cn_"))
+                        .prop_map(Box::new),
+                );
+                (child, next).prop_map(move |(child, next)| {
+                    SerializableContinuation::ChildWorkflow {
+                        id: id_cw.clone(),
+                        child,
+                        next,
+                    }
+                })
             },
         ]
         .boxed()
@@ -2589,6 +2707,13 @@ mod proptests {
                 SerializableContinuation::Loop { id, body, next, .. } => {
                     out.push(id.clone());
                     walk(body, out);
+                    if let Some(n) = next {
+                        walk(n, out);
+                    }
+                }
+                SerializableContinuation::ChildWorkflow { id, child, next } => {
+                    out.push(id.clone());
+                    walk(child, out);
                     if let Some(n) = next {
                         walk(n, out);
                     }
@@ -2664,6 +2789,13 @@ mod proptests {
                 on_max: *on_max,
                 next: next.clone(),
             },
+            SerializableContinuation::ChildWorkflow { child, next, .. } => {
+                SerializableContinuation::ChildWorkflow {
+                    id: dup_id.to_string(),
+                    child: child.clone(),
+                    next: next.clone(),
+                }
+            }
         }
     }
 

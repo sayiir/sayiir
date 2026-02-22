@@ -36,10 +36,13 @@ export class Workflow<TIn, TOut> {
   readonly _inner: NapiWorkflow;
   /** @internal */
   readonly _taskRegistry: Record<string, TaskCallback>;
+  /** @internal — kept for child workflow composition via `thenFlow`. */
+  readonly _builder: NapiFlowBuilder;
 
-  constructor(inner: NapiWorkflow, taskRegistry: Record<string, TaskCallback>) {
+  constructor(inner: NapiWorkflow, taskRegistry: Record<string, TaskCallback>, builder: NapiFlowBuilder) {
     this._inner = inner;
     this._taskRegistry = taskRegistry;
+    this._builder = builder;
   }
 
   get workflowId(): string {
@@ -116,6 +119,8 @@ export class Flow<TInput, TLast = TInput> {
   readonly _builder: NapiFlowBuilder;
   /** @internal */
   readonly _taskRegistry: Record<string, TaskCallback> = {};
+  /** @internal */
+  private _childCounter = 0;
 
   constructor(name: string, opts?: FlowOptions) {
     this._builder = new (getNative().NapiFlowBuilder)(name);
@@ -321,10 +326,31 @@ export class Flow<TInput, TLast = TInput> {
     return this as unknown as Flow<TInput, TOut>;
   }
 
+  /**
+   * Compose another workflow inline as a child.
+   *
+   * The child workflow's tasks execute as a sub-pipeline: the current
+   * step's output feeds into the child's first task, and the child's
+   * final output continues to the next step.
+   *
+   * ```ts
+   * const child = flow<number>("double").then("x2", (n) => n * 2).build();
+   * const parent = flow<number>("pipeline").then("inc", (n) => n + 1).thenFlow(child).build();
+   * ```
+   */
+  thenFlow<TOut>(workflow: Workflow<TLast, TOut>): Flow<TInput, Awaited<TOut>> {
+    const childId = `child_${this._childCounter++}`;
+    // Merge child task registry into parent
+    Object.assign(this._taskRegistry, workflow._taskRegistry);
+    // Tell native builder about the child
+    this._builder.addChildWorkflow(childId, workflow._builder);
+    return this as unknown as Flow<TInput, Awaited<TOut>>;
+  }
+
   /** Build the workflow definition. */
   build(): Workflow<TInput, TLast> {
     const inner = this._builder.build();
-    return new Workflow<TInput, TLast>(inner, this._taskRegistry);
+    return new Workflow<TInput, TLast>(inner, this._taskRegistry, this._builder);
   }
 }
 

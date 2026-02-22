@@ -35,7 +35,8 @@ pub fn collect_task_refs(steps: &[WorkflowStep]) -> Vec<&Ident> {
             }
             WorkflowStep::InlineTask { .. }
             | WorkflowStep::Delay { .. }
-            | WorkflowStep::AwaitSignal { .. } => {}
+            | WorkflowStep::AwaitSignal { .. }
+            | WorkflowStep::Flow { .. } => {}
         }
     }
     refs
@@ -205,6 +206,12 @@ pub fn gen_step_chain(steps: &[WorkflowStep]) -> syn::Result<TokenStream> {
                         #max_iterations,
                         #on_max_expr,
                     )
+                });
+                i += 1;
+            }
+            WorkflowStep::Flow { expr, .. } => {
+                tokens.extend(quote! {
+                    .then_serializable_flow(#expr)
                 });
                 i += 1;
             }
