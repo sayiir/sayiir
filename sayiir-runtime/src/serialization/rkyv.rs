@@ -97,6 +97,7 @@ impl sayiir_core::codec::EnvelopeCodec for RkyvCodec {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use sayiir_core::codec::{LoopDecision, decode_loop_envelope, encode_loop_envelope};

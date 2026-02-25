@@ -16,7 +16,9 @@ pub(crate) mod loop_runner;
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::absurd_extreme_comparisons,
+    clippy::useless_conversion
 )]
 mod tests;
 

@@ -1439,6 +1439,16 @@ impl<C, Input, M> Deref for SerializableWorkflow<C, Input, M> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::uninlined_format_args,
+    clippy::manual_let_else,
+    clippy::too_many_lines,
+    clippy::items_after_statements
+)]
 mod tests {
     use crate::codec::{Decoder, Encoder, sealed};
     use crate::error::BoxError;
@@ -2353,7 +2363,9 @@ mod tests {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    clippy::items_after_statements
 )]
 mod proptests {
     use super::{MaxIterationsPolicy, SerializableContinuation};

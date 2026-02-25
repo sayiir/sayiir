@@ -761,6 +761,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::stable_sort_primitive)]
 mod tests {
     use super::*;
     use crate::codec::{Decoder, Encoder};

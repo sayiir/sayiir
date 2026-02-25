@@ -180,7 +180,7 @@ macro_rules! task_context {
 }
 
 #[cfg(all(test, feature = "tokio"))]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::task::TaskMetadata;

@@ -12,12 +12,11 @@ use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-// ── Trace context propagation ───────────────────────────────────────────
-
 /// Extract the W3C `traceparent` value from the current tracing span.
 ///
-/// Returns `None` if there is no active OTel context (e.g. OTel subscriber
+/// Returns `None` if there is no active `OTel` context (e.g. `OTel` subscriber
 /// is not installed, or the span has no trace ID).
+#[must_use]
 pub fn current_trace_parent() -> Option<String> {
     let context = tracing::Span::current().context();
     let propagator = TraceContextPropagator::new();
@@ -28,8 +27,10 @@ pub fn current_trace_parent() -> Option<String> {
 
 /// Build an OpenTelemetry [`opentelemetry::Context`] from a W3C `traceparent` value.
 ///
+///
 /// Used to restore parent context when a worker picks up a task that was
 /// started under a different trace.
+#[must_use]
 pub fn context_from_trace_parent(trace_parent: &str) -> opentelemetry::Context {
     let propagator = TraceContextPropagator::new();
     let mut carrier = HashMap::new();
@@ -77,7 +78,10 @@ pub fn init_tracing(default_service_name: &str) {
             {
                 Ok(e) => e,
                 Err(err) => {
-                    eprintln!("sayiir: failed to create OTLP exporter: {err}");
+                    #[allow(clippy::print_stderr)]
+                    {
+                        eprintln!("sayiir: failed to create OTLP exporter: {err}");
+                    }
                     tracing_subscriber::registry()
                         .with(filter)
                         .with(fmt_layer)

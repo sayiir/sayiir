@@ -54,14 +54,17 @@ fn linear_chain(n: usize) -> WorkflowContinuation {
     let codec = Arc::new(JsonCodec);
     let mut chain: Option<WorkflowContinuation> = None;
     for i in (0..n).rev() {
+        let id = format!("task_{i}");
         chain = Some(WorkflowContinuation::Task {
-            id: format!("task_{i}"),
             func: Some(to_core_task(
+                &id,
                 |v: u32| async move { Ok(v + 1) },
                 codec.clone(),
             )),
+            id,
             timeout: None,
             retry_policy: None,
+            version: None,
             next: chain.map(Box::new),
         });
     }
@@ -77,6 +80,7 @@ fn linear_chain_no_func(n: usize) -> WorkflowContinuation {
             func: None,
             timeout: None,
             retry_policy: None,
+            version: None,
             next: chain.map(Box::new),
         });
     }
@@ -91,13 +95,15 @@ fn fork_join(n_branches: usize) -> WorkflowContinuation {
         .iter()
         .map(|id| {
             Arc::new(WorkflowContinuation::Task {
-                id: id.clone(),
                 func: Some(to_core_task(
+                    id,
                     |v: u32| async move { Ok(v * 2) },
                     codec.clone(),
                 )),
+                id: id.clone(),
                 timeout: None,
                 retry_policy: None,
+                version: None,
                 next: None,
             })
         })
