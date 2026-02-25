@@ -80,4 +80,6 @@ pub struct AvailableTask {
     pub input: bytes::Bytes,
     /// The workflow definition hash.
     pub workflow_definition_hash: String,
+    /// W3C `traceparent` header for distributed trace context propagation.
+    pub trace_parent: Option<String>,
 }

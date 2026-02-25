@@ -506,6 +506,11 @@ fn execute_async_inner<'a, E: EnvelopeCodec + Clone + 'static>(
 /// # Errors
 /// Returns an error if task execution, cancellation checking, or snapshot saving fails.
 #[allow(clippy::too_many_lines)]
+#[tracing::instrument(
+    name = "workflow",
+    skip_all,
+    fields(instance_id = %snapshot.instance_id),
+)]
 pub async fn execute_continuation_with_checkpointing<F, Fut, B, E>(
     continuation: &WorkflowContinuation,
     input: Bytes,
@@ -520,6 +525,7 @@ where
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
     E: EnvelopeCodec,
 {
+    tracing::debug!("executing workflow with checkpointing");
     let mut current = continuation;
     let mut current_input = input;
 

@@ -15,6 +15,11 @@ use crate::error::RuntimeError;
 ///
 /// # Errors
 /// Returns an error if saving the initial snapshot fails.
+#[tracing::instrument(
+    name = "lifecycle.prepare_run",
+    skip(input_bytes, backend),
+    fields(%instance_id),
+)]
 pub async fn prepare_run<B>(
     instance_id: String,
     definition_hash: String,
@@ -25,8 +30,13 @@ pub async fn prepare_run<B>(
 where
     B: SnapshotStore,
 {
+    tracing::debug!("preparing fresh workflow run");
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
+    #[cfg(feature = "otel")]
+    {
+        snapshot.trace_parent = crate::trace_context::current_trace_parent();
+    }
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: first_task_id,
     });
@@ -44,6 +54,11 @@ where
 ///
 /// # Errors
 /// Returns an error if the snapshot cannot be loaded or the definition hash mismatches.
+#[tracing::instrument(
+    name = "lifecycle.prepare_resume",
+    skip(backend),
+    fields(%instance_id),
+)]
 pub async fn prepare_resume<B>(
     instance_id: &str,
     definition_hash: &str,
@@ -52,6 +67,7 @@ pub async fn prepare_resume<B>(
 where
     B: SignalStore,
 {
+    tracing::debug!("preparing workflow resume");
     let mut snapshot = backend.load_snapshot(instance_id).await?;
 
     // Validate definition hash
@@ -145,6 +161,11 @@ pub fn get_resume_input(snapshot: &WorkflowSnapshot) -> Result<Bytes, RuntimeErr
 ///
 /// # Errors
 /// Returns an error if saving the snapshot to the backend fails.
+#[tracing::instrument(
+    name = "lifecycle.finalize",
+    skip_all,
+    fields(instance_id = %snapshot.instance_id),
+)]
 pub async fn finalize_execution<B>(
     result: Result<Bytes, RuntimeError>,
     snapshot: &mut WorkflowSnapshot,
@@ -153,8 +174,10 @@ pub async fn finalize_execution<B>(
 where
     B: SnapshotStore,
 {
+    tracing::debug!("finalizing workflow execution");
     match result {
         Ok(output) => {
+            tracing::info!(instance_id = %snapshot.instance_id, "workflow completed");
             snapshot.mark_completed(output.clone());
             backend.save_snapshot(snapshot).await?;
             Ok((WorkflowStatus::Completed, Some(output)))
@@ -201,6 +224,7 @@ where
             ))
         }
         Err(RuntimeError::Workflow(WorkflowError::Cancelled { .. })) => {
+            tracing::info!(instance_id = %snapshot.instance_id, "workflow cancelled");
             // Reload snapshot to get cancellation details (set by check_and_cancel)
             if let Ok(cancelled_snapshot) = backend.load_snapshot(&snapshot.instance_id).await
                 && let Some((reason, cancelled_by)) =
@@ -224,6 +248,7 @@ where
             ))
         }
         Err(RuntimeError::Workflow(WorkflowError::Paused { .. })) => {
+            tracing::info!(instance_id = %snapshot.instance_id, "workflow paused");
             // Reload snapshot to get pause details (set by check_and_pause)
             if let Ok(paused_snapshot) = backend.load_snapshot(&snapshot.instance_id).await
                 && let Some((reason, paused_by)) = paused_snapshot.state.pause_details()
@@ -239,6 +264,7 @@ where
             ))
         }
         Err(e) => {
+            tracing::error!(instance_id = %snapshot.instance_id, error = %e, "workflow failed");
             snapshot.mark_failed(e.to_string());
             let _ = backend.save_snapshot(snapshot).await;
             Ok((WorkflowStatus::Failed(e.to_string()), None))

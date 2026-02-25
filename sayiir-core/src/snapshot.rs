@@ -453,6 +453,12 @@ pub struct WorkflowSnapshot {
     /// Current iteration counts for active loops (keyed by loop ID).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub loop_iterations: HashMap<String, u32>,
+    /// W3C `traceparent` header for distributed trace context propagation.
+    ///
+    /// This is an in-memory carrier — never serialized in the snapshot blob.
+    /// Postgres reads/writes it from a dedicated column.
+    #[serde(skip)]
+    pub trace_parent: Option<String>,
 }
 
 impl WorkflowSnapshot {
@@ -480,6 +486,7 @@ impl WorkflowSnapshot {
             task_deadline: None,
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
+            trace_parent: None,
         }
     }
 
@@ -504,6 +511,7 @@ impl WorkflowSnapshot {
             task_deadline: None,
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
+            trace_parent: None,
         }
     }
 

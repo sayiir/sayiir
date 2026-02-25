@@ -1,0 +1,288 @@
+---
+title: Observability & Logging
+description: Configure logging, tracing, and OpenTelemetry integration for Sayiir workflows
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+Sayiir uses [tracing](https://docs.rs/tracing) for structured logging and spans across the entire Rust stack — runtime, persistence, and database layers. The Python and Node.js bindings include built-in support for exporting traces to any OpenTelemetry-compatible backend (Jaeger, Grafana Tempo, Datadog, etc.).
+
+## Quick Start
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+import sayiir
+
+# Initialize logging (call once at startup)
+sayiir.init_tracing()
+
+# Your workflow code...
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { initTracing, shutdownTracing } from "sayiir";
+
+// Initialize logging (call once at startup)
+initTracing();
+
+// Your workflow code...
+
+// Before process exit
+shutdownTracing();
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use tracing_subscriber::EnvFilter;
+
+// Set up tracing subscriber (call once at startup)
+tracing_subscriber::fmt()
+    .with_env_filter(
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"))
+    )
+    .init();
+```
+
+</TabItem>
+</Tabs>
+
+## Environment Variables
+
+All logging and tracing behavior is controlled through environment variables.
+
+### `RUST_LOG` — Log Level
+
+Controls which log messages are emitted. Sayiir uses the standard [`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber) filter syntax.
+
+```bash
+# Set the global log level
+RUST_LOG=info        # Default — show info, warn, and error
+RUST_LOG=debug       # Verbose — includes task claim details, snapshot saves
+RUST_LOG=warn        # Quiet — only warnings and errors
+RUST_LOG=error       # Minimal — only errors
+RUST_LOG=off         # Silent — no logs at all
+```
+
+You can also set levels per module to fine-tune output:
+
+```bash
+# Silence Sayiir internals, keep your app logs
+RUST_LOG=info,sayiir_runtime=off,sayiir_postgres=off
+
+# Debug only the database layer
+RUST_LOG=warn,sayiir_postgres=debug
+
+# Debug only the worker/runtime layer
+RUST_LOG=warn,sayiir_runtime=debug
+
+# Show everything from Sayiir, silence dependencies
+RUST_LOG=warn,sayiir_runtime=trace,sayiir_postgres=trace,sayiir_persistence=trace
+```
+
+<Aside type="tip">
+In production, `RUST_LOG=info` is a good default. Use `warn` or `error` if log volume is a concern.
+</Aside>
+
+### `OTEL_EXPORTER_OTLP_ENDPOINT` — OpenTelemetry Endpoint
+
+When set, Sayiir exports traces via gRPC to the specified OTLP endpoint. When unset, only console logging is active (no OTel overhead).
+
+```bash
+# Local Jaeger (default OTLP gRPC port)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# Grafana Tempo
+OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo.monitoring:4317
+
+# Datadog Agent
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
+
+### `OTEL_SERVICE_NAME` — Service Name
+
+Identifies your service in the tracing backend. Defaults to `sayiir-py` (Python) or `sayiir-node` (Node.js) if not set.
+
+```bash
+OTEL_SERVICE_NAME=order-service
+OTEL_SERVICE_NAME=payment-worker
+```
+
+## What Gets Traced
+
+Sayiir instruments every significant operation with structured spans and fields:
+
+### Database Operations
+
+Every database call is wrapped in a span with `db.system = "postgresql"`:
+
+| Span Name | Description |
+|-----------|-------------|
+| `db.save_snapshot` | Persist workflow checkpoint |
+| `db.load_snapshot` | Load workflow state |
+| `db.save_task_result` | Save completed task output |
+| `db.claim_task` | Acquire task claim |
+| `db.release_task_claim` | Release task claim |
+| `db.find_available_tasks` | Poll for available work |
+| `db.store_signal` | Store cancel/pause signal |
+| `db.check_and_cancel` | Check for cancellation |
+| `db.check_and_pause` | Check for pause request |
+
+### Runtime Operations
+
+| Span Name | Description |
+|-----------|-------------|
+| `workflow` | Full workflow execution |
+| `task` | Individual task execution with heartbeat |
+| `settle_result` | Post-task result handling (retry/save/advance) |
+| `fork` | Parallel branch execution |
+| `loop` | Loop iteration |
+| `lifecycle.prepare_run` | Initialize new workflow |
+| `lifecycle.prepare_resume` | Resume from checkpoint |
+| `lifecycle.finalize` | Finalize workflow (complete/fail/cancel) |
+
+### Structured Fields
+
+All spans include structured fields for filtering and correlation:
+
+- `instance_id` — Workflow instance identifier
+- `task_id` — Current task being executed
+- `worker_id` — Worker processing the task
+- `definition_hash` — Workflow definition version
+
+## OpenTelemetry Setup
+
+### Jaeger (Local Development)
+
+Run Jaeger with Docker:
+
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  jaegertracing/jaeger:latest
+```
+
+Then start your workflow with OTel enabled:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+OTEL_SERVICE_NAME=my-workflow \
+RUST_LOG=info \
+python my_workflow.py
+```
+
+Open `http://localhost:16686` to view traces.
+
+### Grafana Tempo + Grafana
+
+```yaml
+# docker-compose.yml
+services:
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+```
+
+### Rust — Custom Subscriber
+
+For Rust users who want full control over the tracing subscriber:
+
+```rust
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::SpanExporter;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
+
+let filter = EnvFilter::try_from_default_env()
+    .unwrap_or_else(|_| EnvFilter::new("info"));
+
+let exporter = SpanExporter::builder()
+    .with_tonic()
+    .with_endpoint("http://localhost:4317")
+    .build()?;
+
+let provider = SdkTracerProvider::builder()
+    .with_batch_exporter(exporter)
+    .with_resource(
+        opentelemetry_sdk::Resource::builder()
+            .with_service_name("my-service")
+            .build(),
+    )
+    .build();
+
+let tracer = provider.tracer("sayiir");
+let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+tracing_subscriber::registry()
+    .with(filter)
+    .with(tracing_subscriber::fmt::layer())
+    .with(otel_layer)
+    .init();
+
+// ... run workflows ...
+
+// Flush before exit
+provider.shutdown()?;
+```
+
+## Common Recipes
+
+### Silence All Sayiir Logs
+
+```bash
+RUST_LOG=off python my_workflow.py
+```
+
+Or silence only Sayiir while keeping your app's logs:
+
+```bash
+RUST_LOG=info,sayiir_runtime=off,sayiir_postgres=off,sayiir_persistence=off,sayiir_core=off
+```
+
+### Production Logging (No OTel)
+
+Console logs only, minimal noise:
+
+```bash
+RUST_LOG=warn python my_workflow.py
+```
+
+### Production With OTel
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317 \
+OTEL_SERVICE_NAME=order-worker \
+RUST_LOG=info \
+python worker.py
+```
+
+### Debug a Specific Workflow Issue
+
+Temporarily increase verbosity for the runtime:
+
+```bash
+RUST_LOG=warn,sayiir_runtime=debug,sayiir_postgres=debug python my_workflow.py
+```

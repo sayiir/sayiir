@@ -189,6 +189,11 @@ impl<B: SnapshotStore> LoopHooks for CheckpointingLoopHooks<'_, B> {
 ///
 /// Generic over body execution (async closure) and snapshot hooks.
 /// The sync executor uses [`resolve_loop_iteration`] directly instead.
+#[tracing::instrument(
+    name = "loop",
+    skip_all,
+    fields(loop_id = %cfg.id),
+)]
 pub(crate) async fn run_loop_async<F, Fut, H>(
     cfg: &LoopConfig<'_>,
     initial_input: Bytes,
@@ -200,6 +205,7 @@ where
     Fut: Future<Output = Result<Bytes, RuntimeError>>,
     H: LoopHooks,
 {
+    tracing::debug!("starting loop execution");
     let mut loop_input = initial_input;
 
     for iteration in cfg.start_iteration..cfg.max_iterations {

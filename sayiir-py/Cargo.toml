@@ -21,7 +21,7 @@ serde_json = { workspace = true }
 sayiir-core = { workspace = true }
 sayiir-persistence = { workspace = true }
 sayiir-postgres = { workspace = true }
-sayiir-runtime = { workspace = true, features = ["json"] }
+sayiir-runtime = { workspace = true, features = ["json", "otel"] }
 tracing = { workspace = true }
 
 [build-dependencies]

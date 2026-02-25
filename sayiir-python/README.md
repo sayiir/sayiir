@@ -391,7 +391,7 @@ MIT
 - [Examples](https://github.com/sayiir/sayiir/tree/main/examples)
 - [GitHub](https://github.com/sayiir/sayiir)
 - [Discord](https://discord.gg/A2jWBFZsNK)
-- [Roadmap](https://github.com/sayiir/sayiir/blob/main/ROADMAP.md)
+- [Roadmap](https://docs.sayiir.dev/roadmap/)
 
 ---
 

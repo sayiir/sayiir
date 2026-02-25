@@ -23,13 +23,19 @@ where
         + codec::sealed::EncodeValue<WorkflowSnapshot>
         + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
+    #[tracing::instrument(
+        name = "db.store_signal",
+        skip(self, request),
+        fields(db.system = "postgresql", kind = %kind.as_ref()),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn store_signal(
         &self,
         instance_id: &str,
         kind: SignalKind,
         request: SignalRequest,
     ) -> Result<(), BackendError> {
-        tracing::debug!(instance_id, kind = %kind.as_ref(), "storing signal");
+        tracing::debug!("storing signal");
         // Validate workflow state first
         let row =
             sqlx::query("SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = $1")
@@ -59,12 +65,18 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "db.get_signal",
+        skip(self),
+        fields(db.system = "postgresql", kind = %kind.as_ref()),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn get_signal(
         &self,
         instance_id: &str,
         kind: SignalKind,
     ) -> Result<Option<SignalRequest>, BackendError> {
-        tracing::debug!(instance_id, kind = %kind.as_ref(), "getting signal");
+        tracing::debug!("getting signal");
         let row = sqlx::query(
             "SELECT reason, requested_by, created_at
              FROM sayiir_workflow_signals
@@ -83,8 +95,14 @@ where
         }))
     }
 
+    #[tracing::instrument(
+        name = "db.clear_signal",
+        skip(self),
+        fields(db.system = "postgresql", kind = %kind.as_ref()),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
-        tracing::debug!(instance_id, kind = %kind.as_ref(), "clearing signal");
+        tracing::debug!("clearing signal");
         sqlx::query("DELETE FROM sayiir_workflow_signals WHERE instance_id = $1 AND kind = $2")
             .bind(instance_id)
             .bind(kind.as_ref())
@@ -94,13 +112,19 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "db.send_event",
+        skip(self, payload),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn send_event(
         &self,
         instance_id: &str,
         signal_name: &str,
         payload: bytes::Bytes,
     ) -> Result<(), BackendError> {
-        tracing::debug!(instance_id, signal_name, "buffering external event");
+        tracing::debug!("buffering external event");
         sqlx::query(
             "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
              VALUES ($1, $2, $3)",
@@ -114,12 +138,18 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "db.consume_event",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn consume_event(
         &self,
         instance_id: &str,
         signal_name: &str,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
-        tracing::debug!(instance_id, signal_name, "consuming oldest buffered event");
+        tracing::debug!("consuming oldest buffered event");
         // Atomically delete-and-return the oldest event for this (instance, signal).
         let row = sqlx::query(
             "DELETE FROM sayiir_workflow_events
@@ -146,12 +176,18 @@ where
 
     // --- Overridden composites: single ACID transactions ---
 
+    #[tracing::instrument(
+        name = "db.check_and_cancel",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn check_and_cancel(
         &self,
         instance_id: &str,
         interrupted_at_task: Option<&str>,
     ) -> Result<bool, BackendError> {
-        tracing::debug!(instance_id, "checking for cancel signal");
+        tracing::debug!("checking for cancel signal");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // Check for cancel signal (lock the row)
@@ -239,8 +275,14 @@ where
         Ok(true)
     }
 
+    #[tracing::instrument(
+        name = "db.check_and_pause",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn check_and_pause(&self, instance_id: &str) -> Result<bool, BackendError> {
-        tracing::debug!(instance_id, "checking for pause signal");
+        tracing::debug!("checking for pause signal");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         // Check for pause signal (lock the row)
@@ -321,8 +363,14 @@ where
         Ok(true)
     }
 
+    #[tracing::instrument(
+        name = "db.unpause",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
-        tracing::debug!(instance_id, "unpausing workflow");
+        tracing::debug!("unpausing workflow");
         let mut tx = self.pool.begin().await.map_err(PgError)?;
 
         let row = sqlx::query(

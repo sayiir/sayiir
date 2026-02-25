@@ -142,6 +142,11 @@ pub(crate) struct ForkBranchOutcome {
 }
 
 /// Execute fork branches sequentially, collecting results and tracking delays.
+#[tracing::instrument(
+    name = "fork",
+    skip_all,
+    fields(branch_count = branches.len()),
+)]
 pub(crate) async fn execute_fork_branches_sequential<F, Fut, B, E>(
     branches: &[Arc<WorkflowContinuation>],
     input: &Bytes,
@@ -156,6 +161,7 @@ where
     Fut: Future<Output = Result<Bytes, BoxError>> + Send,
     E: EnvelopeCodec,
 {
+    tracing::debug!("executing fork branches sequentially");
     let mut branch_results = Vec::with_capacity(branches.len());
     let mut max_wake_at: Option<chrono::DateTime<chrono::Utc>> = None;
     let instance_id = snapshot.instance_id.clone();

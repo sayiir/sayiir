@@ -1012,7 +1012,8 @@ where
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::manual_let_else
 )]
 mod tests {
     use super::*;

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![deny(missing_docs)]
 #![deny(clippy::pedantic)]
 #![forbid(unsafe_code)]
@@ -57,6 +58,22 @@
 //! - [`task`] and [`workflow!`] — from `sayiir-macros`
 //! - [`task_context!`] — context macro from `sayiir-core`
 //!
+//! # Cargo Features
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `json` | **yes** | JSON serialization codec ([`serde_json`]) |
+//! | `rkyv` | **yes** | Zero-copy binary codec ([`rkyv`]) |
+//! | `macros` | **yes** | Proc-macro re-exports (`#[task]`, `workflow!`) from `sayiir-macros` |
+//! | `otel` | no | OpenTelemetry integration — W3C trace context propagation across workers, OTLP span export, and [`trace_context::init_tracing`] / [`trace_context::shutdown_tracing`] helpers |
+//!
+//! At least one of `json` or `rkyv` must be enabled (enforced at compile time).
+//!
+//! Enable `otel` in your bindings or application to get distributed trace
+//! propagation via the `trace_parent` field on snapshots, and a ready-made
+//! subscriber setup controlled by `OTEL_EXPORTER_OTLP_ENDPOINT`,
+//! `OTEL_SERVICE_NAME`, and `RUST_LOG` environment variables.
+//!
 //! For the full README with architecture diagrams and detailed configuration,
 //! see the [crate README](https://crates.io/crates/sayiir-runtime).
 
@@ -70,6 +87,8 @@ pub mod execution;
 pub mod prelude;
 mod runner;
 pub mod serialization;
+#[cfg(feature = "otel")]
+pub mod trace_context;
 pub mod worker;
 
 // Re-exports

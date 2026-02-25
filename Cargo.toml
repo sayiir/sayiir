@@ -35,6 +35,11 @@ sayiir-runtime = { version = "0.2.0", path = "sayiir-runtime", default-features 
 sayiir-postgres = { version = "0.2.0", path = "sayiir-postgres" }
 sayiir-macros = { version = "0.2.0", path = "sayiir-macros" }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.32"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = [
     "std",
