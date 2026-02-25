@@ -565,6 +565,14 @@ where
         executor: &ExternalTaskExecutor,
         available_task: &AvailableTask,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        // Link current span to the workflow's trace context (cross-worker propagation)
+        #[cfg(feature = "otel")]
+        if let Some(ref tp) = available_task.trace_parent {
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            let remote_ctx = crate::trace_context::context_from_trace_parent(tp);
+            let _ = tracing::Span::current().set_parent(remote_ctx);
+        }
+
         let continuation = &ext_wf.continuation;
         let mut snapshot = self
             .backend
@@ -898,6 +906,14 @@ where
             + sealed::EncodeValue<Input>
             + 'static,
     {
+        // Link current span to the workflow's trace context (cross-worker propagation)
+        #[cfg(feature = "otel")]
+        if let Some(ref tp) = available_task.trace_parent {
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            let remote_ctx = crate::trace_context::context_from_trace_parent(tp);
+            let _ = tracing::Span::current().set_parent(remote_ctx);
+        }
+
         // 1. Load snapshot + pure validation
         let mut snapshot = self
             .backend
@@ -1399,6 +1415,10 @@ where
         );
 
         Self::update_position_after_task(continuation, &available_task.task_id, snapshot);
+        #[cfg(feature = "otel")]
+        {
+            snapshot.trace_parent = crate::trace_context::current_trace_parent();
+        }
         self.backend.save_snapshot(snapshot).await?;
         claim.release().await?;
         Ok(())

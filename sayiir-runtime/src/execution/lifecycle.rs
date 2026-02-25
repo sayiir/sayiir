@@ -33,6 +33,10 @@ where
     tracing::debug!("preparing fresh workflow run");
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
+    #[cfg(feature = "otel")]
+    {
+        snapshot.trace_parent = crate::trace_context::current_trace_parent();
+    }
     snapshot.update_position(ExecutionPosition::AtTask {
         task_id: first_task_id,
     });

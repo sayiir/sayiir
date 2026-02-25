@@ -2715,9 +2715,6 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "sayiir-core",
  "sayiir-persistence",
  "sayiir-postgres",
@@ -2725,8 +2722,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2765,9 +2760,6 @@ version = "0.2.0"
 dependencies = [
  "bytes",
  "chrono",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "pyo3",
  "pyo3-build-config",
  "sayiir-core",
@@ -2777,8 +2769,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2791,6 +2781,9 @@ dependencies = [
  "chrono",
  "futures",
  "hostname",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "proptest",
  "rkyv",
  "sayiir-core",
@@ -2801,6 +2794,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

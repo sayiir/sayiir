@@ -21,13 +21,8 @@ serde_json = { workspace = true }
 sayiir-core = { workspace = true }
 sayiir-persistence = { workspace = true }
 sayiir-postgres = { workspace = true }
-sayiir-runtime = { workspace = true, features = ["json"] }
+sayiir-runtime = { workspace = true, features = ["json", "otel"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = "0.28"

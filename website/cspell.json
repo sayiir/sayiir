@@ -1,8 +1,16 @@
 {
   "version": "0.2",
   "language": "en",
-  "files": ["src/content/**/*.mdx", "src/content/**/*.md"],
-  "ignorePaths": ["node_modules", "dist", ".astro", "pnpm-lock.yaml"],
+  "files": [
+    "src/content/**/*.mdx",
+    "src/content/**/*.md"
+  ],
+  "ignorePaths": [
+    "node_modules",
+    "dist",
+    ".astro",
+    "pnpm-lock.yaml"
+  ],
   "words": [
     "sayiir",
     "astro",
@@ -70,8 +78,15 @@
     "fieldless",
     "myhost",
     "resumability",
-    "inlines"
+    "inlines",
+    "jaegertracing"
   ],
   "flagWords": [],
-  "dictionaries": ["softwareTerms", "typescript", "python", "rust", "node"]
+  "dictionaries": [
+    "softwareTerms",
+    "typescript",
+    "python",
+    "rust",
+    "node"
+  ]
 }

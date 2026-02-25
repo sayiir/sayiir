@@ -608,6 +608,10 @@ where
             task_id: next_cont.first_task_id().to_string(),
         });
     }
+    #[cfg(feature = "otel")]
+    {
+        snapshot.trace_parent = crate::trace_context::current_trace_parent();
+    }
     backend.save_snapshot(snapshot).await?;
     check_guards(backend, &snapshot.instance_id, None).await?;
 

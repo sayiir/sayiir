@@ -17,6 +17,7 @@ default = ["rkyv", "json", "macros"]
 json = ["dep:serde_json"]
 rkyv = ["dep:rkyv", "dep:bytecheck", "sayiir-core/rkyv"]
 macros = ["dep:sayiir-macros"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:tracing-subscriber"]
 
 [dependencies]
 sayiir-core = { workspace = true, features = ["tokio"] }
@@ -34,10 +35,19 @@ hostname = "0.4"
 serde_json = { workspace = true, optional = true }
 rkyv = { workspace = true, optional = true }
 bytecheck = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 serde_json = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "sayiir_runtime"
