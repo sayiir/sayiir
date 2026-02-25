@@ -571,6 +571,11 @@ pub(crate) struct TaskStepParams<'a> {
 /// Runs pre-guards, sets the deadline, retries via [`retry_with_checkpoint`],
 /// updates the snapshot position to the next task, saves the snapshot, and
 /// runs post-guards.
+#[tracing::instrument(
+    name = "task",
+    skip_all,
+    fields(task_id = %params.id, instance_id = %snapshot.instance_id),
+)]
 pub(crate) async fn execute_task_step<B, ExecFn, ExecFut, E>(
     params: &TaskStepParams<'_>,
     current_input: Bytes,
@@ -584,6 +589,7 @@ where
     ExecFut: Future<Output = Result<Bytes, E>> + Send,
     E: Into<RuntimeError>,
 {
+    tracing::debug!("executing task step");
     check_guards(backend, &snapshot.instance_id, Some(params.id)).await?;
     set_deadline_if_needed(params.id, params.timeout, snapshot, backend).await?;
 

@@ -533,13 +533,13 @@ where
                             return Ok(());
                         }
                         Ok(_) => {
-                            tracing::info!("Worker {} completed a task", self.worker_id);
+                            tracing::info!(worker_id = %self.worker_id, "completed task");
                         }
                         Err(e) => {
                             tracing::error!(
-                                "Worker {} task execution failed: {}",
-                                self.worker_id,
-                                e
+                                worker_id = %self.worker_id,
+                                error = %e,
+                                "task execution failed"
                             );
                         }
                     }
@@ -549,6 +549,15 @@ where
     }
 
     /// Execute a single task using an external executor.
+    #[tracing::instrument(
+        name = "workflow",
+        skip_all,
+        fields(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            definition_hash = %definition_hash,
+        ),
+    )]
     async fn execute_external_task(
         &self,
         ext_wf: &ExternalWorkflow,
@@ -651,6 +660,11 @@ where
     }
 
     /// Settle execution result for external executor mode.
+    #[tracing::instrument(
+        name = "settle_result",
+        skip_all,
+        fields(instance_id = %available_task.instance_id, task_id = %available_task.task_id),
+    )]
     async fn settle_execution_result_ext(
         &self,
         outcome: ExecutionOutcome,
@@ -659,6 +673,7 @@ where
         snapshot: &mut WorkflowSnapshot,
         claim: ActiveTaskClaim<'_, B>,
     ) -> Result<WorkflowStatus, crate::error::RuntimeError> {
+        tracing::debug!("settling execution result");
         match outcome {
             ExecutionOutcome::Timeout(err) => {
                 if let Ok(Some(status)) = self
@@ -799,13 +814,13 @@ where
                             return Ok(());
                         }
                         Ok(_) => {
-                            tracing::info!("Worker {} completed a task", self.worker_id);
+                            tracing::info!(worker_id = %self.worker_id, "completed task");
                         }
                         Err(e) => {
                             tracing::error!(
-                                "Worker {} task execution failed: {}",
-                                self.worker_id,
-                                e
+                                worker_id = %self.worker_id,
+                                error = %e,
+                                "task execution failed"
                             );
                         }
                     }
@@ -860,6 +875,15 @@ where
     /// - The workflow definition hash doesn't match
     /// - Task execution fails
     /// - Snapshot update fails
+    #[tracing::instrument(
+        name = "workflow",
+        skip_all,
+        fields(
+            instance_id = %available_task.instance_id,
+            task_id = %available_task.task_id,
+            definition_hash = %available_task.workflow_definition_hash,
+        ),
+    )]
     pub async fn execute_task<C, Input, M>(
         &self,
         workflow: &Workflow<C, Input, M>,
@@ -1030,6 +1054,11 @@ where
     }
 
     /// Settle the outcome of task execution: persist results or errors, release claim.
+    #[tracing::instrument(
+        name = "settle_result",
+        skip_all,
+        fields(instance_id = %available_task.instance_id, task_id = %available_task.task_id),
+    )]
     async fn settle_execution_result<C, Input, M>(
         &self,
         outcome: ExecutionOutcome,
@@ -1047,6 +1076,7 @@ where
             + sealed::EncodeValue<Input>
             + 'static,
     {
+        tracing::debug!("settling execution result");
         match outcome {
             ExecutionOutcome::Timeout(err) => {
                 if let Ok(Some(status)) = self
@@ -1278,6 +1308,11 @@ where
     /// If a `deadline` is provided, the heartbeat tick also checks whether the
     /// deadline has expired. If it has, the task future is dropped (active
     /// cancellation) and a `TaskTimedOut` error is returned.
+    #[tracing::instrument(
+        name = "task",
+        skip_all,
+        fields(instance_id = %claim.instance_id, task_id = %claim.task_id),
+    )]
     async fn run_with_heartbeat<F, T>(
         &self,
         claim: &ActiveTaskClaim<'_, B>,
@@ -1287,6 +1322,7 @@ where
     where
         F: std::future::Future<Output = T>,
     {
+        tracing::debug!("running task with heartbeat");
         let Some(ttl) = self.claim_ttl else {
             return Ok(future.await);
         };

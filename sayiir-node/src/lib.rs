@@ -24,4 +24,5 @@ mod engine;
 mod exceptions;
 mod flow;
 mod task;
+mod telemetry;
 mod worker;

@@ -17,6 +17,12 @@ where
         + codec::sealed::EncodeValue<WorkflowSnapshot>
         + codec::sealed::DecodeValue<WorkflowSnapshot>,
 {
+    #[tracing::instrument(
+        name = "db.claim_task",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn claim_task(
         &self,
         instance_id: &str,
@@ -24,7 +30,7 @@ where
         worker_id: &str,
         ttl: Option<Duration>,
     ) -> Result<Option<TaskClaim>, BackendError> {
-        tracing::debug!(instance_id, task_id, worker_id, "claiming task");
+        tracing::debug!("claiming task");
         let expires_at = ttl.and_then(|d| Utc::now().checked_add_signed(d));
 
         // Insert claim; on conflict only replace if the existing claim has expired.
@@ -57,13 +63,19 @@ where
         }))
     }
 
+    #[tracing::instrument(
+        name = "db.release_task_claim",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn release_task_claim(
         &self,
         instance_id: &str,
         task_id: &str,
         worker_id: &str,
     ) -> Result<(), BackendError> {
-        tracing::debug!(instance_id, task_id, worker_id, "releasing task claim");
+        tracing::debug!("releasing task claim");
         // Check ownership first
         let row = sqlx::query(
             "SELECT worker_id FROM sayiir_task_claims WHERE instance_id = $1 AND task_id = $2",
@@ -96,6 +108,12 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "db.extend_task_claim",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn extend_task_claim(
         &self,
         instance_id: &str,
@@ -103,7 +121,7 @@ where
         worker_id: &str,
         additional_duration: Duration,
     ) -> Result<(), BackendError> {
-        tracing::debug!(instance_id, task_id, worker_id, "extending task claim");
+        tracing::debug!("extending task claim");
         let row = sqlx::query(
             "SELECT worker_id, expires_at FROM sayiir_task_claims
              WHERE instance_id = $1 AND task_id = $2",
@@ -144,12 +162,17 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "db.find_available_tasks",
+        skip(self),
+        fields(db.system = "postgresql"),
+        err(level = tracing::Level::ERROR),
+    )]
     async fn find_available_tasks(
         &self,
         worker_id: &str,
         limit: usize,
     ) -> Result<Vec<AvailableTask>, BackendError> {
-        tracing::debug!(worker_id, limit, "finding available tasks");
         // Step 1: Clean expired claims
         sqlx::query(
             "DELETE FROM sayiir_task_claims WHERE expires_at IS NOT NULL AND expires_at < now()",
@@ -160,7 +183,7 @@ where
 
         // Step 2: Fetch candidate workflows via SQL bulk filter
         let rows = sqlx::query(
-            "SELECT s.instance_id, s.data
+            "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.status = 'InProgress'
                AND NOT EXISTS (
@@ -186,6 +209,7 @@ where
         for row in &rows {
             let raw: &[u8] = row.get("data");
             let mut snapshot = self.decode(raw)?;
+            snapshot.trace_parent = row.get("trace_parent");
 
             match &snapshot.state {
                 // Delay: if expired, advance past it
@@ -254,7 +278,7 @@ where
             }
         }
 
-        tracing::debug!(worker_id, count = available.len(), "available tasks found");
+        tracing::debug!(count = available.len(), "available tasks found");
         Ok(available)
     }
 }
@@ -277,5 +301,6 @@ fn build_available_task(
         task_id: task_id.to_string(),
         input: input_bytes,
         workflow_definition_hash: snapshot.definition_hash.clone(),
+        trace_parent: snapshot.trace_parent.clone(),
     })
 }

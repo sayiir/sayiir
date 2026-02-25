@@ -21,6 +21,7 @@ mod engine;
 pub mod exceptions;
 mod flow;
 mod task;
+mod telemetry;
 mod worker;
 
 /// Python module for Sayiir workflow library.
@@ -39,6 +40,10 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<durable_engine::PyDurableEngine>()?;
     m.add_class::<worker::PyWorker>()?;
     m.add_class::<worker::PyWorkerHandle>()?;
+
+    // Telemetry
+    m.add_function(wrap_pyfunction!(telemetry::init_tracing, m)?)?;
+    m.add_function(wrap_pyfunction!(telemetry::shutdown_tracing, m)?)?;
 
     // Register exception types
     m.add(
