@@ -553,6 +553,7 @@ where
         name = "workflow",
         skip_all,
         fields(
+            worker_id = %self.worker_id,
             instance_id = %available_task.instance_id,
             task_id = %available_task.task_id,
             definition_hash = %definition_hash,
@@ -671,7 +672,7 @@ where
     #[tracing::instrument(
         name = "settle_result",
         skip_all,
-        fields(instance_id = %available_task.instance_id, task_id = %available_task.task_id),
+        fields(worker_id = %self.worker_id, instance_id = %available_task.instance_id, task_id = %available_task.task_id),
     )]
     async fn settle_execution_result_ext(
         &self,
@@ -887,6 +888,7 @@ where
         name = "workflow",
         skip_all,
         fields(
+            worker_id = %self.worker_id,
             instance_id = %available_task.instance_id,
             task_id = %available_task.task_id,
             definition_hash = %available_task.workflow_definition_hash,
@@ -1073,7 +1075,7 @@ where
     #[tracing::instrument(
         name = "settle_result",
         skip_all,
-        fields(instance_id = %available_task.instance_id, task_id = %available_task.task_id),
+        fields(worker_id = %self.worker_id, instance_id = %available_task.instance_id, task_id = %available_task.task_id),
     )]
     async fn settle_execution_result<C, Input, M>(
         &self,
@@ -1327,7 +1329,7 @@ where
     #[tracing::instrument(
         name = "task",
         skip_all,
-        fields(instance_id = %claim.instance_id, task_id = %claim.task_id),
+        fields(worker_id = %self.worker_id, instance_id = %claim.instance_id, task_id = %claim.task_id),
     )]
     async fn run_with_heartbeat<F, T>(
         &self,
