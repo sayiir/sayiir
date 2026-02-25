@@ -68,8 +68,7 @@ pub fn init_tracing(default_service_name: &str) {
         let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
 
         if let Some(endpoint) = endpoint {
-            let service_name =
-                std::env::var("OTEL_SERVICE_NAME").unwrap_or(default_name);
+            let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or(default_name);
 
             let exporter = match opentelemetry_otlp::SpanExporter::builder()
                 .with_tonic()
