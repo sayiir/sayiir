@@ -60,7 +60,7 @@ All logging and tracing behavior is controlled through environment variables.
 
 ### `RUST_LOG` — Log Level
 
-Controls which log messages are emitted. Sayiir uses the standard [env_logger](https://docs.rs/env_logger) filter syntax.
+Controls which log messages are emitted. Sayiir uses the standard [`tracing_subscriber::EnvFilter`](https://docs.rs/tracing-subscriber) filter syntax.
 
 ```bash
 # Set the global log level
