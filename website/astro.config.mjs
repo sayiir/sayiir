@@ -8,7 +8,7 @@ export default defineConfig({
   integrations: [
     mermaid(),
     starlight({
-      plugins: [starlightLinksValidator({ exclude: ["/playground"] })],
+      plugins: [starlightLinksValidator({})],
       title: "Sayiir",
       logo: {
         src: "./public/favicon.png",
@@ -147,7 +147,8 @@ export default defineConfig({
         {
           label: "Changelog",
           items: [
-            { label: "v0.2", slug: "changelog/v02", badge: "Latest" },
+            { label: "v0.3", slug: "changelog/v03", badge: "Latest" },
+            { label: "v0.2", slug: "changelog/v02" },
           ],
         },
         { label: "Roadmap", slug: "roadmap" },
