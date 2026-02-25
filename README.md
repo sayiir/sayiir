@@ -124,6 +124,21 @@ const status = runDurableWorkflow(workflow, instanceId, 42, PostgresBackend.conn
 
 ---
 
+## When to Use Sayiir
+
+Sayiir is a full-featured, embeddable workflow engine — branching, loops, fork/join, signals, cancel, pause, resume, retries, timeouts — that lives inside your application as a library, not beside it as a platform.
+
+**Sayiir shines when you:**
+
+- Need durable workflows (order sagas, onboarding flows, ETL, data pipelines) without deploying separate infrastructure
+- Want `cargo add` / `pip install` / `npm install` and a working workflow engine in minutes, not days
+- Already have a Postgres (or just want in-memory for dev) and don't want to manage a separate cluster
+- Value a low learning curve — write normal async code, add `@task`, ship to production
+
+> Sayiir isn't trying to replace major workflow platforms. But for many use cases, those platforms add significant infrastructure overhead and complexity that feels like overkill. Sayiir gives you real durability and covers most of workflows composition and execution scenarios with less ceremony.
+
+---
+
 ## Documentation
 
 **[docs.sayiir.dev](https://docs.sayiir.dev)** — Full documentation with guides, tutorials, and API reference.
@@ -144,6 +159,7 @@ const status = runDurableWorkflow(workflow, instanceId, 42, PostgresBackend.conn
 [Python API](https://docs.sayiir.dev/reference/python-api/) &#183;
 [Node.js API](https://docs.sayiir.dev/reference/nodejs-api/) &#183;
 [Rust API](https://docs.sayiir.dev/reference/rust-api/) &#183;
+[Observability & OpenTelemetry](https://docs.sayiir.dev/guides/observability/) &#183;
 [Roadmap](https://docs.sayiir.dev/roadmap/) &#183;
 [Contributing](CONTRIBUTING.md)
 

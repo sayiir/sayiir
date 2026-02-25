@@ -84,9 +84,26 @@ Sayiir takes a fundamentally different approach to durable workflows. This page 
 
 **Airflow** requires running the scheduler, webserver, and workers, plus a metadata database and optional message broker (Redis/RabbitMQ for Celery). Medium complexity, with managed offerings available.
 
-## When to Choose What
+## When Sayiir Shines
 
-**Choose Sayiir** if you want the simplest path to durable workflows. No infrastructure, no determinism constraints, no learning curve. Write async code, add `@task`, done. Code-first by design — [Sayiir Server](/server/) (coming soon) adds monitoring, scheduling, and observability when you need it. Best for teams that want durability without operational overhead.
+Sayiir is a full-featured, embeddable workflow engine — branching, loops, fork/join, signals, cancel, pause, resume, retries, timeouts — that lives inside your application as a library, not beside it as a platform.
+
+- **Durable pipelines** — order sagas, onboarding flows, ETL, data processing where you need "run these steps reliably and resume on failure"
+- **Fast time-to-production** — `cargo add` / `pip install` / `npm install`, plug in Postgres (or in-memory for dev), and ship in minutes
+- **Low learning curve** — write normal async code, add `@task`, no determinism rules, no separate orchestrator to learn
+- **Minimal infrastructure** — no cluster, no control plane. You already have a Postgres and that's enough
+
+## When to Consider a Workflow Platform Instead
+
+- You need a managed cloud offering with enterprise support
+- You want a large established community and ecosystem
+- You require years of battle-tested production hardening at massive scale
+
+Sayiir isn't trying to replace major workflow platforms. But for many use cases, those platforms add significant infrastructure overhead and complexity that feels like overkill. Sayiir gives you real durability with less ceremony.
+
+## Choosing Between Tools
+
+**Choose Sayiir** if you want the simplest path to durable workflows. No infrastructure, no determinism constraints, minimal learning curve. Write async code, add `@task`, done. Code-first by design — [Sayiir Server](/server/) (coming soon) adds monitoring, scheduling, and observability when you need it.
 
 **Choose Temporal** if you need a mature, battle-tested platform with a large community, extensive documentation, and managed cloud offering. Best for teams with dedicated infrastructure resources and workflows that benefit from Temporal's strong consistency model.
 

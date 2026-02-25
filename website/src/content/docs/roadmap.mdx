@@ -82,15 +82,15 @@ def search_web(query: dict, ctx: WorkflowContext) -> list[dict]:
 
 ### Structured Observability
 
-**Status:** Planned
+**Status:** In progress
 
-Sayiir has no built-in observability. In production, you need to know what's happening: which tasks are running, how long they take, where failures occur.
+Production observability for understanding what's happening: which tasks are running, how long they take, where failures occur.
 
-- OpenTelemetry integration (span-per-task)
+- ~~OpenTelemetry integration (span-per-task)~~ ✅ Shipped — see [Observability & Logging](/guides/observability/)
+- ~~Structured logging with correlation IDs~~ ✅ Shipped — `instance_id`, `task_id`, `worker_id` on all spans
 - Prometheus/OpenMetrics export (task latency, queue depth, worker utilization)
-- Structured logging with correlation IDs
 
-This will ship as part of the open-source library, independent of [Sayiir Server](/server/).
+This ships as part of the open-source library, independent of [Sayiir Server](/server/).
 
 ### Streaming Support
 

@@ -157,10 +157,10 @@ Example: `✨ add durable delay (#39)`
 
 ## Where to Contribute
 
-See the [Roadmap](ROADMAP.md) for what's planned. Areas where contributions are especially welcome:
+See the [Roadmap](https://docs.sayiir.dev/roadmap/) for what's planned. Areas where contributions are especially welcome:
 
-- **Storage backends** — PostgreSQL, SQLite, Redis
-- **Language bindings** — TypeScript, Go
+- **Storage backends**
+- **Language bindings**
 - **Documentation** — examples, tutorials, guides
 - **Testing** — edge cases, benchmarks, coverage
 

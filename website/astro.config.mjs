@@ -87,6 +87,10 @@ export default defineConfig({
               label: "Serialization & Migration",
               slug: "guides/serialization-and-versioning",
             },
+            {
+              label: "Observability & Logging",
+              slug: "guides/observability",
+            },
           ],
         },
         {

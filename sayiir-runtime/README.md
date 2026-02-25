@@ -29,6 +29,7 @@ flowchart LR
 ```
 
 **When to use:**
+
 - Single-node deployment
 - Crash recovery needed (resume from last checkpoint)
 - Simple deployment without coordination
@@ -71,6 +72,7 @@ flowchart TB
 ```
 
 **When to use:**
+
 - Horizontal scaling across multiple machines
 - High throughput requirements
 - Fault tolerance (crashed workers' tasks auto-reclaim)
@@ -277,4 +279,4 @@ let workflow = WorkflowBuilder::new(ctx)
 
 ## See Also
 
-- [ROADMAP.md](./ROADMAP.md) - Alternative claiming strategies and future improvements
+- [ROADMAP](https://docs.sayiir.dev/roadmap/) - Alternative claiming strategies and future improvements
