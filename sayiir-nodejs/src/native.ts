@@ -158,6 +158,8 @@ export interface NapiWorkerHandle {
 }
 
 export interface NativeAddon {
+  initTracing(): void;
+  shutdownTracing(): void;
   getTaskContext(): NapiTaskExecutionContext | null;
   NapiFlowBuilder: new (name: string) => NapiFlowBuilder;
   NapiWorkflowEngine: new () => NapiWorkflowEngine;

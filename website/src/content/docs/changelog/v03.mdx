@@ -1,0 +1,97 @@
+---
+title: What's New in v0.3
+description: User-facing changes in Sayiir v0.3 — OpenTelemetry integration, distributed trace propagation, and structured observability across all language bindings.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">
+These docs cover **Sayiir v0.3.0** — the latest release. If you're upgrading from v0.2, this page lists every user-facing change.
+</Aside>
+
+Sayiir v0.3 is backward-compatible. Existing v0.2 workflows continue to work without changes.
+
+---
+
+## New features
+
+### OpenTelemetry integration
+
+Sayiir now has built-in support for exporting traces to any OpenTelemetry-compatible backend — Jaeger, Grafana Tempo, Datadog, and more. Every workflow execution, task run, database call, and retry is instrumented with structured spans.
+
+- **Python** — `sayiir.init_tracing()` / `sayiir.shutdown_tracing()` configure the subscriber automatically
+- **Node.js** — `initTracing()` / `shutdownTracing()` from `"sayiir"`
+- **Rust** — bring your own `tracing-subscriber` setup, or use the `otel` feature for a ready-made subscriber via `sayiir_runtime::trace_context::init_tracing()`
+
+Controlled entirely by environment variables — no code changes needed to enable or disable:
+
+| Variable | Purpose |
+|----------|---------|
+| `RUST_LOG` | Log level filter (default: `info`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint — when set, traces are exported; when unset, console-only |
+| `OTEL_SERVICE_NAME` | Service name in your tracing backend |
+
+See the [Observability & Logging](/guides/observability/) guide for setup instructions and recipes.
+
+---
+
+### Distributed trace propagation
+
+Traces now propagate across worker boundaries. When a workflow task is picked up by a different worker, the W3C `traceparent` is carried through the snapshot so all tasks appear under a single trace in your backend.
+
+- `trace_parent` is automatically injected into snapshots during execution
+- Workers extract the parent context when resuming, linking child spans to the original trace
+- Works out of the box with `PooledWorker` and `CheckpointingRunner`
+
+---
+
+### Structured spans across the stack
+
+Every significant operation is wrapped in a tracing span with structured fields for filtering and correlation:
+
+**Database operations** — `db.save_snapshot`, `db.load_snapshot`, `db.claim_task`, `db.save_task_result`, and more — all tagged with `db.system = "postgresql"`
+
+**Runtime operations** — `workflow`, `task`, `fork`, `loop`, `settle_result`, and lifecycle spans (`prepare_run`, `prepare_resume`, `finalize`)
+
+**Structured fields** — `instance_id`, `task_id`, `worker_id`, `definition_hash` on all relevant spans
+
+---
+
+## New exports
+
+**Python** — new imports from `sayiir`:
+`init_tracing`, `shutdown_tracing`
+
+**Node.js** — new exports from `"sayiir"`:
+`initTracing`, `shutdownTracing`
+
+---
+
+## Rust: new cargo feature
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `otel` | no | OpenTelemetry integration — W3C trace context propagation, OTLP span export, and `init_tracing` / `shutdown_tracing` helpers |
+
+Enable it in your `Cargo.toml`:
+
+```toml
+[dependencies]
+sayiir-runtime = { version = "0.3", features = ["otel"] }
+```
+
+### Rust crate versions
+
+Update your `Cargo.toml` dependencies from `0.2` to `0.3`:
+
+| Crate | Version |
+|-------|---------|
+| `sayiir-runtime` | `0.3` |
+| `sayiir-persistence` | `0.3` |
+| `sayiir-postgres` | `0.3` |
+
+---
+
+## Breaking changes
+
+None. All v0.2 APIs work unchanged across Python, Node.js, and Rust.

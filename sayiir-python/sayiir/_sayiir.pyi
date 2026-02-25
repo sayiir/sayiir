@@ -220,6 +220,24 @@ def get_task_context() -> PyTaskExecutionContext | None:
     """Get the current task execution context. Returns None outside of a task."""
     ...
 
+def init_tracing() -> None:
+    """Initialize the tracing subscriber.
+
+    Sets up a ``tracing-subscriber`` registry with an ``fmt`` layer for
+    console output and an optional ``tracing-opentelemetry`` layer for OTLP
+    export (enabled when ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set).
+
+    Idempotent — calling multiple times is safe.
+    """
+    ...
+
+def shutdown_tracing() -> None:
+    """Flush and shut down the OpenTelemetry tracer provider.
+
+    Call before process exit to ensure all pending spans are exported.
+    """
+    ...
+
 # Exception hierarchy
 class WorkflowError(RuntimeError):
     """Base exception for Sayiir workflow errors."""
