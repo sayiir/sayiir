@@ -3,7 +3,14 @@
 All orchestration runs in Rust. Python provides task implementations.
 """
 
-from ._sayiir import BackendError, TaskError, WorkflowError, get_task_context
+from ._sayiir import (
+    BackendError,
+    TaskError,
+    WorkflowError,
+    get_task_context,
+    init_tracing,
+    shutdown_tracing,
+)
 from ._sayiir import PyDurableEngine as DurableEngine
 from ._sayiir import PyFlowBuilder as FlowBuilder
 from ._sayiir import PyInMemoryBackend as InMemoryBackend
@@ -58,6 +65,8 @@ __all__ = [
     "task",
     "Worker",
     "WorkerHandle",
+    "init_tracing",
+    "shutdown_tracing",
 ]
 
 __version__ = "0.3.0"

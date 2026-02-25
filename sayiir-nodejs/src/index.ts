@@ -48,6 +48,9 @@ export {
 } from "./executor.js";
 export type { Backend, DurableRunOptions } from "./executor.js";
 
+// Telemetry
+export { initTracing, shutdownTracing } from "./telemetry.js";
+
 // Duration utility
 export { parseDuration } from "./duration.js";
 
