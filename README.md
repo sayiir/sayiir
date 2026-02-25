@@ -135,7 +135,7 @@ Sayiir is a full-featured, embeddable workflow engine — branching, loops, fork
 - Already have a Postgres (or just want in-memory for dev) and don't want to manage a separate cluster
 - Value a low learning curve — write normal async code, add `@task`, ship to production
 
-> Sayiir isn't trying to replace major workflow platforms. But for many use cases, those platforms add significant infrastructure overhead and complexity that feels like overkill. Sayiir gives you real durability and covers most of workflows composition and execution scenarios with less ceremony.
+> Sayiir isn't trying to replace major workflow platforms. But for many use cases, those platforms add significant infrastructure overhead and complexity that feels like overkill. Sayiir gives you real durability and covers most workflow composition and execution scenarios with less ceremony.
 
 ---
 
