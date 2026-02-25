@@ -79,7 +79,8 @@
     "myhost",
     "resumability",
     "inlines",
-    "jaegertracing"
+    "jaegertracing",
+    "traceparent"
   ],
   "flagWords": [],
   "dictionaries": [
