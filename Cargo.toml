@@ -13,7 +13,7 @@ resolver = "2"
 exclude = ["examples/hello-world-rs", "examples/video-pipeline-rs"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
@@ -29,13 +29,17 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
-sayiir-core = { version = "0.2.0", path = "sayiir-core", default-features = false }
-sayiir-persistence = { version = "0.2.0", path = "sayiir-persistence" }
-sayiir-runtime = { version = "0.2.0", path = "sayiir-runtime", default-features = false }
-sayiir-postgres = { version = "0.2.0", path = "sayiir-postgres" }
-sayiir-macros = { version = "0.2.0", path = "sayiir-macros" }
+sayiir-core = { version = "0.3.0", path = "sayiir-core", default-features = false }
+sayiir-persistence = { version = "0.3.0", path = "sayiir-persistence" }
+sayiir-runtime = { version = "0.3.0", path = "sayiir-runtime", default-features = false }
+sayiir-postgres = { version = "0.3.0", path = "sayiir-postgres" }
+sayiir-macros = { version = "0.3.0", path = "sayiir-macros" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "fmt",
+    "registry",
+] }
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
