@@ -36,15 +36,15 @@
     }
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
-    "@testcontainers/postgresql": "^10.0.0",
-    "@types/ms": "^2.0.0",
-    "@types/node": "^25.2.3",
-    "eslint": "^9.0.0",
-    "testcontainers": "^10.0.0",
-    "typescript": "^5.4.0",
-    "typescript-eslint": "^8.56.0",
-    "vitest": "^3.0.0"
+    "@eslint/js": "^9.39.3",
+    "@testcontainers/postgresql": "^10.28.0",
+    "@types/ms": "^2.1.0",
+    "@types/node": "^25.3.1",
+    "eslint": "^9.39.3",
+    "testcontainers": "^10.28.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1",
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=18"
