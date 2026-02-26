@@ -20,12 +20,12 @@
 
 > Sayiir is under active development. Core functionality works. We welcome contributors, maintainers, and sponsors.
 
-- &#9889; **Zero orchestration** — No separate server or infra to deploy; [enterprise server](https://docs.sayiir.dev/roadmap/) in active development for when you need one
 - &#129408; **Rust core** — High-performance, memory-safe workflow engine
 - &#128737; **Durable** — Automatic checkpointing & crash recovery with pluggable persistence
 - &#129520; **Multi-language** — Type-safe Python, TypeScript, and Rust bindings
-- &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL
+- &#10024; **Built for developers** — Low learning curve; native language idioms, async code you already know, no DSL. No separate server or infra to deploy; get up and running in minutes. [Enterprise server](https://docs.sayiir.dev/roadmap/) in active development for when you need one
 - &#9208; **Workflow control** — Cancel, pause, and resume running workflow instances
+- &#128065; **Observability** — Built-in OpenTelemetry tracing and logging for full workflow visibility
 
 ---
 
