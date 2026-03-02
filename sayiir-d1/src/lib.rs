@@ -61,3 +61,4 @@ mod signal_store;
 mod snapshot_store;
 
 pub use backend::D1Backend;
+pub use bindings::D1Database;

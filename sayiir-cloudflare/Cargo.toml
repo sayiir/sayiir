@@ -1,0 +1,32 @@
+[package]
+name = "sayiir-cloudflare"
+description = "Cloudflare Workers WASM bindings for Sayiir workflow engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[lib]
+name = "sayiir_cloudflare"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sayiir-core = { workspace = true, default-features = false }
+sayiir-persistence = { workspace = true }
+sayiir-d1 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

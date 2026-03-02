@@ -225,3 +225,61 @@ jobs:
         uses: ./.github/actions/publish-npm-napi
         with:
           package-dir: sayiir-nodejs
+
+  cloudflare-js-publish:
+    name: Publish @sayiir/cloudflare to npm
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@sayiir/cloudflare
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build WASM
+        run: wasm-pack build sayiir-cloudflare --target web --out-dir ../sayiir-cloudflare-js/wasm
+
+      - name: Build TypeScript
+        working-directory: sayiir-cloudflare-js
+        run: pnpm tsc
+
+      - name: Determine npm dist-tag
+        id: dist-tag
+        shell: bash
+        run: |
+          version=$(node -p "require('./sayiir-cloudflare-js/package.json').version")
+          if echo "$version" | grep -qE '-(alpha|beta|rc)'; then
+            tag=$(echo "$version" | sed -E 's/.*-([a-z]+).*/\1/')
+          else
+            tag="latest"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing version $version with tag: $tag"
+
+      - name: Publish to npm
+        working-directory: sayiir-cloudflare-js
+        run: |
+          pnpm pack
+          tarball=$(ls -1 *.tgz | head -1)
+          echo "Publishing tarball: $tarball"
+          npm publish "$tarball" --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}

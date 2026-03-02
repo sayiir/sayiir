@@ -46,6 +46,9 @@ for pkg in "$ROOT"/sayiir-nodejs/npm/*/package.json; do
   yq -i -oj -I2 ".version = \"$VERSION\"" "$pkg"
 done
 
+# --- Cloudflare JS ---
+yq -i -oj -I2 ".version = \"$VERSION\"" "$ROOT/sayiir-cloudflare-js/package.json"
+
 # --- Cargo.lock ---
 cd "$ROOT"
 cargo generate-lockfile 2>/dev/null

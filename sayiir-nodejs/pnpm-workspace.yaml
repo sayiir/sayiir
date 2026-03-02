@@ -1,4 +1,0 @@
-packages:
-  - "."
-  - "npm/*"
-  - "../sayiir-flow-js"

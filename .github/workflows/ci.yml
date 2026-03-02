@@ -17,6 +17,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
       node: ${{ steps.filter.outputs.node }}
+      cloudflare-js: ${{ steps.filter.outputs.cloudflare-js }}
       deny: ${{ steps.filter.outputs.deny }}
       website: ${{ steps.filter.outputs.website }}
     steps:
@@ -33,6 +34,7 @@ jobs:
               - 'sayiir-persistence/**'
               - 'sayiir-postgres/**'
               - 'sayiir-d1/**'
+              - 'sayiir-cloudflare/**'
               - 'sayiir-runtime/**'
               - 'sayiir-macros/**'
               - 'sayiir-py/**'
@@ -47,6 +49,11 @@ jobs:
             node:
               - 'sayiir-node/**'
               - 'sayiir-nodejs/**'
+              - 'sayiir-flow-js/**'
+            cloudflare-js:
+              - 'sayiir-cloudflare/**'
+              - 'sayiir-cloudflare-js/**'
+              - 'sayiir-flow-js/**'
             deny:
               - '**/Cargo.toml'
               - 'Cargo.lock'
@@ -90,6 +97,15 @@ jobs:
 
       - name: Run cargo clippy (D1 / WASM)
         run: cargo clippy -p sayiir-d1 --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Run cargo clippy (Cloudflare / WASM)
+        run: cargo clippy -p sayiir-cloudflare --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Run wasm-pack tests (Cloudflare)
+        run: wasm-pack test --node sayiir-cloudflare
 
       - name: Run cargo test
         run: cargo test --workspace --all-features
@@ -207,7 +223,6 @@ jobs:
           version: 9
 
       - name: Install dependencies
-        working-directory: sayiir-nodejs
         run: pnpm install --no-frozen-lockfile
 
       - name: Lint
@@ -224,6 +239,51 @@ jobs:
 
       - name: Dry-run npm publish
         working-directory: sayiir-nodejs
+        run: pnpm publish --dry-run --no-git-checks
+
+  cloudflare-js:
+    name: Cloudflare JS Binding
+    needs: changes
+    if: needs.changes.outputs.cloudflare-js == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build WASM
+        run: wasm-pack build sayiir-cloudflare --target web --out-dir ../sayiir-cloudflare-js/wasm
+
+      - name: Lint
+        working-directory: sayiir-cloudflare-js
+        run: pnpm lint
+
+      - name: Type check
+        working-directory: sayiir-cloudflare-js
+        run: pnpm tsc --noEmit
+
+      - name: Dry-run npm publish
+        working-directory: sayiir-cloudflare-js
         run: pnpm publish --dry-run --no-git-checks
 
   bench:

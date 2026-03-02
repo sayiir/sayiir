@@ -55,10 +55,6 @@ extern "C" {
     pub fn run(this: &D1PreparedStatement) -> js_sys::Promise;
 }
 
-// ---------------------------------------------------------------------------
-// Column extraction helpers
-// ---------------------------------------------------------------------------
-
 /// Read a string column from a JS row object.
 pub(crate) fn get_str_col(row: &JsValue, col: &str) -> Option<String> {
     let val = js_sys::Reflect::get(row, &JsValue::from_str(col)).ok()?;
