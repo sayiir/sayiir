@@ -1,14 +1,11 @@
 //! `D1Backend` struct, inline JSON codec, and constructors.
 
 use bytes::Bytes;
+use sqlx::Pool;
 use sayiir_core::codec::{self, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
-use send_wrapper::SendWrapper;
 
-use crate::bindings::D1Database;
-use crate::error::D1Error;
-use crate::js_future::JsFutureExt as _;
 use crate::schema::MIGRATION_SQL;
 
 // ---------------------------------------------------------------------------
@@ -43,67 +40,75 @@ impl codec::sealed::DecodeValue<WorkflowSnapshot> for JsonCodec {
 }
 
 // ---------------------------------------------------------------------------
-// D1Backend
+// SQLiteBackend
 // ---------------------------------------------------------------------------
 
-/// Cloudflare D1 persistence backend for Sayiir workflows.
-///
-/// Uses JSON serialization for snapshot data stored as `BLOB` in D1 (`SQLite`).
-/// This backend targets `wasm32-unknown-unknown` and communicates with D1
-/// through `wasm-bindgen` FFI bindings.
-///
-/// # Single-writer assumption
-///
-/// This backend assumes **at most one concurrent writer per workflow instance**.
-/// Several operations (e.g. `save_task_result`, `store_signal`) use
-/// read-modify-write sequences that are **not** protected by row-level locks
-/// (`SQLite` / D1 does not support `SELECT … FOR UPDATE`). If multiple Workers
-/// or isolates write to the same D1 database concurrently, these sequences can
-/// lose updates.
-///
-/// The assumption holds when each workflow instance is owned by a single
-/// Worker or Durable Object — the standard Cloudflare deployment model. For
-/// use cases that require concurrent writers, this backend is not suitable.
-///
-/// D1 is a persistent `SQLite` database hosted by Cloudflare. The data survives across Worker invocations. But a single
-/// D1 binding is accessed by one Worker instance at a time per request, so concurrent writes from multiple in-flight
-/// requests to the same Worker are not possible (Workers are single-threaded per request).
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use sayiir_d1::D1Backend;
-///
-/// // `db` is a D1Database binding from the Worker env
-/// let backend = D1Backend::new(db).await?;
-/// ```
-pub struct D1Backend {
-    // `SendWrapper` provides `Send + Sync` for the `!Send` `D1Database`.
-    // SAFETY is upheld by `SendWrapper`'s contract: access only from the
-    // original thread — guaranteed on single-threaded WASM.
-    db: SendWrapper<D1Database>,
+#[cfg(feature = "sqlite")]
+pub type BackendDB = sqlx::Sqlite;
+#[cfg(feature = "d1")]
+pub type BackendDB = sqlx_d1::D1;
+
+/// Persistence backend for Sayiir workflows using `sqlx-sqlite` or `sqlx-d1`.
+#[derive(Clone)]
+pub struct SQLiteBackend {
+    pub(crate) pool: Pool<BackendDB>,
 }
 
-impl D1Backend {
+impl SQLiteBackend {
+    /// Create a new `SQLiteBackend` and run schema migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BackendError` if the migration fails.
+    pub async fn new(pool: Pool<BackendDB>) -> Result<Self, BackendError> {
+        let backend = Self { pool };
+        backend.run_migrations().await?;
+        Ok(backend)
+    }
+
+    /// Create a new `SQLiteBackend` by connecting to the given database URL
+    /// and running schema migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BackendError` if the connection or migration fails.
+    #[cfg(feature = "sqlite")]
+    pub async fn connect(url: &str) -> Result<Self, BackendError> {
+        let pool = Pool::<BackendDB>::connect(url)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
+        Self::new(pool).await
+    }
+
     /// Create a new D1 backend and run schema migrations.
     ///
     /// # Errors
     ///
     /// Returns an error if the migration DDL fails.
-    pub async fn new(db: D1Database) -> Result<Self, BackendError> {
-        db.run_raw(MIGRATION_SQL)
-            .into_send_future()
+    #[cfg(feature = "d1")]
+    pub async fn connect(db: worker::D1Database) -> Result<Self, BackendError> {
+        let pool = Pool::<BackendDB>::connect_with(sqlx_d1::D1ConnectOptions::new(db))
             .await
-            .map_err(D1Error)?;
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        Ok(Self {
-            db: SendWrapper::new(db),
-        })
+        Self::new(pool).await
     }
 
-    /// Get a reference to the underlying D1 database.
-    pub(crate) fn db(&self) -> &D1Database {
-        &self.db
+    /// Run the schema migrations on the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BackendError` if the migration fails.
+    pub async fn run_migrations(&self) -> Result<(), BackendError> {
+        sqlx::query(MIGRATION_SQL)
+            .execute(self.pool())
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) fn pool(&self) -> &Pool<BackendDB> {
+        &self.pool
     }
 
     /// Encode a snapshot to JSON bytes.

@@ -37,7 +37,6 @@
 //! let loaded = backend.load_snapshot("order-123").await?;
 //! ```
 
-#![cfg(target_arch = "wasm32")]
 #![deny(clippy::pedantic)]
 #![deny(
     clippy::unwrap_used,
@@ -52,12 +51,9 @@
 )]
 
 mod backend;
-mod bindings;
-mod error;
 mod helpers;
-mod js_future;
 mod schema;
 mod signal_store;
 mod snapshot_store;
 
-pub use backend::D1Backend;
+pub use backend::SQLiteBackend;

@@ -20,10 +20,20 @@ sayiir-core = { workspace = true, default-features = false }
 sayiir-persistence = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-send_wrapper = "0.6"
+sqlx = { version = "0.8"}
+
+# D1
+sqlx-d1 = { version = "0.3", optional = true }
+worker = { version = "*", optional = true }  # version by sqlx-d1
+
+[features]
+default = ["d1"]
+sqlite = [
+    "sqlx/sqlite",
+    "sqlx/runtime-tokio",
+]
+d1 = [
+    "sqlx-d1",
+    "worker",
+]
