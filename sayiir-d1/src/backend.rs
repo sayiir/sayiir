@@ -1,4 +1,4 @@
-//! `D1Backend` struct, inline JSON codec, and constructors.
+//! `SQLiteBackend` struct, inline JSON codec, and constructors.
 
 use bytes::Bytes;
 use sayiir_core::codec::{self, Decoder, Encoder};
@@ -49,6 +49,37 @@ pub type BackendDB = sqlx::Sqlite;
 pub type BackendDB = sqlx_d1::D1;
 
 /// Persistence backend for Sayiir workflows using `sqlx-sqlite` or `sqlx-d1`.
+///
+/// Uses JSON serialization for snapshot data stored as `BLOB` in `SQLite`.
+///
+/// # Single-writer assumption
+///
+/// This backend assumes **at most one concurrent writer per workflow instance**.
+/// Several operations (e.g. `save_task_result`, `store_signal`) use
+/// read-modify-write sequences that are **not** protected by row-level locks
+/// (`SQLite` / D1 does not support `SELECT … FOR UPDATE`). If multiple workers
+/// or isolates write to the same database concurrently, these sequences can
+/// lose updates.
+///
+/// The assumption holds when each workflow instance is owned by a single
+/// worker or process. For use cases that require concurrent writers, this
+/// backend is not suitable.
+///
+/// D1 is a persistent `SQLite` database hosted by Cloudflare. The data survives across Worker invocations. But a single
+/// D1 binding is accessed by one Worker instance at a time per request, so concurrent writes from multiple in-flight
+/// requests to the same Worker are not possible (Workers are single-threaded per request).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use sayiir_d1::SQLiteBackend;
+///
+/// // d1 feature (default):
+/// let backend = SQLiteBackend::connect(d1).await?;
+///
+/// // sqlite feature:
+/// // let backend = SQLiteBackend::connect("sqlite://sayiir.db?mode=rwc").await?;
+/// ```
 #[derive(Clone)]
 pub struct SQLiteBackend<T> {
     pub(crate) connection: T,
