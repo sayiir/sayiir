@@ -73,27 +73,27 @@ where
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        if let Some(row) = row {
-            let reason: Option<String> = row.get("reason");
-            let requested_by: Option<String> = row.get("requested_by");
-            let created_at_str: String = row.get("created_at");
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
-            let requested_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| {
-                    BackendError::Backend(format!(
-                        "invalid created_at timestamp {created_at_str:?}: {e}"
-                    ))
-                })?;
+        let reason: Option<String> = row.get("reason");
+        let requested_by: Option<String> = row.get("requested_by");
+        let created_at_str: String = row.get("created_at");
 
-            Ok(Some(SignalRequest {
-                reason,
-                requested_by,
-                requested_at,
-            }))
-        } else {
-            Ok(None)
-        }
+        let requested_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .map_err(|e| {
+                BackendError::Backend(format!(
+                    "invalid created_at timestamp {created_at_str:?}: {e}"
+                ))
+            })?;
+
+        Ok(Some(SignalRequest {
+            reason,
+            requested_by,
+            requested_at,
+        }))
     }
 
     async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
@@ -152,20 +152,20 @@ where
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        if let Some(row) = row {
-            let id: i64 = row.get("id");
-            let payload: Vec<u8> = row.get("payload");
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
-            let delete_sql = "DELETE FROM sayiir_workflow_events WHERE id = ?1";
-            sqlx::query::<crate::backend::BackendDB>(delete_sql)
-                .bind(id)
-                .execute(&exec)
-                .await
-                .map_err(|e| BackendError::Backend(e.to_string()))?;
+        let id: i64 = row.get("id");
+        let payload: Vec<u8> = row.get("payload");
 
-            Ok(Some(bytes::Bytes::from(payload)))
-        } else {
-            Ok(None)
-        }
+        let delete_sql = "DELETE FROM sayiir_workflow_events WHERE id = ?1";
+        sqlx::query(delete_sql)
+            .bind(id)
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
+
+        Ok(Some(bytes::Bytes::from(payload)))
     }
 }
