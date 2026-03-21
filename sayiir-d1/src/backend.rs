@@ -1,10 +1,10 @@
 //! `D1Backend` struct, inline JSON codec, and constructors.
 
 use bytes::Bytes;
-use sqlx::Pool;
 use sayiir_core::codec::{self, Decoder, Encoder};
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::BackendError;
+use sqlx::{Database, Executor, IntoArguments};
 
 use crate::schema::MIGRATION_SQL;
 
@@ -43,55 +43,32 @@ impl codec::sealed::DecodeValue<WorkflowSnapshot> for JsonCodec {
 // SQLiteBackend
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "sqlite")]
+#[cfg(all(feature = "sqlite", not(feature = "d1")))]
 pub type BackendDB = sqlx::Sqlite;
 #[cfg(feature = "d1")]
 pub type BackendDB = sqlx_d1::D1;
 
 /// Persistence backend for Sayiir workflows using `sqlx-sqlite` or `sqlx-d1`.
 #[derive(Clone)]
-pub struct SQLiteBackend {
-    pub(crate) pool: Pool<BackendDB>,
+pub struct SQLiteBackend<T> {
+    pub(crate) connection: T,
 }
 
-impl SQLiteBackend {
+impl<T, DB: Database> SQLiteBackend<T>
+where
+    for<'c> &'c T: Executor<'c, Database = DB>,
+    for<'a> DB::Arguments<'a>: IntoArguments<'a, DB>,
+    T: Clone,
+{
     /// Create a new `SQLiteBackend` and run schema migrations.
     ///
     /// # Errors
     ///
     /// Returns a `BackendError` if the migration fails.
-    pub async fn new(pool: Pool<BackendDB>) -> Result<Self, BackendError> {
-        let backend = Self { pool };
+    pub async fn new(connection: T) -> Result<Self, BackendError> {
+        let backend = Self { connection };
         backend.run_migrations().await?;
         Ok(backend)
-    }
-
-    /// Create a new `SQLiteBackend` by connecting to the given database URL
-    /// and running schema migrations.
-    ///
-    /// # Errors
-    ///
-    /// Returns a `BackendError` if the connection or migration fails.
-    #[cfg(feature = "sqlite")]
-    pub async fn connect(url: &str) -> Result<Self, BackendError> {
-        let pool = Pool::<BackendDB>::connect(url)
-            .await
-            .map_err(|e| BackendError::Backend(e.to_string()))?;
-        Self::new(pool).await
-    }
-
-    /// Create a new D1 backend and run schema migrations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the migration DDL fails.
-    #[cfg(feature = "d1")]
-    pub async fn connect(db: worker::D1Database) -> Result<Self, BackendError> {
-        let pool = Pool::<BackendDB>::connect_with(sqlx_d1::D1ConnectOptions::new(db))
-            .await
-            .map_err(|e| BackendError::Backend(e.to_string()))?;
-
-        Self::new(pool).await
     }
 
     /// Run the schema migrations on the database.
@@ -100,17 +77,25 @@ impl SQLiteBackend {
     ///
     /// Returns a `BackendError` if the migration fails.
     pub async fn run_migrations(&self) -> Result<(), BackendError> {
+        let conn = self.exec();
         sqlx::query(MIGRATION_SQL)
-            .execute(self.pool())
+            .execute(&conn)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
         Ok(())
     }
+}
 
-    pub(crate) fn pool(&self) -> &Pool<BackendDB> {
-        &self.pool
+impl<T> SQLiteBackend<T>
+where
+    T: Clone,
+{
+    pub(crate) fn exec(&self) -> T {
+        self.connection.clone()
     }
+}
 
+impl<T> SQLiteBackend<T> {
     /// Encode a snapshot to JSON bytes.
     #[allow(clippy::unused_self)]
     pub(crate) fn encode(&self, snapshot: &WorkflowSnapshot) -> Result<Vec<u8>, BackendError> {
@@ -128,5 +113,33 @@ impl SQLiteBackend {
         codec
             .decode(Bytes::copy_from_slice(data))
             .map_err(|e| BackendError::Serialization(e.to_string()))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl SQLiteBackend<sqlx::SqlitePool> {
+    /// Create a new `SQLiteBackend` from a database URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BackendError` if the connection or migration fails.
+    pub async fn connect(url: &str) -> Result<Self, BackendError> {
+        let pool = sqlx::SqlitePool::connect(url)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
+        Self::new(pool).await
+    }
+}
+
+#[cfg(feature = "d1")]
+impl SQLiteBackend<sqlx_d1::D1Connection> {
+    /// Create a new `SQLiteBackend` from a `worker::D1Database`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BackendError` if the migration fails.
+    pub async fn connect(d1: worker::D1Database) -> Result<Self, BackendError> {
+        let connection = sqlx_d1::D1Connection::new(d1);
+        Self::new(connection).await
     }
 }

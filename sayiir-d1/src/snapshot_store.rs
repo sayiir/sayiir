@@ -2,12 +2,16 @@
 
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::{BackendError, SnapshotStore};
-use sqlx::Row;
+use sqlx::{Executor, Row};
 
 use crate::backend::SQLiteBackend;
 use crate::helpers::dt_to_sqlite;
 
-impl SnapshotStore for SQLiteBackend {
+impl<T> SnapshotStore for SQLiteBackend<T>
+where
+    for<'c> &'c T: Executor<'c, Database = crate::backend::BackendDB>,
+    T: Clone + Send + Sync,
+{
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
@@ -43,13 +47,8 @@ impl SnapshotStore for SQLiteBackend {
             terminal = if terminal { "1" } else { "0" },
         );
 
-        let mut tx = self
-            .pool()
-            .begin()
-            .await
-            .map_err(|e| BackendError::Backend(e.to_string()))?;
-
-        sqlx::query(&upsert_sql)
+        let exec = self.exec();
+        sqlx::query(upsert_sql.as_str())
             .bind(&snapshot.instance_id) // ?1
             .bind(status) // ?2
             .bind(&snapshot.definition_hash) // ?3
@@ -60,7 +59,7 @@ impl SnapshotStore for SQLiteBackend {
             .bind(pos_kind) // ?8
             .bind(&wake_at) // ?9
             .bind(snapshot.trace_parent.as_deref()) // ?10
-            .execute(&mut *tx)
+            .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -78,11 +77,7 @@ impl SnapshotStore for SQLiteBackend {
             .bind(status)
             .bind(&task_id)
             .bind(&data)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| BackendError::Backend(e.to_string()))?;
-
-        tx.commit()
+            .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -104,9 +99,10 @@ impl SnapshotStore for SQLiteBackend {
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
         let sql = "SELECT data, trace_parent FROM sayiir_workflow_snapshots WHERE instance_id = ?1";
 
+        let exec = self.exec();
         let row = sqlx::query(sql)
             .bind(instance_id)
-            .fetch_optional(self.pool())
+            .fetch_optional(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -123,9 +119,10 @@ impl SnapshotStore for SQLiteBackend {
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
         let sql = "DELETE FROM sayiir_workflow_snapshots WHERE instance_id = ?1";
 
+        let exec = self.exec();
         let result = sqlx::query(sql)
             .bind(instance_id)
-            .execute(self.pool())
+            .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -143,8 +140,9 @@ impl SnapshotStore for SQLiteBackend {
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
         let sql = "SELECT instance_id FROM sayiir_workflow_snapshots";
 
+        let exec = self.exec();
         let rows = sqlx::query(sql)
-            .fetch_all(self.pool())
+            .fetch_all(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 

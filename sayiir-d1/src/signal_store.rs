@@ -7,12 +7,16 @@
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_persistence::{BackendError, SignalStore};
-use sqlx::Row;
+use sqlx::{Executor, Row};
 
 use crate::backend::SQLiteBackend;
 use sayiir_persistence::validation::validate_signal_allowed;
 
-impl SignalStore for SQLiteBackend {
+impl<T> SignalStore for SQLiteBackend<T>
+where
+    for<'c> &'c T: Executor<'c, Database = crate::backend::BackendDB>,
+    T: Clone + Send + Sync,
+{
     async fn store_signal(
         &self,
         instance_id: &str,
@@ -22,9 +26,10 @@ impl SignalStore for SQLiteBackend {
         // Validate workflow state first.
         let status_sql = "SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = ?1";
 
+        let exec = self.exec();
         let row = sqlx::query(status_sql)
             .bind(instance_id)
-            .fetch_optional(self.pool())
+            .fetch_optional(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -44,7 +49,7 @@ impl SignalStore for SQLiteBackend {
             .bind(kind.as_ref())
             .bind(&request.reason)
             .bind(&request.requested_by)
-            .execute(self.pool())
+            .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -60,10 +65,11 @@ impl SignalStore for SQLiteBackend {
              FROM sayiir_workflow_signals
              WHERE instance_id = ?1 AND kind = ?2";
 
+        let exec = self.exec();
         let row = sqlx::query(sql)
             .bind(instance_id)
             .bind(kind.as_ref())
-            .fetch_optional(self.pool())
+            .fetch_optional(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -93,10 +99,11 @@ impl SignalStore for SQLiteBackend {
     async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
         let sql = "DELETE FROM sayiir_workflow_signals WHERE instance_id = ?1 AND kind = ?2";
 
+        let exec = self.exec();
         sqlx::query(sql)
             .bind(instance_id)
             .bind(kind.as_ref())
-            .execute(self.pool())
+            .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -112,11 +119,12 @@ impl SignalStore for SQLiteBackend {
         let sql = "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
              VALUES (?1, ?2, ?3)";
 
+        let exec = self.exec();
         sqlx::query(sql)
             .bind(instance_id)
             .bind(signal_name)
             .bind(payload.as_ref())
-            .execute(self.pool())
+            .execute(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -128,7 +136,9 @@ impl SignalStore for SQLiteBackend {
         instance_id: &str,
         signal_name: &str,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
-        let mut tx = self.pool().begin().await.map_err(|e| BackendError::Backend(e.to_string()))?;
+        // single-Worker access means we can safely do SELECT then DELETE.
+
+        let exec = self.exec();
 
         // 1. Find the oldest event.
         let select_sql = "SELECT id, payload FROM sayiir_workflow_events
@@ -138,7 +148,7 @@ impl SignalStore for SQLiteBackend {
         let row = sqlx::query(select_sql)
             .bind(instance_id)
             .bind(signal_name)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&exec)
             .await
             .map_err(|e| BackendError::Backend(e.to_string()))?;
 
@@ -147,13 +157,11 @@ impl SignalStore for SQLiteBackend {
             let payload: Vec<u8> = row.get("payload");
 
             let delete_sql = "DELETE FROM sayiir_workflow_events WHERE id = ?1";
-            sqlx::query(delete_sql)
+            sqlx::query::<crate::backend::BackendDB>(delete_sql)
                 .bind(id)
-                .execute(&mut *tx)
+                .execute(&exec)
                 .await
                 .map_err(|e| BackendError::Backend(e.to_string()))?;
-
-            tx.commit().await.map_err(|e| BackendError::Backend(e.to_string()))?;
 
             Ok(Some(bytes::Bytes::from(payload)))
         } else {
