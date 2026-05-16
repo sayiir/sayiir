@@ -59,4 +59,12 @@ pub use backend::SQLiteBackend;
 pub use sqlx;
 
 #[cfg(feature = "d1")]
-pub use {sqlx_d1, worker, worker::D1Database};
+pub use {sqlx_d1, worker::D1Database};
+
+/// D1 specialization of [`SQLiteBackend`].
+#[cfg(feature = "d1")]
+pub type D1Backend = SQLiteBackend<sqlx_d1::D1Connection>;
+
+/// Native `sqlx` specialization of [`SQLiteBackend`].
+#[cfg(feature = "sqlite")]
+pub type SqliteBackend = SQLiteBackend<sqlx::SqlitePool>;

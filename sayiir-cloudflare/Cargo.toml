@@ -18,7 +18,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 sayiir-core = { workspace = true, default-features = false }
 sayiir-persistence = { workspace = true }
-sayiir-d1 = { workspace = true }
+sayiir-d1 = { workspace = true, features = ["d1"] }
 bytes = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
