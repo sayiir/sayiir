@@ -168,10 +168,13 @@ where
         fields(db.system = "postgresql"),
         err(level = tracing::Level::ERROR),
     )]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     async fn find_available_tasks(
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: Duration,
+        worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Step 1: Clean expired claims
         sqlx::query(
@@ -181,8 +184,22 @@ where
         .await
         .map_err(PgError)?;
 
-        // Step 2: Fetch candidate workflows via SQL bulk filter
-        let rows = sqlx::query(
+        // Step 2: Fetch candidate workflows ordered by effective priority with aging.
+        // effective_priority = task_priority - (seconds_waiting / aging_interval)
+        // Clamp to a minimum of 1s to prevent division by zero in the SQL expression.
+        let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
+        let worker_tags_vec: Vec<&str> = worker_tags.iter().map(String::as_str).collect();
+
+        // When worker has tags, add filter: task_tags must be a subset of
+        // worker_tags. The `<@` operator checks array containment; an empty
+        // array is a subset of every array, so untagged tasks always pass.
+        let tag_filter = if worker_tags.is_empty() {
+            ""
+        } else {
+            "AND s.task_tags <@ $3"
+        };
+
+        let query = format!(
             "SELECT s.instance_id, s.data, s.trace_parent
              FROM sayiir_workflow_snapshots s
              WHERE s.status = 'InProgress'
@@ -196,16 +213,25 @@ where
                    SELECT 1 FROM sayiir_workflow_signals sig
                    WHERE sig.instance_id = s.instance_id
                )
-             ORDER BY s.updated_at ASC
-             LIMIT $1",
-        )
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(PgError)?;
+               {tag_filter}
+             ORDER BY
+               (s.task_priority - EXTRACT(EPOCH FROM (now() - s.updated_at)) / $2) ASC,
+               s.updated_at ASC
+             LIMIT $1"
+        );
 
-        // Step 3: App-level evaluation per candidate
-        let mut available = Vec::new();
+        let mut q = sqlx::query(&query)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .bind(aging_secs);
+        if !worker_tags.is_empty() {
+            q = q.bind(&worker_tags_vec);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(PgError)?;
+
+        // Step 3: App-level evaluation per candidate.
+        // Collect (worker_failed_here, task) pairs so we can stable-sort by
+        // worker bias afterwards without re-decoding.
+        let mut available: Vec<(bool, AvailableTask)> = Vec::with_capacity(rows.len());
         for row in &rows {
             let raw: &[u8] = row.get("data");
             let mut snapshot = self.decode(raw)?;
@@ -235,7 +261,8 @@ where
                             && let Some(task) =
                                 build_available_task(&snapshot, task_id, completed_tasks, worker_id)
                         {
-                            available.push(task);
+                            let bias = snapshot.has_failed_on_worker(task_id, worker_id);
+                            available.push((bias, task));
                         }
                     } else {
                         // Delay is the last node — complete the workflow
@@ -266,7 +293,8 @@ where
                     if let Some(task) =
                         build_available_task(&snapshot, task_id, completed_tasks, worker_id)
                     {
-                        available.push(task);
+                        let bias = snapshot.has_failed_on_worker(task_id, worker_id);
+                        available.push((bias, task));
                     }
                 }
 
@@ -278,8 +306,13 @@ where
             }
         }
 
+        // Step 4: Stable-sort by worker bias so tasks whose last failure was on
+        // this worker sink to the bottom, while preserving the effective-priority
+        // order from the SQL query for everything else.
+        available.sort_by_key(|(bias, _)| *bias);
+
         tracing::debug!(count = available.len(), "available tasks found");
-        Ok(available)
+        Ok(available.into_iter().map(|(_, task)| task).collect())
     }
 }
 

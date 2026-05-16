@@ -47,6 +47,7 @@ impl Parse for WorkflowDef {
         let mut codec: Option<syn::Path> = None;
         let mut registry: Option<Expr> = None;
         let mut metadata: Option<Expr> = None;
+        let mut deps: Option<Expr> = None;
         let mut steps: Option<Vec<WorkflowStep>> = None;
 
         // Parse named fields in any order: name: ..., codec: ..., [registry: ...,] steps: [...]
@@ -79,6 +80,12 @@ impl Parse for WorkflowDef {
                     }
                     metadata = Some(input.parse()?);
                 }
+                "deps" => {
+                    if deps.is_some() {
+                        return Err(err(field.span(), "duplicate `deps` field"));
+                    }
+                    deps = Some(input.parse()?);
+                }
                 "steps" => {
                     if steps.is_some() {
                         return Err(err(field.span(), "duplicate `steps` field"));
@@ -93,7 +100,7 @@ impl Parse for WorkflowDef {
                     return Err(err(
                         field.span(),
                         format!(
-                            "unknown field `{other}`; expected `name`, `steps`, `codec`, `registry`, or `metadata`"
+                            "unknown field `{other}`; expected `name`, `steps`, `codec`, `registry`, `metadata`, or `deps`"
                         ),
                     ));
                 }
@@ -118,6 +125,7 @@ impl Parse for WorkflowDef {
             codec,
             registry,
             metadata,
+            deps,
             steps,
         })
     }

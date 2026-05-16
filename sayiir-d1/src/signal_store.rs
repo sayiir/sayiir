@@ -7,15 +7,16 @@
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest};
 use sayiir_persistence::{BackendError, SignalStore};
-use wasm_bindgen::JsValue;
+use sqlx::{Executor, Row};
 
-use crate::backend::D1Backend;
-use crate::bindings::{get_blob_col, get_str_col};
-use crate::error::D1Error;
-use crate::js_future::JsFutureExt as _;
+use crate::backend::SQLiteBackend;
 use sayiir_persistence::validation::validate_signal_allowed;
 
-impl SignalStore for D1Backend {
+impl<T> SignalStore for SQLiteBackend<T>
+where
+    for<'c> &'c T: Executor<'c, Database = crate::backend::BackendDB>,
+    T: Clone + Send + Sync,
+{
     async fn store_signal(
         &self,
         instance_id: &str,
@@ -25,18 +26,15 @@ impl SignalStore for D1Backend {
         // Validate workflow state first.
         let status_sql = "SELECT status FROM sayiir_workflow_snapshots WHERE instance_id = ?1";
 
-        let status_args = js_sys::Array::new();
-        status_args.push(&JsValue::from_str(instance_id));
+        let exec = self.exec();
+        let row = sqlx::query(status_sql)
+            .bind(instance_id)
+            .fetch_optional(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        let stmt = self.db().prepare(status_sql).bind(&status_args);
-        let result = stmt.first().into_send_future().await.map_err(D1Error)?;
-
-        if result.is_null() || result.is_undefined() {
-            return Err(BackendError::NotFound(instance_id.to_string()));
-        }
-
-        let status = get_str_col(&result, "status")
-            .ok_or_else(|| BackendError::Backend("missing status column".to_string()))?;
+        let row = row.ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        let status: String = row.get("status");
         validate_signal_allowed(&status, kind)?;
 
         // Upsert the signal.
@@ -46,20 +44,14 @@ impl SignalStore for D1Backend {
                 reason = ?3, requested_by = ?4,
                 created_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
-        args.push(&JsValue::from_str(kind.as_ref()));
-        args.push(&match &request.reason {
-            Some(r) => JsValue::from_str(r),
-            None => JsValue::NULL,
-        });
-        args.push(&match &request.requested_by {
-            Some(r) => JsValue::from_str(r),
-            None => JsValue::NULL,
-        });
-
-        let stmt = self.db().prepare(sql).bind(&args);
-        stmt.run().into_send_future().await.map_err(D1Error)?;
+        sqlx::query(sql)
+            .bind(instance_id)
+            .bind(kind.as_ref())
+            .bind(&request.reason)
+            .bind(&request.requested_by)
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
         Ok(())
     }
@@ -73,21 +65,21 @@ impl SignalStore for D1Backend {
              FROM sayiir_workflow_signals
              WHERE instance_id = ?1 AND kind = ?2";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
-        args.push(&JsValue::from_str(kind.as_ref()));
+        let exec = self.exec();
+        let row = sqlx::query(sql)
+            .bind(instance_id)
+            .bind(kind.as_ref())
+            .fetch_optional(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        let stmt = self.db().prepare(sql).bind(&args);
-        let result = stmt.first().into_send_future().await.map_err(D1Error)?;
-
-        if result.is_null() || result.is_undefined() {
+        let Some(row) = row else {
             return Ok(None);
-        }
+        };
 
-        let reason = get_str_col(&result, "reason");
-        let requested_by = get_str_col(&result, "requested_by");
-        let created_at_str = get_str_col(&result, "created_at")
-            .ok_or_else(|| BackendError::Backend("missing created_at column".to_string()))?;
+        let reason: Option<String> = row.get("reason");
+        let requested_by: Option<String> = row.get("requested_by");
+        let created_at_str: String = row.get("created_at");
 
         let requested_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -107,12 +99,13 @@ impl SignalStore for D1Backend {
     async fn clear_signal(&self, instance_id: &str, kind: SignalKind) -> Result<(), BackendError> {
         let sql = "DELETE FROM sayiir_workflow_signals WHERE instance_id = ?1 AND kind = ?2";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
-        args.push(&JsValue::from_str(kind.as_ref()));
-
-        let stmt = self.db().prepare(sql).bind(&args);
-        stmt.run().into_send_future().await.map_err(D1Error)?;
+        let exec = self.exec();
+        sqlx::query(sql)
+            .bind(instance_id)
+            .bind(kind.as_ref())
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
         Ok(())
     }
@@ -126,13 +119,14 @@ impl SignalStore for D1Backend {
         let sql = "INSERT INTO sayiir_workflow_events (instance_id, signal_name, payload)
              VALUES (?1, ?2, ?3)";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
-        args.push(&JsValue::from_str(signal_name));
-        args.push(&js_sys::Uint8Array::from(payload.as_ref()).into());
-
-        let stmt = self.db().prepare(sql).bind(&args);
-        stmt.run().into_send_future().await.map_err(D1Error)?;
+        let exec = self.exec();
+        sqlx::query(sql)
+            .bind(instance_id)
+            .bind(signal_name)
+            .bind(payload.as_ref())
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
         Ok(())
     }
@@ -142,39 +136,35 @@ impl SignalStore for D1Backend {
         instance_id: &str,
         signal_name: &str,
     ) -> Result<Option<bytes::Bytes>, BackendError> {
-        // but single-Worker access means we can safely do SELECT then DELETE.
+        // single-Worker access means we can safely do SELECT then DELETE.
+
+        let exec = self.exec();
 
         // 1. Find the oldest event.
         let select_sql = "SELECT id, payload FROM sayiir_workflow_events
              WHERE instance_id = ?1 AND signal_name = ?2
              ORDER BY id ASC LIMIT 1";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
-        args.push(&JsValue::from_str(signal_name));
+        let row = sqlx::query(select_sql)
+            .bind(instance_id)
+            .bind(signal_name)
+            .fetch_optional(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        let stmt = self.db().prepare(select_sql).bind(&args);
-        let result = stmt.first().into_send_future().await.map_err(D1Error)?;
-
-        if result.is_null() || result.is_undefined() {
+        let Some(row) = row else {
             return Ok(None);
-        }
+        };
 
-        let payload = get_blob_col(&result, "payload")
-            .ok_or_else(|| BackendError::Backend("missing payload column".to_string()))?;
-
-        let id = js_sys::Reflect::get(&result, &JsValue::from_str("id"))
-            .map_err(D1Error)?
-            .as_f64()
-            .ok_or_else(|| BackendError::Backend("missing id column".to_string()))?;
+        let id: i64 = row.get("id");
+        let payload: Vec<u8> = row.get("payload");
 
         let delete_sql = "DELETE FROM sayiir_workflow_events WHERE id = ?1";
-
-        let delete_args = js_sys::Array::new();
-        delete_args.push(&JsValue::from_f64(id));
-
-        let stmt = self.db().prepare(delete_sql).bind(&delete_args);
-        stmt.run().into_send_future().await.map_err(D1Error)?;
+        sqlx::query(delete_sql)
+            .bind(id)
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
         Ok(Some(bytes::Bytes::from(payload)))
     }

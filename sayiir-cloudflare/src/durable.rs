@@ -26,7 +26,13 @@ use wasm_bindgen_futures::JsFuture;
 use sayiir_core::error::WorkflowError;
 use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot};
 use sayiir_core::workflow::WorkflowContinuation;
-use sayiir_d1::D1Backend;
+use sayiir_d1::{D1Database, SQLiteBackend, sqlx_d1};
+
+/// D1-backed persistence used by the WASM durable engine.
+///
+/// Built on `sqlx-d1`, so the full `sqlx` query API is usable against this
+/// backend through the connection re-exported from `sayiir-d1`.
+type D1Backend = SQLiteBackend<sqlx_d1::D1Connection>;
 use sayiir_persistence::{SignalStore, SnapshotStore};
 
 use crate::codec::{
@@ -53,8 +59,8 @@ impl WasmDurableEngine {
     /// # Errors
     ///
     /// Returns a JS error if the D1 backend initialisation fails.
-    pub async fn create(db: sayiir_d1::D1Database) -> Result<WasmDurableEngine, JsValue> {
-        let backend = D1Backend::new(db).await.map_err(to_js_error)?;
+    pub async fn create(db: D1Database) -> Result<WasmDurableEngine, JsValue> {
+        let backend = D1Backend::connect(db).await.map_err(to_js_error)?;
         Ok(Self {
             backend: Arc::new(backend),
         })

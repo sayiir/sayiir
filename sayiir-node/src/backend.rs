@@ -92,7 +92,9 @@ pub(crate) use with_backend;
 // prelude shadows `Result` with `napi::Result`.
 use sayiir_core::snapshot::{SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
-use sayiir_persistence::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
+use sayiir_persistence::{
+    BackendError, SignalStore, SnapshotStore, TaskClaimStore, TaskResultStore,
+};
 
 macro_rules! dispatch {
     ($self:expr, |$inner:ident| $body:expr) => {
@@ -216,7 +218,21 @@ impl TaskClaimStore for BackendKind {
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: chrono::Duration,
+        worker_tags: &[String],
     ) -> BResult<Vec<AvailableTask>> {
-        dispatch!(self, |b| b.find_available_tasks(worker_id, limit).await)
+        dispatch!(self, |b| b
+            .find_available_tasks(worker_id, limit, aging_interval, worker_tags)
+            .await)
+    }
+}
+
+impl TaskResultStore for BackendKind {
+    async fn load_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> BResult<Option<bytes::Bytes>> {
+        dispatch!(self, |b| b.load_task_result(instance_id, task_id).await)
     }
 }

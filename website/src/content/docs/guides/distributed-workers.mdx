@@ -1,6 +1,6 @@
 ---
 title: Distributed Workers
-description: Scale out with distributed workers — claim TTL, soft worker affinity, and graceful shutdown across Python, Node.js, and Rust
+description: Scale out with distributed workers — task priority, claim TTL, soft worker affinity, and graceful shutdown across Python, Node.js, and Rust
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -164,108 +164,156 @@ Key components:
 
 ## Submitting Workflows
 
-Workers only execute tasks — workflows are submitted separately through the durable execution API:
+Workers only execute tasks — workflows are submitted separately using a `WorkflowClient`:
 
 <Tabs>
 <TabItem label="Python">
 
 ```python
-from sayiir import run_durable_workflow, PostgresBackend
+from sayiir import WorkflowClient, PostgresBackend
 
 backend = PostgresBackend("postgresql://localhost/sayiir")
-status = run_durable_workflow(workflow, "order-42", 123, backend=backend)
-# The workflow starts, and a worker will pick up tasks
+client = WorkflowClient(backend)
+status = client.submit(workflow, "order-42", 123)
+# The workflow is persisted, and a worker will pick up tasks
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```typescript
-import { runDurableWorkflow, PostgresBackend } from "sayiir";
+import { WorkflowClient, PostgresBackend } from "sayiir";
 
 const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
-const status = runDurableWorkflow(workflow, "order-42", 123, backend);
-// The workflow starts, and a worker will pick up tasks
+const client = new WorkflowClient(backend);
+const status = client.submit(workflow, "order-42", 123);
+// The workflow is persisted, and a worker will pick up tasks
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
+use sayiir_runtime::WorkflowClient;
+
 let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
-let runner = CheckpointingRunner::new(backend);
-runner.run(&workflow, "order-42", input).await?;
+let client = WorkflowClient::new(backend);
+let (status, output) = client.submit(&workflow, "order-42", input).await?;
 ```
 
 </TabItem>
 </Tabs>
 
-## Lifecycle Operations via Worker Handle
+### Idempotent Submission
 
-The worker handle provides methods to control workflows through the worker's backend connection — no need to create a separate backend instance:
+The `WorkflowClient` supports conflict policies for handling duplicate `instance_id`s:
 
 <Tabs>
 <TabItem label="Python">
 
 ```python
-handle = worker.start([workflow])
+# "fail" (default) — raise InstanceAlreadyExistsError
+client = WorkflowClient(backend)
 
-# Cancel a workflow
-handle.cancel_workflow("order-42", reason="Out of stock", cancelled_by="system")
+# "use_existing" — return the existing workflow's status
+client = WorkflowClient(backend, conflict_policy="use_existing")
 
-# Pause / unpause
-handle.pause_workflow("order-42", reason="Maintenance window")
-handle.unpause_workflow("order-42")
-
-# Send a signal
-handle.send_signal("order-42", "manager_approval", {"approved": True})
-
-# Graceful shutdown
-handle.shutdown()
-handle.join()
+# "terminate_existing" — cancel and restart
+client = WorkflowClient(backend, conflict_policy="terminate_existing")
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```typescript
-const handle = worker.start();
+// "fail" (default) — throw an error
+const client = new WorkflowClient(backend);
 
-// Cancel a workflow
-handle.cancelWorkflow("order-42", {
-  reason: "Out of stock",
-  cancelledBy: "system",
-});
+// "useExisting" — return the existing workflow's status
+const client = new WorkflowClient(backend, { conflictPolicy: "useExisting" });
 
-// Pause / unpause
-handle.pauseWorkflow("order-42", { reason: "Maintenance window" });
-handle.unpauseWorkflow("order-42");
-
-// Send a signal
-handle.sendSignal("order-42", "manager_approval", { approved: true });
-
-// Graceful shutdown
-handle.shutdown();
+// "terminateExisting" — cancel and restart
+const client = new WorkflowClient(backend, { conflictPolicy: "terminateExisting" });
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
+use sayiir_core::workflow::ConflictPolicy;
+
+let client = WorkflowClient::new(backend)
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+```
+
+</TabItem>
+</Tabs>
+
+## Lifecycle Operations via WorkflowClient
+
+The `WorkflowClient` provides methods to control workflows — cancel, pause, unpause, send signals, and check status:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+client = WorkflowClient(backend)
+
+# Cancel a workflow
+client.cancel("order-42", reason="Out of stock", cancelled_by="system")
+
+# Pause / unpause
+client.pause("order-42", reason="Maintenance window")
+client.unpause("order-42")
+
+# Send a signal
+client.send_signal("order-42", "manager_approval", {"approved": True})
+
+# Check status
+status = client.status("order-42")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const client = new WorkflowClient(backend);
+
 // Cancel a workflow
-handle.cancel_workflow("order-42", Some("Out of stock".into()), Some("system".into())).await?;
+client.cancel("order-42", {
+  reason: "Out of stock",
+  cancelledBy: "system",
+});
 
-// Pause a workflow
-handle.pause_workflow("order-42", Some("Maintenance window".into()), None).await?;
+// Pause / unpause
+client.pause("order-42", { reason: "Maintenance window" });
+client.unpause("order-42");
 
-// Unpause and send signals go through the backend directly
-let backend = handle.backend();
-backend.unpause("order-42").await?;
-backend.send_event("order-42", "manager_approval", payload).await?;
+// Send a signal
+client.sendSignal("order-42", "manager_approval", { approved: true });
 
-// Graceful shutdown
-handle.shutdown();
-handle.join().await?;
+// Check status
+const status = client.status("order-42");
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let client = WorkflowClient::new(backend);
+
+// Cancel a workflow
+client.cancel("order-42", Some("Out of stock".into()), Some("system".into())).await?;
+
+// Pause / unpause
+client.pause("order-42", Some("Maintenance window".into()), None).await?;
+client.unpause("order-42").await?;
+
+// Send a signal
+client.send_event("order-42", "manager_approval", payload).await?;
+
+// Check status
+let status = client.status("order-42").await?;
 ```
 
 </TabItem>
@@ -360,6 +408,62 @@ let handle = worker.spawn(Duration::from_secs(1), workflows);
 </Tabs>
 
 All task functions from all workflows are merged into a single registry. Ensure task IDs are unique across workflows.
+
+## Task Priority
+
+Tasks with lower priority values are picked up first by workers. Priority ranges from 1 (Critical) to 5 (Minimal), with 3 (Normal) as the default.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task(priority=1)
+def charge_payment(order: dict) -> dict:
+    return process_payment(order)
+
+@task(priority=4)
+def generate_report(data: dict) -> dict:
+    return build_report(data)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const chargePayment = task("charge-payment", processPayment, { priority: 1 });
+const generateReport = task("generate-report", buildReport, { priority: 4 });
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+#[task(id = "charge_payment", priority = 1)]
+async fn charge_payment(order: Order) -> Result<Receipt, BoxError> {
+    process_payment(order).await
+}
+
+#[task(id = "generate_report", priority = 4)]
+async fn generate_report(data: ReportData) -> Result<Report, BoxError> {
+    build_report(data).await
+}
+```
+
+</TabItem>
+</Tabs>
+
+### Priority Aging
+
+To prevent starvation, Sayiir applies aging: the longer a task waits, the more its effective priority improves. A priority-5 task waiting long enough will eventually overtake a freshly submitted priority-1 task.
+
+The formula is: `effective_priority = base_priority - (seconds_waiting / aging_interval)`. The default aging interval is 300 seconds — a priority-5 task waiting 10 minutes has an effective priority of 3.
+
+In Rust, you can configure the aging interval on the worker:
+
+```rust
+let worker = PooledWorker::new("worker-1", backend, registry)
+    .with_aging_interval(Duration::from_secs(600)); // slower aging
+```
 
 ## Soft Worker Affinity
 

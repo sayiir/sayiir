@@ -11,8 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sayiir_core::registry::TaskRegistry;
-use sayiir_core::snapshot::{SignalKind, SignalRequest};
-use sayiir_persistence::SignalStore;
 use sayiir_runtime::{
     ExternalTaskExecutor, ExternalWorkflow, PooledWorker, WorkerHandle, WorkflowIndex,
 };
@@ -21,9 +19,7 @@ use sayiir_postgres::PostgresBackend;
 use sayiir_runtime::serialization::JsonCodec;
 
 use crate::backend::{BackendKind, PyInMemoryBackend, PyPostgresBackend};
-use crate::codec::encode_pyobject;
 use crate::engine::execute_python_task;
-use crate::exceptions;
 use crate::flow::PyWorkflow;
 
 /// Distributed workflow worker.
@@ -43,17 +39,19 @@ pub struct PyWorker {
     postgres_url: Option<String>,
     poll_interval: Duration,
     claim_ttl: Duration,
+    tags: Vec<String>,
 }
 
 #[pymethods]
 impl PyWorker {
     #[new]
-    #[pyo3(signature = (worker_id, backend, poll_interval_secs=5.0, claim_ttl_secs=300.0))]
+    #[pyo3(signature = (worker_id, backend, poll_interval_secs=5.0, claim_ttl_secs=300.0, tags=None))]
     fn new(
         worker_id: String,
         backend: &Bound<'_, PyAny>,
         poll_interval_secs: f64,
         claim_ttl_secs: f64,
+        tags: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let (backend_kind, postgres_url) = extract_backend(backend)?;
         Ok(Self {
@@ -62,6 +60,7 @@ impl PyWorker {
             postgres_url,
             poll_interval: Duration::from_secs_f64(poll_interval_secs),
             claim_ttl: Duration::from_secs_f64(claim_ttl_secs),
+            tags: tags.unwrap_or_default(),
         })
     }
 
@@ -121,10 +120,10 @@ impl PyWorker {
         let worker_id = self.worker_id.clone();
         let claim_ttl = self.claim_ttl;
         let poll_interval = self.poll_interval;
+        let tags = self.tags.clone();
 
-        let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel::<
-            Result<(WorkerHandle<BackendKind>, tokio::runtime::Handle), String>,
-        >(1);
+        let (handle_tx, handle_rx) =
+            std::sync::mpsc::sync_channel::<Result<WorkerHandle<BackendKind>, String>>(1);
 
         let bg_thread = std::thread::Builder::new()
             .name(format!("sayiir-worker-{}", self.worker_id))
@@ -157,14 +156,14 @@ impl PyWorker {
                 };
 
                 let worker = PooledWorker::new(&worker_id, backend_kind, TaskRegistry::default())
-                    .with_claim_ttl(Some(claim_ttl));
+                    .with_claim_ttl(Some(claim_ttl))
+                    .with_tags(tags);
 
                 // We need to enter the runtime context before spawning.
                 let _guard = runtime.enter();
-                let rt_handle = runtime.handle().clone();
                 let handle =
                     worker.spawn_with_executor(poll_interval, external_workflows, executor);
-                let _ = handle_tx.send(Ok((handle.clone(), rt_handle)));
+                let _ = handle_tx.send(Ok(handle.clone()));
 
                 // Drive the runtime until the worker shuts down.
                 runtime.block_on(async {
@@ -177,7 +176,7 @@ impl PyWorker {
                 ))
             })?;
 
-        let (handle, runtime_handle) = handle_rx
+        let handle = handle_rx
             .recv()
             .map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -188,7 +187,6 @@ impl PyWorker {
 
         Ok(PyWorkerHandle {
             handle,
-            runtime_handle,
             bg_thread: Some(std::sync::Mutex::new(Some(bg_thread))),
         })
     }
@@ -201,10 +199,8 @@ impl PyWorker {
 /// Handle for controlling a running worker.
 #[pyclass]
 pub struct PyWorkerHandle {
+    #[allow(dead_code)]
     handle: WorkerHandle<BackendKind>,
-    /// Handle to the worker's tokio runtime — used for backend ops that need
-    /// the same runtime that owns the `PgPool`.
-    runtime_handle: tokio::runtime::Handle,
     /// Background thread driving the tokio runtime. Joined on drop/join.
     bg_thread: Option<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
@@ -239,103 +235,9 @@ impl PyWorkerHandle {
         }
     }
 
-    /// Request cancellation of a workflow.
-    ///
-    /// Stores a cancel signal in the backend. The worker picks it up
-    /// at the next task boundary.
-    #[pyo3(signature = (instance_id, reason=None, cancelled_by=None))]
-    fn cancel_workflow(
-        &self,
-        instance_id: String,
-        reason: Option<String>,
-        cancelled_by: Option<String>,
-    ) -> PyResult<()> {
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend
-                .store_signal(
-                    &instance_id,
-                    SignalKind::Cancel,
-                    SignalRequest::new(reason, cancelled_by),
-                )
-                .await
-        })
-        .map_err(|e| PyErr::new::<exceptions::BackendError, _>(e.to_string()))
-    }
-
-    /// Request pausing of a workflow.
-    #[pyo3(signature = (instance_id, reason=None, paused_by=None))]
-    fn pause_workflow(
-        &self,
-        instance_id: String,
-        reason: Option<String>,
-        paused_by: Option<String>,
-    ) -> PyResult<()> {
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend
-                .store_signal(
-                    &instance_id,
-                    SignalKind::Pause,
-                    SignalRequest::new(reason, paused_by),
-                )
-                .await
-        })
-        .map_err(|e| PyErr::new::<exceptions::BackendError, _>(e.to_string()))
-    }
-
-    /// Unpause a paused workflow.
-    fn unpause_workflow(&self, instance_id: String) -> PyResult<()> {
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend.unpause(&instance_id).await.map(|_| ())
-        })
-        .map_err(|e| PyErr::new::<exceptions::BackendError, _>(e.to_string()))
-    }
-
-    /// Send an external signal to a workflow.
-    fn send_signal(
-        &self,
-        py: Python<'_>,
-        instance_id: String,
-        signal_name: String,
-        payload: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let payload_bytes = encode_pyobject(py, payload)?;
-        let backend = self.handle.backend().clone();
-        spawn_on_worker_runtime(&self.runtime_handle, async move {
-            backend
-                .send_event(&instance_id, &signal_name, payload_bytes)
-                .await
-        })
-        .map_err(|e| PyErr::new::<exceptions::BackendError, _>(e.to_string()))
-    }
-
     fn __repr__(&self) -> String {
         "WorkerHandle(...)".to_string()
     }
-}
-
-/// Spawn an async future on the worker's runtime and block until it completes.
-///
-/// This ensures backend operations (cancel, pause, signal) run on the same
-/// runtime that owns the `PgPool`, avoiding cross-runtime I/O driver issues.
-fn spawn_on_worker_runtime<F>(
-    handle: &tokio::runtime::Handle,
-    f: F,
-) -> Result<(), sayiir_persistence::BackendError>
-where
-    F: std::future::Future<Output = Result<(), sayiir_persistence::BackendError>> + Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    handle.spawn(async move {
-        let _ = tx.send(f.await);
-    });
-    rx.recv().map_err(|_| {
-        sayiir_persistence::BackendError::Backend(
-            "Worker runtime shut down before operation completed".to_string(),
-        )
-    })?
 }
 
 fn extract_backend(backend: &Bound<'_, PyAny>) -> PyResult<(BackendKind, Option<String>)> {

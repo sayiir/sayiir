@@ -28,6 +28,7 @@ const MIN_PG_MAJOR_VERSION: u32 = 13;
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct PostgresBackend<C> {
     pub(crate) pool: PgPool,
     pub(crate) codec: C,

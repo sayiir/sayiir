@@ -14,7 +14,7 @@ bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
-testcontainers = "0.26"                                                      # TODO: update to 0.27
-testcontainers-modules = { version = "0.14", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 sayiir-macros = { workspace = true }
 serde = { workspace = true }

@@ -12,7 +12,25 @@ use std::sync::Arc;
 use sayiir_core::continuation_builder::FlowBuilder;
 use sayiir_core::workflow::WorkflowContinuation;
 
-use crate::task::NapiTaskMetadata;
+use crate::task::{NapiRetryPolicy, NapiTaskMetadata};
+
+/// Metadata about a single node in the workflow DAG.
+#[napi(object)]
+pub struct NapiNodeInfo {
+    /// Unique node identifier.
+    pub id: String,
+    /// Node kind: `"task"`, `"fork"`, `"delay"`, `"awaitSignal"`,
+    /// `"branch"`, `"loop"`, or `"childWorkflow"`.
+    pub kind: String,
+    /// ID of the preceding node, or `undefined` for the root.
+    pub predecessor_id: Option<String>,
+    /// Timeout in seconds (task timeout, delay duration, or signal timeout).
+    pub timeout_secs: Option<f64>,
+    /// Retry policy (tasks only).
+    pub retry_policy: Option<NapiRetryPolicy>,
+    /// Execution priority 1–5 (tasks only).
+    pub priority: Option<u32>,
+}
 
 /// A compiled workflow definition.
 #[napi]
@@ -38,6 +56,27 @@ impl NapiWorkflow {
     #[napi(getter)]
     pub fn metadata_json(&self) -> Option<&str> {
         self.metadata_json.as_deref()
+    }
+
+    /// Return all nodes in topological (execution) order.
+    #[napi]
+    pub fn iter_nodes(&self) -> Vec<NapiNodeInfo> {
+        self.continuation
+            .iter_nodes()
+            .map(|n| NapiNodeInfo {
+                id: n.id.to_owned(),
+                kind: n.kind.as_ref().to_owned(),
+                predecessor_id: n.predecessor_id.map(str::to_owned),
+                timeout_secs: n.timeout.map(|d| d.as_secs_f64()),
+                retry_policy: n.retry_policy.map(|r| NapiRetryPolicy {
+                    max_retries: r.max_retries,
+                    initial_delay_secs: r.initial_delay.as_secs_f64(),
+                    backoff_multiplier: f64::from(r.backoff_multiplier),
+                    max_delay_secs: r.max_delay.map(|d| d.as_secs_f64()),
+                }),
+                priority: n.priority.map(u32::from),
+            })
+            .collect()
     }
 }
 

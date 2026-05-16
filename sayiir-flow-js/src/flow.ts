@@ -20,6 +20,7 @@ import type {
   BranchEntry,
   CompiledWorkflow,
   FlowBuilderBackend,
+  NodeInfo,
   TaskMetadata,
 } from "./interfaces.js";
 
@@ -57,6 +58,17 @@ export class Workflow<TIn, TOut> {
   get metadata(): Record<string, unknown> | undefined {
     const json = this._inner.metadataJson;
     return json != null ? (JSON.parse(json) as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * Return all nodes in topological (execution) order.
+   *
+   * Each {@link NodeInfo} carries the node's ID, kind, predecessor,
+   * and any configured timeout / retry / priority metadata.
+   * Useful for introspection, UI visualisation, and documentation.
+   */
+  iterNodes(): NodeInfo[] {
+    return this._inner.iterNodes();
   }
 }
 

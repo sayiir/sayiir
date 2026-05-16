@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::ExecutionPosition;
+use sayiir_core::snapshot::{ExecutionPosition, TaskHint};
 use sayiir_persistence::SnapshotStore;
 
 use crate::error::RuntimeError;
@@ -20,7 +20,8 @@ pub(crate) enum ParkReason {
     Delay {
         delay_id: String,
         wake_at: DateTime<Utc>,
-        next_task_id: Option<String>,
+        /// Pre-computed hint for the next task (priority + tags for persistence-layer advancement).
+        next_task: Option<TaskHint>,
         /// Pass-through value stored as the delay's "result".
         passthrough: Bytes,
     },
@@ -29,7 +30,8 @@ pub(crate) enum ParkReason {
         signal_id: String,
         signal_name: String,
         timeout: Option<DateTime<Utc>>,
-        next_task_id: Option<String>,
+        /// Pre-computed hint for the next task (priority + tags for persistence-layer advancement).
+        next_task: Option<TaskHint>,
     },
 }
 
@@ -84,9 +86,11 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
         ParkReason::Delay {
             delay_id,
             wake_at,
-            next_task_id,
+            next_task,
             passthrough,
         } => {
+            let next_task_id = next_task.as_ref().map(|h| h.id.clone());
+            snapshot.set_task_hint(next_task.as_ref().unwrap_or(&TaskHint::default()));
             let now = Utc::now();
             snapshot.update_position(ExecutionPosition::AtDelay {
                 delay_id: delay_id.clone(),
@@ -104,8 +108,10 @@ pub(crate) async fn save_park_checkpoint<B: SnapshotStore>(
             signal_id,
             signal_name,
             timeout,
-            next_task_id,
+            next_task,
         } => {
+            let next_task_id = next_task.as_ref().map(|h| h.id.clone());
+            snapshot.set_task_hint(next_task.as_ref().unwrap_or(&TaskHint::default()));
             snapshot.update_position(ExecutionPosition::AtSignal {
                 signal_id: signal_id.clone(),
                 signal_name: signal_name.clone(),

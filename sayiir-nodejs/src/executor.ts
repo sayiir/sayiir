@@ -46,10 +46,15 @@ export class PostgresBackend {
   }
 }
 
+/** Conflict policy when an instance_id already exists. */
+export type ConflictPolicy = "fail" | "useExisting" | "terminateExisting";
+
 /** Options for running a workflow with durability. */
 export interface DurableRunOptions {
   instanceId: string;
   backend: Backend;
+  /** What to do when `instanceId` already has a snapshot. Default: `"fail"`. */
+  conflictPolicy?: ConflictPolicy;
 }
 
 /**
@@ -82,7 +87,7 @@ export async function runWorkflow<TIn, TOut>(
   opts?: DurableRunOptions,
 ): Promise<TOut> {
   if (opts) {
-    const status = runDurableWorkflow(workflow, opts.instanceId, input, opts.backend);
+    const status = runDurableWorkflow(workflow, opts.instanceId, input, opts.backend, opts.conflictPolicy);
     if (status.status !== "completed") {
       throw new WorkflowError(
         `Workflow did not complete (status=${status.status}). ` +
@@ -141,8 +146,9 @@ export function runDurableWorkflow<TIn, TOut>(
   instanceId: string,
   input: TIn,
   backend: Backend,
+  conflictPolicy?: ConflictPolicy,
 ): WorkflowStatus<TOut> {
-  const engine = createDurableEngine(backend);
+  const engine = createDurableEngine(backend, conflictPolicy);
   const raw = engine.run(
     workflow._inner,
     instanceId,
@@ -207,13 +213,15 @@ export function sendSignal(
   engine.sendSignal(instanceId, signalName, payload);
 }
 
-function createDurableEngine(backend: Backend): NapiDurableEngine {
+// ---- Internal helpers ----
+
+function createDurableEngine(backend: Backend, conflictPolicy?: ConflictPolicy): NapiDurableEngine {
   const native = getNative();
   if (backend instanceof InMemoryBackend) {
-    return native.NapiDurableEngine.withInMemory(backend._inner);
+    return native.NapiDurableEngine.withInMemory(backend._inner, conflictPolicy);
   }
   if (backend instanceof PostgresBackend) {
-    return native.NapiDurableEngine.withPostgres(backend._inner);
+    return native.NapiDurableEngine.withPostgres(backend._inner, conflictPolicy);
   }
   throw new WorkflowError("backend must be InMemoryBackend or PostgresBackend");
 }

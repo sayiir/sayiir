@@ -23,6 +23,7 @@ pub use sayiir_core::codec::{Decoder, Encoder, EnvelopeCodec};
 pub use sayiir_core::branch_key::BranchKey;
 pub use sayiir_core::branch_results::NamedBranchResults;
 pub use sayiir_core::context::WorkflowContext;
+pub use sayiir_core::deps::{Deps, DepsBuilder, DepsInjectable, MissingDep};
 pub use sayiir_core::error::BoxError;
 pub use sayiir_core::registry::TaskRegistry;
 pub use sayiir_core::workflow::{Workflow, WorkflowBuilder, WorkflowStatus};

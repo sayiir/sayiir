@@ -10,6 +10,8 @@
 export type {
   FlowBuilderBackend,
   CompiledWorkflow,
+  NodeKind,
+  NodeInfo,
   TaskMetadata,
   RetryPolicyConfig,
   BranchTask,

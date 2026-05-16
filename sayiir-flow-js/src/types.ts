@@ -20,6 +20,7 @@ export interface TaskOptions<TIn = any, TOut = unknown> {
   retry?: RetryPolicy;
   description?: string;
   tags?: string[];
+  priority?: number;
   input?: ZodLike<TIn>;
   output?: ZodLike<TOut>;
 }

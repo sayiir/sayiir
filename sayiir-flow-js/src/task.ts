@@ -74,6 +74,27 @@ function buildMetadata(id: string, opts?: TaskOptions): TaskMetadata {
     };
   }
 
+  if (opts?.priority != null) {
+    if (opts.priority < 1 || opts.priority > 5) {
+      throw new RangeError(`priority must be between 1 and 5, got ${opts.priority}`);
+    }
+    metadata.priority = opts.priority;
+  }
+
+  if (opts?.tags != null) {
+    if (opts.tags.length > 20) {
+      throw new RangeError(`too many tags: ${opts.tags.length} (max 20)`);
+    }
+    for (const tag of opts.tags) {
+      if (!tag) {
+        throw new RangeError("tags must not contain empty strings");
+      }
+      if (tag.length > 64) {
+        throw new RangeError(`tag too long: '${tag}' (${tag.length} chars, max 64)`);
+      }
+    }
+  }
+
   return metadata;
 }
 

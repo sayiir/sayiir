@@ -70,6 +70,13 @@ impl TaskClaim {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::cast_sign_loss
+)]
 mod tests {
     use super::*;
 

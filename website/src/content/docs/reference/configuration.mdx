@@ -210,6 +210,7 @@ let metadata = TaskMetadata {
 | `retries` | RetryPolicy | Retry behavior configuration |
 | `tags` | List[String] | Categorization tags for filtering/monitoring |
 | `description` | String | Human-readable task description |
+| `priority` | Integer (1–5) | Execution priority (1 = Critical, 5 = Minimal, default: 3) |
 
 ### Timeout Behavior
 
@@ -237,6 +238,83 @@ Use tags for:
 - Setting up alerts
 - Capacity planning
 - Cost allocation
+
+## Task Priority
+
+Control which tasks get picked up first by distributed workers. Lower values mean higher priority.
+
+| Level | Value | Use case |
+|-------|-------|----------|
+| Critical | 1 | Payment processing, SLA-bound work |
+| High | 2 | User-facing requests |
+| Normal | 3 | Default — most tasks |
+| Low | 4 | Background jobs, reports |
+| Minimal | 5 | Housekeeping, analytics |
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import task
+
+@task(priority=1)
+def charge_payment(order: dict) -> dict:
+    return process_payment(order)
+
+@task(priority=4)
+def generate_report(data: dict) -> dict:
+    return build_report(data)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { task } from "sayiir";
+
+const chargePayment = task("charge-payment", (order) => {
+  return processPayment(order);
+}, { priority: 1 });
+
+const generateReport = task("generate-report", (data) => {
+  return buildReport(data);
+}, { priority: 4 });
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+#[task(id = "charge_payment", priority = 1)]
+async fn charge_payment(order: Order) -> Result<Receipt, BoxError> {
+    process_payment(order).await
+}
+
+#[task(id = "generate_report", priority = 4)]
+async fn generate_report(data: ReportData) -> Result<Report, BoxError> {
+    build_report(data).await
+}
+```
+
+</TabItem>
+</Tabs>
+
+### Aging (Starvation Prevention)
+
+To prevent low-priority tasks from waiting forever, Sayiir applies **aging**: the longer a task waits, the more its effective priority improves. The formula is:
+
+```
+effective_priority = base_priority - (seconds_waiting / aging_interval)
+```
+
+The `aging_interval` controls how quickly waiting tasks gain priority. With the default of 300 seconds, a priority-5 task waiting 10 minutes has an effective priority of 3 — equal to a freshly submitted normal task.
+
+Configure the aging interval on the worker (Rust only — Python and Node.js use the default 300s):
+
+```rust
+let worker = PooledWorker::new("worker-1", backend, registry)
+    .with_aging_interval(Duration::from_secs(600)); // slower aging
+```
 
 ## PostgreSQL Backend
 

@@ -6,6 +6,25 @@ import { resolve } from "node:path";
 
 const codapiUrl = import.meta.env.PUBLIC_CODAPI_URL || "http://localhost:1313";
 const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts"), "utf-8");
+
+// Playground example snippets — kept as standalone files for easy editing.
+const examplesDir = resolve(process.cwd(), "../playground/examples");
+const read = (path: string) => readFileSync(resolve(examplesDir, path), "utf-8");
+
+const examples = {
+  python: {
+    hello: read("python/hello.py"),
+    parallel: read("python/parallel.py"),
+    retry: read("python/retry.py"),
+    routing: read("python/routing.py"),
+  },
+  node: {
+    hello: read("node/hello.js"),
+    parallel: read("node/parallel.js"),
+    retry: read("node/retry.js"),
+    routing: read("node/routing.js"),
+  },
+};
 ---
 
 <html lang="en">
@@ -251,7 +270,7 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
   </div>
 
   <script is:inline src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
-  <script is:inline define:vars={{ codapiUrl, sayiirDts }}>
+  <script is:inline define:vars={{ codapiUrl, sayiirDts, examples }}>
     var CODAPI_URL = codapiUrl + '/v1/exec';
 
     var LANGS = {
@@ -259,20 +278,7 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
       node:   { monaco: 'javascript', sandbox: 'sayiir-node', entry: 'main.js', label: 'main.js' },
     };
 
-    var EXAMPLES = {
-      python: {
-        hello: 'from sayiir import task, Flow, run_workflow\n\n@task\ndef fetch_user(user_id: int) -> dict:\n    return {"id": user_id, "name": "Alice"}\n\n@task\ndef send_email(user: dict) -> str:\n    return f"Sent welcome to {user[\'name\']}"\n\nworkflow = Flow("welcome").then(fetch_user).then(send_email).build()\nresult = run_workflow(workflow, 42)\nprint(result)',
-        parallel: 'from sayiir import task, Flow, run_workflow\n\n@task\ndef validate_payment(order: dict) -> dict:\n    return {**order, "payment": "valid"}\n\n@task\ndef check_inventory(order: dict) -> dict:\n    return {**order, "stock": "available"}\n\n@task\ndef finalize(results: dict) -> str:\n    return f"Order complete: {results}"\n\nworkflow = (\n    Flow("checkout")\n    .fork()\n        .branch(validate_payment)\n        .branch(check_inventory)\n    .join(finalize)\n    .build()\n)\nprint(run_workflow(workflow, {"id": 1, "item": "Widget"}))',
-        retry: 'from sayiir import task, Flow, run_workflow\n\n@task(timeout="5s", retries=3)\ndef fetch_data(query: str) -> str:\n    return f"Result for: {query}"\n\nworkflow = Flow("search").then(fetch_data).build()\nprint(run_workflow(workflow, "sayiir"))',
-        routing: 'from sayiir import task, Flow, run_workflow\n\n@task\ndef classify(ticket: dict) -> str:\n    return "billing" if ticket["type"] == "invoice" else "tech"\n\n@task\ndef handle_billing(ticket: dict) -> str:\n    return f"Billing handled: ticket #{ticket[\'id\']}"\n\n@task\ndef handle_tech(ticket: dict) -> str:\n    return f"Tech resolved: ticket #{ticket[\'id\']}"\n\nworkflow = (\n    Flow("support")\n    .route(classify, keys=["billing", "tech"])\n        .branch("billing", handle_billing)\n        .branch("tech", handle_tech)\n    .done()\n    .build()\n)\nprint(run_workflow(workflow, {"id": 42, "type": "invoice"}))',
-      },
-      node: {
-        hello: 'const { task, flow, runWorkflow } = require("sayiir");\n\nconst fetchUser = task("fetch-user", (id) => {\n  return { id, name: "Alice" };\n});\n\nconst sendEmail = task("send-email", (user) => {\n  return `Sent welcome to ${user.name}`;\n});\n\nconst workflow = flow("welcome")\n  .then(fetchUser)\n  .then(sendEmail)\n  .build();\n\nrunWorkflow(workflow, 42).then(console.log);',
-        parallel: 'const { task, flow, branch, runDurableWorkflow, InMemoryBackend } = require("sayiir");\n\nconst validatePayment = task("validate-payment", (order) => {\n  return { ...order, payment: "valid" };\n});\n\nconst checkInventory = task("check-inventory", (order) => {\n  return { ...order, stock: "available" };\n});\n\nconst finalize = task("finalize", (results) => {\n  return `Order complete: ${JSON.stringify(results)}`;\n});\n\nconst workflow = flow("checkout")\n  .fork([branch("payment", validatePayment), branch("inventory", checkInventory)])\n  .join("finalize", finalize)\n  .build();\n\nconst backend = new InMemoryBackend();\nconst status = runDurableWorkflow(workflow, "run-1", { id: 1, item: "Widget" }, backend);\nconsole.log(status.output);',
-        retry: 'const { task, flow, runWorkflow } = require("sayiir");\n\nconst fetchData = task("fetch-data", (query) => {\n  return `Result for: ${query}`;\n}, { timeout: "5s", retries: 3 });\n\nconst workflow = flow("search").then(fetchData).build();\nrunWorkflow(workflow, "sayiir").then(console.log);',
-        routing: 'const { task, flow, runDurableWorkflow, InMemoryBackend } = require("sayiir");\n\nconst classify = task("classify", (ticket) => {\n  return ticket.type === "invoice" ? "billing" : "tech";\n});\n\nconst handleBilling = task("handle-billing", (ticket) => {\n  return `Billing handled: ticket #${ticket.id}`;\n});\n\nconst handleTech = task("handle-tech", (ticket) => {\n  return `Tech resolved: ticket #${ticket.id}`;\n});\n\nconst workflow = flow("support")\n  .route(classify, ["billing", "tech"])\n    .branch("billing", handleBilling)\n    .branch("tech", handleTech)\n  .done()\n  .build();\n\nconst backend = new InMemoryBackend();\nconst status = runDurableWorkflow(workflow, "run-1", { id: 42, type: "invoice" }, backend);\nconsole.log(status.output);',
-      },
-    };
+    var EXAMPLES = examples;
 
     var currentLang = 'python';
     var currentExample = 'hello';
@@ -413,11 +419,19 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
         { label: 'task', kind: CK.Function, detail: 'decorator', doc: '@task — mark a function as a workflow task' },
         { label: 'Flow', kind: CK.Class, detail: 'class', doc: 'Flow(name) — build a workflow' },
         { label: 'run_workflow', kind: CK.Function, detail: 'function', doc: 'run_workflow(workflow, input) -> Any' },
-        { label: 'run_durable_workflow', kind: CK.Function, detail: 'function', doc: 'run_durable_workflow(workflow, instance_id, input, backend=None) -> WorkflowStatus' },
+        { label: 'run_durable_workflow', kind: CK.Function, detail: 'function', doc: 'run_durable_workflow(workflow, instance_id, input, backend, conflict_policy=None) -> WorkflowStatus' },
+        { label: 'resume_workflow', kind: CK.Function, detail: 'function', doc: 'resume_workflow(workflow, instance_id, backend) -> WorkflowStatus' },
         { label: 'InMemoryBackend', kind: CK.Class, detail: 'class', doc: 'InMemoryBackend() — in-memory persistence' },
         { label: 'PostgresBackend', kind: CK.Class, detail: 'class', doc: 'PostgresBackend(url) — PostgreSQL persistence' },
         { label: 'RetryPolicy', kind: CK.Class, detail: 'class', doc: 'RetryPolicy(max_retries, initial_delay_secs=1.0, backoff_multiplier=2.0)' },
-        { label: 'send_signal', kind: CK.Function, detail: 'function', doc: 'send_signal(instance_id, signal_name, payload, backend=None)' },
+        { label: 'LoopResult', kind: CK.Class, detail: 'class', doc: 'LoopResult.again(value) / LoopResult.done(value) — control loop iteration' },
+        { label: 'OnMax', kind: CK.Enum, detail: 'enum', doc: 'OnMax.FAIL / OnMax.EXIT_WITH_LAST — max-iterations policy' },
+        { label: 'send_signal', kind: CK.Function, detail: 'function', doc: 'send_signal(instance_id, signal_name, payload, backend)' },
+        { label: 'cancel_workflow', kind: CK.Function, detail: 'function', doc: 'cancel_workflow(instance_id, backend, reason=None, cancelled_by=None)' },
+        { label: 'pause_workflow', kind: CK.Function, detail: 'function', doc: 'pause_workflow(instance_id, backend, reason=None, paused_by=None)' },
+        { label: 'unpause_workflow', kind: CK.Function, detail: 'function', doc: 'unpause_workflow(instance_id, backend)' },
+        { label: 'Worker', kind: CK.Class, detail: 'class', doc: 'Worker(worker_id, backend, workflows, opts=None) — distributed executor' },
+        { label: 'WorkflowClient', kind: CK.Class, detail: 'class', doc: 'WorkflowClient(backend, conflict_policy=None) — submit & control instances' },
         { label: 'get_task_context', kind: CK.Function, detail: 'function', doc: 'get_task_context() -> TaskExecutionContext' },
       ];
 
@@ -427,10 +441,13 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
         { label: 'route', kind: CK.Method, detail: 'BranchBuilder', doc: '.route(key_fn, keys=[...])', insert: 'route(${1:key_fn}, keys=[${2:"a", "b"}])' },
         { label: 'delay', kind: CK.Method, detail: 'Flow', doc: '.delay(name, duration)', insert: 'delay("${1:name}", "${2:30s}")' },
         { label: 'wait_for_signal', kind: CK.Method, detail: 'Flow', doc: '.wait_for_signal(signal_name)', insert: 'wait_for_signal("${1:signal_name}")' },
+        { label: 'loop', kind: CK.Method, detail: 'Flow', doc: '.loop(task_fn, max_iterations=10, on_max="fail")', insert: 'loop(${1:task_fn}, max_iterations=${2:10})' },
+        { label: 'then_flow', kind: CK.Method, detail: 'Flow', doc: '.then_flow(child_workflow)', insert: 'then_flow(${1:child_workflow})' },
         { label: 'build', kind: CK.Method, detail: 'Workflow', doc: '.build()', insert: 'build()' },
         { label: 'branch', kind: CK.Method, detail: 'ForkBuilder', doc: '.branch(task_fn)', insert: 'branch(${1})' },
         { label: 'join', kind: CK.Method, detail: 'Flow', doc: '.join(task_fn)', insert: 'join(${1:task_fn})' },
         { label: 'done', kind: CK.Method, detail: 'Flow', doc: '.done()', insert: 'done()' },
+        { label: 'default_branch', kind: CK.Method, detail: 'BranchBuilder', doc: '.default_branch(task_fn)', insert: 'default_branch(${1:task_fn})' },
       ];
 
       function mkCompletion(item, range) {
@@ -464,13 +481,18 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
 
       // Hover
       var PY_HOVER = {
-        task: '```python\n@task(name=None, timeout=None, retries=None, tags=None)\n```\nMark a function as a workflow task.',
-        Flow: '```python\nFlow(name: str)\n```\nBuild a workflow. Methods: `.then()` `.fork()` `.route()` `.delay()` `.wait_for_signal()` `.build()`',
-        run_workflow: '```python\nrun_workflow(workflow, input, *, instance_id=None, backend=None) -> Any\n```\nRun a workflow and return the result.',
-        run_durable_workflow: '```python\nrun_durable_workflow(workflow, instance_id, input, backend=None) -> WorkflowStatus\n```\nRun with durable checkpointing.',
-        send_signal: '```python\nsend_signal(instance_id, signal_name, payload, backend=None)\n```\nSend a signal to a waiting workflow.',
+        task: '```python\n@task(name=None, timeout=None, retries=None, tags=None, description=None, priority=None)\n```\nMark a function as a workflow task. Priority: 1 (highest) to 5 (lowest).',
+        Flow: '```python\nFlow(name: str, *, metadata=None)\n```\nBuild a workflow. Methods: `.then()` `.fork()` `.route()` `.delay()` `.wait_for_signal()` `.loop()` `.then_flow()` `.build()`',
+        run_workflow: '```python\nrun_workflow(workflow, input, *, instance_id=None, backend=None, conflict_policy=None) -> Any\n```\nRun a workflow and return the result.',
+        run_durable_workflow: '```python\nrun_durable_workflow(workflow, instance_id, input, backend, conflict_policy=None) -> WorkflowStatus\n```\nRun with durable checkpointing.',
+        resume_workflow: '```python\nresume_workflow(workflow, instance_id, backend) -> WorkflowStatus\n```\nResume a workflow from its last checkpoint.',
+        send_signal: '```python\nsend_signal(instance_id, signal_name, payload, backend)\n```\nSend a signal to a waiting workflow.',
+        cancel_workflow: '```python\ncancel_workflow(instance_id, backend, reason=None, cancelled_by=None)\n```\nCancel a running durable workflow.',
         InMemoryBackend: '```python\nInMemoryBackend()\n```\nIn-memory persistence (non-durable).',
         PostgresBackend: '```python\nPostgresBackend(url: str)\n```\nPostgreSQL persistence for production.',
+        LoopResult: '```python\nLoopResult.again(value)  # continue loop\\nLoopResult.done(value)   # exit loop\n```\nControl loop iteration flow.',
+        Worker: '```python\nWorker(worker_id, backend, workflows, opts=None)\n```\nDistributed workflow executor. Call `.start()` to begin polling.',
+        WorkflowClient: '```python\nWorkflowClient(backend, conflict_policy=None)\n```\nSubmit and control workflow instances without executing tasks.',
       };
 
       monaco.languages.registerHoverProvider('python', {
@@ -488,24 +510,26 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
 
       // Signature help
       var PY_SIGS = {
-        Flow: { label: 'Flow(name: str)', params: [{ label: 'name: str', doc: 'Workflow name' }] },
+        Flow: { label: 'Flow(name: str, *, metadata=None)', params: [{ label: 'name: str', doc: 'Workflow name' }, { label: 'metadata=None', doc: 'Optional workflow-level metadata dict' }] },
         run_workflow: {
-          label: 'run_workflow(workflow, input, *, instance_id=None, backend=None)',
+          label: 'run_workflow(workflow, input, *, instance_id=None, backend=None, conflict_policy=None)',
           params: [
             { label: 'workflow', doc: 'Compiled Workflow' },
             { label: 'input', doc: 'Input for first task' },
-            { label: 'instance_id=None', doc: 'Optional instance ID' },
-            { label: 'backend=None', doc: 'Optional backend' },
+            { label: 'instance_id=None', doc: 'Optional instance ID (enables durability)' },
+            { label: 'backend=None', doc: 'Optional backend (required with instance_id)' },
+            { label: 'conflict_policy=None', doc: '"fail" | "use_existing" | "terminate_existing"' },
           ],
         },
         task: {
-          label: '@task(name=None, timeout=None, retries=None, tags=None, description=None)',
+          label: '@task(name=None, timeout=None, retries=None, tags=None, description=None, priority=None)',
           params: [
             { label: 'name=None', doc: 'Custom task ID' },
             { label: 'timeout=None', doc: 'Max execution time: "30s", "5m"' },
             { label: 'retries=None', doc: 'Retry count or RetryPolicy' },
             { label: 'tags=None', doc: 'Metadata tags' },
             { label: 'description=None', doc: 'Human-readable description' },
+            { label: 'priority=None', doc: 'Task priority 1 (highest) to 5 (lowest)' },
           ],
         },
       };
@@ -558,20 +582,36 @@ const sayiirDts = readFileSync(resolve(process.cwd(), "../playground/sayiir.d.ts
     function registerJSProviders(monaco) {
       var CK = monaco.languages.CompletionItemKind;
       var SAYIIR_JS = [
-        { label: 'task', kind: CK.Function, detail: 'function', doc: 'task(name, fn, opts?)' },
-        { label: 'flow', kind: CK.Function, detail: 'function', doc: 'flow(name) — build a workflow' },
-        { label: 'branch', kind: CK.Function, detail: 'function', doc: 'branch(name, taskFn)' },
-        { label: 'runWorkflow', kind: CK.Function, detail: 'function', doc: 'runWorkflow(workflow, input) -> Promise<any>' },
-        { label: 'runDurableWorkflow', kind: CK.Function, detail: 'function', doc: 'runDurableWorkflow(workflow, instanceId, input, backend?)' },
+        { label: 'task', kind: CK.Function, detail: 'function', doc: 'task(name, fn, opts?) — define a named task' },
+        { label: 'flow', kind: CK.Function, detail: 'function', doc: 'flow(name, opts?) — build a workflow' },
+        { label: 'branch', kind: CK.Function, detail: 'function', doc: 'branch(name, taskFn) — create a fork branch' },
+        { label: 'runWorkflow', kind: CK.Function, detail: 'function', doc: 'runWorkflow(workflow, input, opts?) -> Promise<any>' },
+        { label: 'runWorkflowSync', kind: CK.Function, detail: 'function', doc: 'runWorkflowSync(workflow, input) -> any' },
+        { label: 'runDurableWorkflow', kind: CK.Function, detail: 'function', doc: 'runDurableWorkflow(workflow, instanceId, input, backend, conflictPolicy?)' },
+        { label: 'resumeWorkflow', kind: CK.Function, detail: 'function', doc: 'resumeWorkflow(workflow, instanceId, backend)' },
+        { label: 'sendSignal', kind: CK.Function, detail: 'function', doc: 'sendSignal(instanceId, signalName, payload, backend)' },
+        { label: 'cancelWorkflow', kind: CK.Function, detail: 'function', doc: 'cancelWorkflow(instanceId, backend, opts?)' },
+        { label: 'pauseWorkflow', kind: CK.Function, detail: 'function', doc: 'pauseWorkflow(instanceId, backend, opts?)' },
+        { label: 'unpauseWorkflow', kind: CK.Function, detail: 'function', doc: 'unpauseWorkflow(instanceId, backend)' },
+        { label: 'LoopResult', kind: CK.Class, detail: 'object', doc: 'LoopResult.again(value) / LoopResult.done(value)' },
         { label: 'InMemoryBackend', kind: CK.Class, detail: 'class', doc: 'new InMemoryBackend()' },
         { label: 'PostgresBackend', kind: CK.Class, detail: 'class', doc: 'PostgresBackend.connect(url)' },
+        { label: 'Worker', kind: CK.Class, detail: 'class', doc: 'new Worker(workerId, backend, workflows, opts?)' },
+        { label: 'WorkflowClient', kind: CK.Class, detail: 'class', doc: 'new WorkflowClient(backend, opts?)' },
+        { label: 'getTaskContext', kind: CK.Function, detail: 'function', doc: 'getTaskContext() -> TaskExecutionContext | null' },
       ];
       var FLOW_METHODS_JS = [
         { label: 'then', kind: CK.Method, detail: 'Flow', insert: 'then(${1:taskFn})' },
         { label: 'fork', kind: CK.Method, detail: 'ForkBuilder', insert: 'fork([${1}])' },
-        { label: 'route', kind: CK.Method, detail: 'BranchBuilder', insert: 'route(${1:keyFn}, [${2:"a", "b"}])' },
+        { label: 'route', kind: CK.Method, detail: 'RouteBuilder', insert: 'route(${1:keyFn}, [${2:"a", "b"}])' },
+        { label: 'delay', kind: CK.Method, detail: 'Flow', insert: 'delay("${1:id}", "${2:30s}")' },
+        { label: 'waitForSignal', kind: CK.Method, detail: 'Flow', insert: 'waitForSignal("${1:id}", "${2:signal_name}", { timeout: "${3:1h}" })' },
+        { label: 'loop', kind: CK.Method, detail: 'Flow', insert: 'loop(${1:taskFn}, { maxIterations: ${2:10} })' },
+        { label: 'thenFlow', kind: CK.Method, detail: 'Flow', insert: 'thenFlow(${1:childWorkflow})' },
         { label: 'build', kind: CK.Method, detail: 'Workflow', insert: 'build()' },
-        { label: 'join', kind: CK.Method, detail: 'Flow', insert: 'join(${1:taskFn})' },
+        { label: 'join', kind: CK.Method, detail: 'Flow', insert: 'join("${1:id}", ${2:fn})' },
+        { label: 'branch', kind: CK.Method, detail: 'RouteBuilder', insert: 'branch("${1:key}", ${2:taskFn})' },
+        { label: 'defaultBranch', kind: CK.Method, detail: 'RouteBuilder', insert: 'defaultBranch(${1:taskFn})' },
         { label: 'done', kind: CK.Method, detail: 'Flow', insert: 'done()' },
       ];
 

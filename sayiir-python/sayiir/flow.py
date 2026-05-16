@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from ._sayiir import PyFlowBuilder, PyTaskMetadata
+from ._sayiir import NodeInfo, PyFlowBuilder, PyTaskMetadata
 
 if TYPE_CHECKING:
     from ._sayiir import PyWorkflow
@@ -91,6 +91,20 @@ def _register_task(
     return task_id, metadata
 
 
+NodeInfo.__doc__ = """Metadata about a single node in the workflow DAG.
+
+Attributes:
+    id: Unique node identifier.
+    kind: ``"task"``, ``"fork"``, ``"delay"``, ``"await_signal"``,
+        ``"branch"``, ``"loop"``, or ``"child_workflow"``.
+    predecessor_id: ID of the preceding node, or ``None`` for the root.
+    timeout_secs: Timeout in seconds (task timeout, delay duration,
+        or signal timeout).
+    retry_policy: Retry policy (tasks only).
+    priority: Execution priority 1–5 (tasks only).
+"""
+
+
 class Workflow:
     """A compiled workflow with its task registry.
 
@@ -121,6 +135,14 @@ class Workflow:
         """Workflow-level metadata, or ``None`` if none was provided."""
         raw = self._inner.metadata_json
         return _json.loads(raw) if raw is not None else None
+
+    def iter_nodes(self) -> list[NodeInfo]:
+        """Return all nodes in topological (execution) order.
+
+        Each :class:`NodeInfo` carries the node's ID, kind, predecessor ..
+        Useful for introspection, UI visualisation, and documentation.
+        """
+        return self._inner.iter_nodes()
 
 
 class ForkBuilder:

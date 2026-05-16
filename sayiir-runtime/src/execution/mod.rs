@@ -45,5 +45,6 @@ pub use executors::{
 
 // ── lifecycle ───────────────────────────────────────────────────────────
 pub use lifecycle::{
-    ResumeOutcome, finalize_execution, get_resume_input, prepare_resume, prepare_run,
+    PrepareRunOutcome, ResumeOutcome, check_existing_instance, finalize_execution,
+    get_resume_input, prepare_resume, prepare_run,
 };

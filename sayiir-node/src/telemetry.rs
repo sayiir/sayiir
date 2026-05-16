@@ -1,5 +1,7 @@
 //! OpenTelemetry tracing subscriber setup for Node.js bindings.
 
+#![allow(dead_code)] // Functions exposed via #[napi] for N-API runtime
+
 use napi_derive::napi;
 
 /// Initialize the tracing subscriber.

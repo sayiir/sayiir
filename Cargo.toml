@@ -15,7 +15,7 @@ resolver = "2"
 exclude = ["examples/hello-world-rs", "examples/video-pipeline-rs"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Yacine Bouraoui <ybsoft2011@live.com>"]
 edition = "2024"
 license = "MIT"
@@ -31,13 +31,13 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
-sayiir-core = { version = "0.3.1", path = "sayiir-core", default-features = false }
-sayiir-persistence = { version = "0.3.1", path = "sayiir-persistence" }
-sayiir-runtime = { version = "0.3.1", path = "sayiir-runtime", default-features = false }
-sayiir-postgres = { version = "0.3.1", path = "sayiir-postgres" }
-sayiir-d1 = { version = "0.3.1", path = "sayiir-d1" }
-sayiir-cloudflare = { version = "0.3.1", path = "sayiir-cloudflare" }
-sayiir-macros = { version = "0.3.1", path = "sayiir-macros" }
+sayiir-core = { version = "0.4.0", path = "sayiir-core", default-features = false }
+sayiir-persistence = { version = "0.4.0", path = "sayiir-persistence" }
+sayiir-runtime = { version = "0.4.0", path = "sayiir-runtime", default-features = false }
+sayiir-postgres = { version = "0.4.0", path = "sayiir-postgres" }
+sayiir-d1 = { version = "0.4.0", path = "sayiir-d1" }
+sayiir-cloudflare = { version = "0.4.0", path = "sayiir-cloudflare" }
+sayiir-macros = { version = "0.4.0", path = "sayiir-macros" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",

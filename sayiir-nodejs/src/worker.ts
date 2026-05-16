@@ -33,6 +33,8 @@ import { parseDuration } from "./duration.js";
 export interface WorkerOptions {
   pollInterval?: Duration;
   claimTtl?: Duration;
+  /** Affinity tags for this worker. When set, the worker only picks up tasks whose tags are a subset of these tags. */
+  tags?: string[];
 }
 
 /** Handle for controlling a running worker. */
@@ -48,32 +50,6 @@ export class WorkerHandle {
   /** Request a graceful shutdown. */
   shutdown(): void {
     this._native.shutdown();
-  }
-
-  /** Cancel a workflow via the worker's backend. */
-  cancelWorkflow(
-    instanceId: string,
-    opts?: { reason?: string; cancelledBy?: string },
-  ): void {
-    this._native.cancelWorkflow(instanceId, opts?.reason, opts?.cancelledBy);
-  }
-
-  /** Pause a workflow via the worker's backend. */
-  pauseWorkflow(
-    instanceId: string,
-    opts?: { reason?: string; pausedBy?: string },
-  ): void {
-    this._native.pauseWorkflow(instanceId, opts?.reason, opts?.pausedBy);
-  }
-
-  /** Unpause a workflow via the worker's backend. */
-  unpauseWorkflow(instanceId: string): void {
-    this._native.unpauseWorkflow(instanceId);
-  }
-
-  /** Send a signal to a workflow via the worker's backend. */
-  sendSignal(instanceId: string, signalName: string, payload: unknown): void {
-    this._native.sendSignal(instanceId, signalName, JSON.stringify(payload));
   }
 }
 
@@ -145,12 +121,15 @@ export class Worker {
       ? parseDuration(this.options.claimTtl)
       : undefined;
 
+    const tags = this.options.tags;
+
     if (this.backend instanceof InMemoryBackend) {
       return native.NapiWorker.withInMemory(
         this.workerId,
         this.backend._inner,
         pollMs,
         claimMs,
+        tags,
       );
     }
 
@@ -160,6 +139,7 @@ export class Worker {
         this.backend._inner,
         pollMs,
         claimMs,
+        tags,
       );
     }
 

@@ -1,0 +1,281 @@
+---
+title: What's New in v0.4
+description: User-facing changes in Sayiir v0.4 — WorkflowClient for idempotent submission and centralized lifecycle control, breaking changes to WorkerHandle and CheckpointingRunner.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+<Aside type="caution">
+Sayiir v0.4 includes **breaking changes**. The `WorkerHandle` no longer provides lifecycle methods (cancel, pause, unpause, signal). Use the new `WorkflowClient` instead. See [migration](#migration) below.
+</Aside>
+
+---
+
+## New features
+
+### WorkflowClient
+
+A new `WorkflowClient` centralizes all workflow lifecycle operations — submit, cancel, pause, unpause, send signal, and status — in a single, standalone class. Unlike `run_durable_workflow()` or `CheckpointingRunner.run()`, the client does **not** execute tasks. It only creates snapshots and stores signals. A `Worker` (or `CheckpointingRunner.resume()`) picks up the work.
+
+This is the recommended API for the distributed model where submissions and lifecycle control happen in a different process from execution (e.g. a web server submitting workflows that workers execute).
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import WorkflowClient, PostgresBackend
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+client = WorkflowClient(backend)
+
+# Submit a workflow — a worker will pick it up
+status = client.submit(workflow, "order-42", {"items": [1, 2, 3]})
+
+# Lifecycle operations
+client.cancel("order-42", reason="Out of stock", cancelled_by="system")
+client.pause("order-42", reason="Maintenance window")
+client.unpause("order-42")
+client.send_signal("order-42", "approval", {"approved": True})
+status = client.status("order-42")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { WorkflowClient, PostgresBackend } from "sayiir";
+
+const backend = PostgresBackend.connect(process.env.DATABASE_URL!);
+const client = new WorkflowClient(backend);
+
+// Submit a workflow — a worker will pick it up
+const status = client.submit(workflow, "order-42", { items: [1, 2, 3] });
+
+// Lifecycle operations
+client.cancel("order-42", { reason: "Out of stock", cancelledBy: "system" });
+client.pause("order-42", { reason: "Maintenance window" });
+client.unpause("order-42");
+client.sendSignal("order-42", "approval", { approved: true });
+const current = client.status("order-42");
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_runtime::WorkflowClient;
+
+let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+let client = WorkflowClient::new(backend);
+
+// Submit a workflow — a worker will pick it up
+let (status, output) = client.submit(&workflow, "order-42", input).await?;
+
+// Lifecycle operations
+client.cancel("order-42", Some("Out of stock".into()), Some("system".into())).await?;
+client.pause("order-42", Some("Maintenance window".into()), None).await?;
+client.unpause("order-42").await?;
+client.send_event("order-42", "approval", payload).await?;
+let status = client.status("order-42").await?;
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+### Idempotent workflow submission
+
+`WorkflowClient` supports **conflict policies** that control what happens when you submit a workflow with an `instance_id` that already exists. This enables safe retries and at-most-once semantics without application-level deduplication.
+
+| Policy (Python/Rust) | Policy (Node.js) | Behavior |
+|----------------------|-------------------|-----------|
+| `"fail"` (default) | `"fail"` (default) | Raises an error if the instance already exists |
+| `"use_existing"` | `"useExisting"` | Returns the existing instance's current status — no new work is created |
+| `"terminate_existing"` | `"terminateExisting"` | Cancels the existing instance and creates a fresh one |
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+# Safe retries — submitting the same ID twice returns the existing status
+client = WorkflowClient(backend, conflict_policy="use_existing")
+status = client.submit(workflow, "order-42", input)  # creates
+status = client.submit(workflow, "order-42", input)  # returns existing
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+// Safe retries — submitting the same ID twice returns the existing status
+const client = new WorkflowClient(backend, { conflictPolicy: "useExisting" });
+const s1 = client.submit(workflow, "order-42", input); // creates
+const s2 = client.submit(workflow, "order-42", input); // returns existing
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_core::workflow::ConflictPolicy;
+
+let client = WorkflowClient::new(backend)
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+
+let (s1, _) = client.submit(&workflow, "order-42", input).await?; // creates
+let (s2, _) = client.submit(&workflow, "order-42", input).await?; // returns existing
+```
+
+</TabItem>
+</Tabs>
+
+This is particularly useful for:
+
+- **HTTP handlers** — safely retry a `POST /workflows` endpoint without creating duplicates
+- **Event-driven systems** — process the same event multiple times without side effects
+- **Cron jobs** — ensure only one instance per scheduled run
+
+---
+
+### Task prioritization
+
+Tasks now support a `priority` parameter (1–5) that controls execution order in distributed workers. Lower values are picked up first. The default priority is 3 (Normal).
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+@task(priority=1)  # Critical — picked up first
+def charge_payment(order: dict) -> dict:
+    return process_payment(order)
+
+@task(priority=4)  # Low — runs when higher-priority work is done
+def generate_report(data: dict) -> dict:
+    return build_report(data)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+const chargePayment = task("charge-payment", processPayment, { priority: 1 });
+const generateReport = task("generate-report", buildReport, { priority: 4 });
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+#[task(id = "charge_payment", priority = 1)]
+async fn charge_payment(order: Order) -> Result<Receipt, BoxError> {
+    process_payment(order).await
+}
+```
+
+</TabItem>
+</Tabs>
+
+**Aging** prevents starvation: the longer a task waits, the more its effective priority improves. See [Task Priority](/guides/distributed-workers/#task-priority) for details.
+
+---
+
+## New exports
+
+**Python** — new import from `sayiir`:
+`WorkflowClient`
+
+**Node.js** — new exports from `"sayiir"`:
+`WorkflowClient`, `WorkflowClientOptions`
+
+---
+
+## Breaking changes
+
+### WorkerHandle: lifecycle methods removed
+
+The following methods have been removed from `WorkerHandle` across all languages:
+
+| Removed method | Replacement |
+|---------------|-------------|
+| `handle.cancel_workflow()` | `client.cancel()` |
+| `handle.pause_workflow()` | `client.pause()` |
+| `handle.unpause_workflow()` | `client.unpause()` |
+| `handle.send_signal()` | `client.send_signal()` |
+
+`WorkerHandle` now only provides `shutdown()` (and `join()` in Python/Rust) for worker lifecycle control.
+
+**Rationale:** Lifecycle operations are not inherently tied to a worker — they go through the backend. Having them on `WorkerHandle` created a confusing coupling and prevented lifecycle control from processes that don't run workers (e.g. web servers, CLI tools).
+
+### Rust: CheckpointingRunner lifecycle methods removed
+
+The following methods have been removed from `CheckpointingRunner`:
+- `cancel()`
+- `pause()`
+- `unpause()`
+
+Use `WorkflowClient::from_shared(runner.backend().clone())` to perform lifecycle operations alongside a runner.
+
+### Rust crate versions
+
+Update your `Cargo.toml` dependencies from `0.3` to `0.4`:
+
+| Crate | Version |
+|-------|---------|
+| `sayiir-runtime` | `0.4` |
+| `sayiir-persistence` | `0.4` |
+| `sayiir-postgres` | `0.4` |
+
+---
+
+## Migration
+
+### Python
+
+```diff
+- handle = worker.start([workflow])
+- handle.cancel_workflow("order-42", reason="Out of stock")
+- handle.pause_workflow("order-42")
+- handle.unpause_workflow("order-42")
+- handle.send_signal("order-42", "approval", {"ok": True})
++ from sayiir import WorkflowClient
++ client = WorkflowClient(backend)
++ handle = worker.start([workflow])
++ client.cancel("order-42", reason="Out of stock")
++ client.pause("order-42")
++ client.unpause("order-42")
++ client.send_signal("order-42", "approval", {"ok": True})
+```
+
+### Node.js
+
+```diff
+- const handle = worker.start();
+- handle.cancelWorkflow("order-42", { reason: "Out of stock" });
+- handle.pauseWorkflow("order-42");
+- handle.unpauseWorkflow("order-42");
+- handle.sendSignal("order-42", "approval", { ok: true });
++ import { WorkflowClient } from "sayiir";
++ const client = new WorkflowClient(backend);
++ const handle = worker.start();
++ client.cancel("order-42", { reason: "Out of stock" });
++ client.pause("order-42");
++ client.unpause("order-42");
++ client.sendSignal("order-42", "approval", { ok: true });
+```
+
+### Rust
+
+```diff
+- runner.cancel("id", reason, by).await?;
+- runner.pause("id", reason, by).await?;
+- runner.unpause("id").await?;
++ let client = WorkflowClient::from_shared(runner.backend().clone());
++ client.cancel("id", reason, by).await?;
++ client.pause("id", reason, by).await?;
++ client.unpause("id").await?;
+```
+
+<Aside type="tip">
+The standalone convenience functions (`cancel_workflow`, `pause_workflow`, `unpause_workflow`, `send_signal` in Python and Node.js) are unchanged and continue to work as before.
+</Aside>

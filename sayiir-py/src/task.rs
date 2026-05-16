@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use std::time::Duration;
 
 use sayiir_core::context::TaskExecutionContext;
+use sayiir_core::priority::Priority;
 use sayiir_core::task::{RetryPolicy, TaskMetadata};
 
 /// Python-exposed retry policy.
@@ -59,12 +60,15 @@ pub struct PyTaskMetadata {
     pub tags: Option<Vec<String>>,
     #[pyo3(get, set)]
     pub version: Option<String>,
+    /// Execution priority (1 = Critical … 5 = Minimal). `None` defaults to Normal (3).
+    #[pyo3(get, set)]
+    pub priority: Option<u8>,
 }
 
 #[pymethods]
 impl PyTaskMetadata {
     #[new]
-    #[pyo3(signature = (display_name=None, description=None, timeout_secs=None, retries=None, tags=None, version=None))]
+    #[pyo3(signature = (display_name=None, description=None, timeout_secs=None, retries=None, tags=None, version=None, priority=None))]
     fn new(
         display_name: Option<String>,
         description: Option<String>,
@@ -72,6 +76,7 @@ impl PyTaskMetadata {
         retries: Option<PyRetryPolicy>,
         tags: Option<Vec<String>>,
         version: Option<String>,
+        priority: Option<u8>,
     ) -> Self {
         Self {
             display_name,
@@ -80,6 +85,7 @@ impl PyTaskMetadata {
             retries,
             tags,
             version,
+            priority,
         }
     }
 }
@@ -93,6 +99,7 @@ impl From<PyTaskMetadata> for TaskMetadata {
             retries: py.retries.map(Into::into),
             tags: py.tags.unwrap_or_default(),
             version: py.version,
+            priority: py.priority.and_then(Priority::from_u8),
         }
     }
 }
@@ -155,6 +162,7 @@ impl From<TaskExecutionContext> for PyTaskExecutionContext {
                 }),
                 tags: Some(ctx.metadata.tags),
                 version: ctx.metadata.version,
+                priority: ctx.metadata.priority.map(Priority::as_u8),
             },
             workflow_metadata_json: ctx.workflow_metadata_json.map(|s| s.to_string()),
         }

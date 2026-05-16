@@ -211,6 +211,33 @@ let pipeline = workflow! {
 }.unwrap();
 ```
 
+### Sharing dependencies across parent and child
+
+When child workflows contain `#[task]` functions with `#[inject]` parameters, build all the workflows with the same `Deps` container so the shared services flow through automatically:
+
+```rust
+use sayiir_runtime::prelude::*;
+
+let deps = Deps::builder()
+    .insert(Arc::new(StripeClient::new("sk_test_...")))
+    .insert(Arc::new(Mailer::new(/* … */)))
+    .build();
+
+let billing = workflow! {
+    name: "billing",
+    deps: &deps,
+    steps: [validate, charge]
+}.unwrap();
+
+let pipeline = workflow! {
+    name: "full-pipeline",
+    deps: &deps,                       // same container — child + parent agree
+    steps: [ingest, flow billing, notify]
+}.unwrap();
+```
+
+You only construct the services once — `from_deps` resolves them by type into each task instance, and `verify_deps` fails the build immediately if either workflow forgets to register a dependency.
+
 </TabItem>
 </Tabs>
 
@@ -226,3 +253,83 @@ Workflow composition is useful when:
 :::tip[Keep task IDs unique across parent and child]
 The engine checks for duplicate task IDs across the merged workflow tree. If a parent and child both define a task with the same ID, the build will fail. Use distinct task IDs or namespace them (e.g., `billing.validate` vs `order.validate`).
 :::
+
+## Reusable Task Libraries
+
+Beyond inlining child workflows, you can build standalone **task libraries** — reusable collections of tasks that you merge into any workflow or worker. This is useful when multiple workflows share the same tasks but don't share the same pipeline structure.
+
+`TaskRegistry::register_from_deps::<T, C>(codec, &deps)` builds and registers a `#[task]` in one call. Pair it with a shared `Deps` container so library functions take services by type rather than threading each service through positional arguments:
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+// billing_tasks crate — define tasks with the macro
+#[task(id = "charge", retries = 2, timeout = "30s")]
+async fn charge(
+    order: Order,
+    #[inject] stripe: Arc<StripeClient>,
+) -> Result<Receipt, BoxError> {
+    stripe.charge(&order).await
+}
+
+#[task(id = "refund", retries = 2, timeout = "30s")]
+async fn refund(
+    order: Order,
+    #[inject] stripe: Arc<StripeClient>,
+) -> Result<Refund, BoxError> {
+    stripe.refund(&order).await
+}
+
+/// Build a registry containing all billing tasks.
+pub fn billing_tasks(
+    codec: Arc<JsonCodec>,
+    deps: &Deps,
+) -> Result<TaskRegistry, Vec<MissingDep>> {
+    let mut reg = TaskRegistry::new();
+    reg.register_from_deps::<ChargeTask, _>(codec.clone(), deps)?;
+    reg.register_from_deps::<RefundTask, _>(codec, deps)?;
+    Ok(reg)
+}
+```
+
+```rust
+// notification_tasks crate
+#[task(id = "send_email", retries = 3, timeout = "10s")]
+async fn send_email(
+    data: EmailPayload,
+    #[inject] mailer: Arc<Mailer>,
+) -> Result<EmailResult, BoxError> {
+    mailer.send(&data).await
+}
+
+pub fn notification_tasks(
+    codec: Arc<JsonCodec>,
+    deps: &Deps,
+) -> Result<TaskRegistry, Vec<MissingDep>> {
+    let mut reg = TaskRegistry::new();
+    reg.register_from_deps::<SendEmailTask, _>(codec, deps)?;
+    Ok(reg)
+}
+```
+
+`register_from_deps` calls `DepsInjectable::verify_deps` first, so a missing `Arc<StripeClient>` or `Arc<Mailer>` is reported as `Err(Vec<MissingDep>)` before any task is added — the registry is never left partially populated.
+
+Then in your application, build one shared `Deps` and merge the library registries:
+
+```rust
+// application — combine libraries for a worker
+let codec = Arc::new(JsonCodec);
+let deps = Deps::builder()
+    .insert(Arc::new(StripeClient::new("sk_live_...")))
+    .insert(Arc::new(Mailer::new(/* … */)))
+    .build();
+
+let mut registry = TaskRegistry::new();
+registry.merge(billing_tasks(codec.clone(), &deps)?);
+registry.merge(notification_tasks(codec, &deps)?);
+
+let worker = PooledWorker::new("worker-1", backend, registry);
+```
+
+On ID collisions, the parent registry wins — existing entries are not overwritten. This lets you layer overrides on top of library defaults.

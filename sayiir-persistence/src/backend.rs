@@ -252,11 +252,51 @@ pub trait TaskClaimStore: Send + Sync {
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Find available tasks across all workflow instances.
+    ///
+    /// `aging_interval` controls starvation prevention: lower-priority tasks
+    /// that have been waiting longer than this interval effectively gain one
+    /// priority level per interval elapsed. Pass `Duration::MAX` to disable aging.
+    ///
+    /// # Constraints
+    ///
+    /// `aging_interval` **must be positive** (non-zero). Implementations may
+    /// divide by this value; passing zero or a negative duration can cause
+    /// division-by-zero or nonsensical ordering. Implementations should
+    /// defensively clamp to a minimum of 1 second, but callers must not rely
+    /// on this.
     fn find_available_tasks(
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: Duration,
+        worker_tags: &[String],
     ) -> impl Future<Output = Result<Vec<AvailableTask>, BackendError>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// TaskResultStore — opt-in, like TaskClaimStore
+// ---------------------------------------------------------------------------
+
+/// Read-only access to individual task results from a workflow instance.
+///
+/// This trait allows retrieving completed task outputs (intermediate step
+/// results) without loading the full snapshot. For in-progress, cancelled, or
+/// paused workflows the results come straight from the current snapshot. For
+/// completed or failed workflows the results are recovered from history (e.g.
+/// the Postgres snapshot history table) or from an in-memory cache.
+///
+/// Implementations must also implement [`SnapshotStore`] because the current
+/// snapshot is the primary source of truth for non-terminal states.
+pub trait TaskResultStore: SnapshotStore {
+    /// Load a single task result by task ID.
+    ///
+    /// Returns `Ok(Some(bytes))` if the task completed, `Ok(None)` if the task
+    /// was never executed or is not found, and `Err` on I/O failure.
+    fn load_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> impl Future<Output = Result<Option<bytes::Bytes>, BackendError>> + Send;
 }
 
 // ---------------------------------------------------------------------------

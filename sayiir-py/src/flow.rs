@@ -11,7 +11,38 @@ use std::sync::Arc;
 use sayiir_core::continuation_builder::FlowBuilder;
 use sayiir_core::workflow::WorkflowContinuation;
 
-use crate::task::PyTaskMetadata;
+use crate::task::{PyRetryPolicy, PyTaskMetadata};
+
+/// Metadata about a single node in the workflow DAG.
+#[pyclass(frozen, name = "NodeInfo")]
+pub struct PyNodeInfo {
+    /// Unique node identifier.
+    #[pyo3(get)]
+    pub id: String,
+    /// Node kind: ``"task"``, ``"fork"``, ``"delay"``, ``"await_signal"``,
+    /// ``"branch"``, ``"loop"``, or ``"child_workflow"``.
+    #[pyo3(get)]
+    pub kind: String,
+    /// ID of the preceding node, or ``None`` for the root.
+    #[pyo3(get)]
+    pub predecessor_id: Option<String>,
+    /// Timeout in seconds (task timeout, delay duration, or signal timeout).
+    #[pyo3(get)]
+    pub timeout_secs: Option<f64>,
+    /// Retry policy (tasks only).
+    #[pyo3(get)]
+    pub retry_policy: Option<PyRetryPolicy>,
+    /// Execution priority 1–5 (tasks only).
+    #[pyo3(get)]
+    pub priority: Option<u8>,
+}
+
+#[pymethods]
+impl PyNodeInfo {
+    fn __repr__(&self) -> String {
+        format!("NodeInfo(id='{}', kind='{}')", self.id, self.kind)
+    }
+}
 
 /// A Python-exposed workflow.
 #[pyclass]
@@ -37,6 +68,27 @@ impl PyWorkflow {
     #[getter]
     fn metadata_json(&self) -> Option<&str> {
         self.metadata_json.as_deref()
+    }
+
+    /// Return all nodes in topological (execution) order.
+    ///
+    /// Each :class:`NodeInfo` carries the node's ID, kind, predecessor ..
+    fn iter_nodes(&self) -> Vec<PyNodeInfo> {
+        self.continuation
+            .iter_nodes()
+            .map(|n| PyNodeInfo {
+                id: n.id.to_owned(),
+                kind: n.kind.as_ref().to_owned(),
+                predecessor_id: n.predecessor_id.map(str::to_owned),
+                timeout_secs: n.timeout.map(|d| d.as_secs_f64()),
+                retry_policy: n.retry_policy.map(|r| PyRetryPolicy {
+                    max_retries: r.max_retries,
+                    initial_delay_secs: r.initial_delay.as_secs_f64(),
+                    backoff_multiplier: f64::from(r.backoff_multiplier),
+                }),
+                priority: n.priority,
+            })
+            .collect()
     }
 }
 

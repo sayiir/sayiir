@@ -1,17 +1,17 @@
-//! Cloudflare D1 (`SQLite`) persistence backend for the Sayiir workflow engine.
+//! `SQLite` / Cloudflare D1 persistence backend for the Sayiir workflow engine.
 //!
-//! This crate provides [`D1Backend`], an implementation of
+//! This crate provides [`SQLiteBackend`], a generic implementation of
 //! [`SnapshotStore`](sayiir_persistence::SnapshotStore) and
-//! [`SignalStore`](sayiir_persistence::SignalStore) backed by Cloudflare D1
-//! via `wasm-bindgen` FFI bindings.
+//! [`SignalStore`](sayiir_persistence::SignalStore) built on top of `sqlx`.
 //!
-//! # Features
+//! The same backend powers two targets:
 //!
-//! - **WASM-native**: Targets `wasm32-unknown-unknown` with zero tokio dependency.
-//! - **JSON codec**: Snapshots are serialized as JSON into D1 `BLOB` columns.
-//! - **Snapshot history**: Every checkpoint is appended to an immutable history
-//!   table for debugging and auditing.
-//! - **Signal support**: Cancel, pause, and external event buffering.
+//! - **`sqlite` feature** — native `sqlx::SqlitePool` (tokio runtime)
+//! - **`d1` feature** — Cloudflare D1 via `sqlx-d1::D1Connection` (WASM)
+//!
+//! Because both share the `sqlx::Executor` abstraction, the full `sqlx`
+//! query API is usable directly from downstream crates against either
+//! connection — see the re-exports below.
 //!
 //! # D1 / `SQLite` adaptations
 //!
@@ -24,20 +24,15 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use sayiir_d1::D1Backend;
-//! use sayiir_persistence::SnapshotStore;
-//! use sayiir_core::snapshot::WorkflowSnapshot;
+//! use sayiir_d1::SQLiteBackend;
 //!
-//! // `db` is a D1Database binding from the Worker env
-//! let backend = D1Backend::new(db).await?;
+//! // sqlite feature:
+//! let backend = SQLiteBackend::connect("sqlite://sayiir.db?mode=rwc").await?;
 //!
-//! let snapshot = WorkflowSnapshot::new("order-123".into(), "hash-abc".into());
-//! backend.save_snapshot(&snapshot).await?;
-//!
-//! let loaded = backend.load_snapshot("order-123").await?;
+//! // d1 feature (Cloudflare Workers):
+//! // let backend = SQLiteBackend::connect(d1_database).await?;
 //! ```
 
-#![cfg(target_arch = "wasm32")]
 #![deny(clippy::pedantic)]
 #![deny(
     clippy::unwrap_used,
@@ -52,13 +47,16 @@
 )]
 
 mod backend;
-mod bindings;
-mod error;
 mod helpers;
-mod js_future;
 mod schema;
 mod signal_store;
 mod snapshot_store;
 
-pub use backend::D1Backend;
-pub use bindings::D1Database;
+pub use backend::SQLiteBackend;
+
+/// Re-export of `sqlx` so downstream crates can build typed queries against
+/// either the sqlite or D1 connection without depending on `sqlx` directly.
+pub use sqlx;
+
+#[cfg(feature = "d1")]
+pub use {sqlx_d1, worker, worker::D1Database};

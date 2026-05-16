@@ -362,6 +362,16 @@ def process_payment(order: dict) -> dict:
 - **`InMemoryBackend()`** — In-memory storage for development and testing (default).
 - **`PostgresBackend(url)`** — PostgreSQL persistence. Auto-runs migrations on first connect.
 
+### WorkflowClient (distributed)
+
+- **`WorkflowClient(backend, *, conflict_policy=None)`** — Client for submitting and controlling workflow instances without executing tasks. Used with `Worker` for the distributed model.
+- **`.submit(workflow, instance_id, input)`** — Submit a workflow for execution. Returns a `WorkflowStatus`.
+- **`.cancel(instance_id, *, reason=None, cancelled_by=None)`** — Cancel a workflow instance.
+- **`.pause(instance_id, *, reason=None, paused_by=None)`** — Pause a workflow instance.
+- **`.unpause(instance_id)`** — Unpause a paused workflow.
+- **`.send_signal(instance_id, signal_name, payload)`** — Send an external signal.
+- **`.status(instance_id)`** — Get the current status. Returns a `WorkflowStatus`.
+
 ## Architecture
 
 ```mermaid

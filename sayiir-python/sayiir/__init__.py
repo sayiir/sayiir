@@ -5,6 +5,7 @@ All orchestration runs in Rust. Python provides task implementations.
 
 from ._sayiir import (
     BackendError,
+    InstanceAlreadyExistsError,
     TaskError,
     WorkflowError,
     get_task_context,
@@ -30,19 +31,22 @@ from .executor import (
     send_signal,
     unpause_workflow,
 )
-from .flow import BranchBuilder, Flow, ForkBuilder, Workflow
+from .flow import BranchBuilder, Flow, ForkBuilder, NodeInfo, Workflow
 from .loop_result import LoopResult, OnMax
 from .worker import Worker, WorkerHandle
+from .workflow_client import WorkflowClient
 
 __all__ = [
     "BackendError",
     "BranchBuilder",
+    "InstanceAlreadyExistsError",
     "DurableEngine",
     "Flow",
     "FlowBuilder",
     "ForkBuilder",
     "LoopResult",
     "OnMax",
+    "NodeInfo",
     "InMemoryBackend",
     "PostgresBackend",
     "RetryPolicy",
@@ -65,8 +69,9 @@ __all__ = [
     "task",
     "Worker",
     "WorkerHandle",
+    "WorkflowClient",
     "init_tracing",
     "shutdown_tracing",
 ]
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"

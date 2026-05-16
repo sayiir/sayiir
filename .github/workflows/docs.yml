@@ -1,6 +1,8 @@
 name: Deploy Docs
 
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
   workflow_dispatch:
@@ -16,6 +18,9 @@ concurrency:
 
 jobs:
   build:
+    if: >-
+      github.event_name != 'push' ||
+      contains(github.event.head_commit.message, 'update_docs:')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -2,19 +2,94 @@
 
 use bytes::Bytes;
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot, WorkflowSnapshotState};
-use sayiir_core::workflow::WorkflowStatus;
+use sayiir_core::snapshot::{
+    ExecutionPosition, SignalKind, TaskHint, WorkflowSnapshot, WorkflowSnapshotState,
+};
+use sayiir_core::workflow::{ConflictPolicy, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 
 use super::helpers::ResumeParkedPosition;
 use crate::error::RuntimeError;
 
-/// Prepare a fresh workflow run: create initial snapshot and save it.
+/// Outcome of [`prepare_run`] when the conflict policy allows early return.
+#[derive(Debug)]
+pub enum PrepareRunOutcome {
+    /// A fresh snapshot was created — proceed with execution.
+    Fresh(Box<WorkflowSnapshot>),
+    /// The instance already exists and the policy says to reuse it.
+    ExistingStatus(WorkflowStatus, Option<Bytes>),
+}
+
+/// Check for an existing instance before encoding input.
 ///
-/// Returns the snapshot and encoded input ready for execution.
+/// For **`Fail`** and **`UseExisting`** policies, this avoids unnecessary codec
+/// work by checking the backend before the caller serialises the workflow input.
+///
+/// Returns `Ok(Some((status, output)))` when the caller should return early
+/// (instance exists and the policy says to reuse it, or the policy rejects the
+/// duplicate).  Returns `Ok(None)` when the caller should proceed to encode
+/// input and call [`prepare_run`].
+///
+/// **`TerminateExisting`** always returns `Ok(None)` — the actual cleanup is
+/// deferred to [`prepare_run`].
 ///
 /// # Errors
-/// Returns an error if saving the initial snapshot fails.
+/// Returns [`RuntimeError::InstanceAlreadyExists`] for `Fail` when the
+/// instance already exists, [`WorkflowError::DefinitionMismatch`] when the
+/// existing snapshot has a different definition hash, or propagates backend
+/// I/O errors.
+pub async fn check_existing_instance<B>(
+    instance_id: &str,
+    definition_hash: &str,
+    backend: &B,
+    conflict_policy: ConflictPolicy,
+) -> Result<Option<(WorkflowStatus, Option<Bytes>)>, RuntimeError>
+where
+    B: SnapshotStore,
+{
+    if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
+        return Ok(None);
+    }
+    match backend.load_snapshot(instance_id).await {
+        Ok(existing) => {
+            if existing.definition_hash != definition_hash {
+                return Err(WorkflowError::DefinitionMismatch {
+                    expected: definition_hash.to_string(),
+                    found: existing.definition_hash.clone(),
+                }
+                .into());
+            }
+            match conflict_policy {
+                ConflictPolicy::Fail => {
+                    Err(RuntimeError::InstanceAlreadyExists(instance_id.to_string()))
+                }
+                ConflictPolicy::UseExisting => {
+                    let output = existing.state.completed_output().cloned();
+                    let status = existing.state.as_status();
+                    Ok(Some((status, output)))
+                }
+                ConflictPolicy::TerminateExisting => unreachable!(),
+            }
+        }
+        Err(sayiir_persistence::BackendError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Prepare a fresh workflow run: create initial snapshot and save it.
+///
+/// When called after [`check_existing_instance`] (the recommended path), set
+/// `prechecked` to `true` to skip the redundant `load_snapshot`.  The only
+/// policy that still needs a backend read is **`TerminateExisting`** (cleanup
+/// of the old snapshot), which is handled regardless of the flag.
+///
+/// When `prechecked` is `false` the function performs the full existence check
+/// internally as a safety net — this is useful for callers that cannot
+/// guarantee a prior call to `check_existing_instance`.
+///
+/// # Errors
+/// Returns an error if saving the initial snapshot fails or the conflict policy
+/// rejects the duplicate.
 #[tracing::instrument(
     name = "lifecycle.prepare_run",
     skip(input_bytes, backend),
@@ -24,13 +99,77 @@ pub async fn prepare_run<B>(
     instance_id: String,
     definition_hash: String,
     input_bytes: Bytes,
-    first_task_id: String,
+    first_task: TaskHint,
     backend: &B,
-) -> Result<WorkflowSnapshot, RuntimeError>
+    conflict_policy: ConflictPolicy,
+    prechecked: bool,
+) -> Result<PrepareRunOutcome, RuntimeError>
 where
-    B: SnapshotStore,
+    B: SnapshotStore + SignalStore,
 {
     tracing::debug!("preparing fresh workflow run");
+
+    // When prechecked == true the caller already verified via
+    // check_existing_instance that the instance doesn't exist (Fail /
+    // UseExisting) or that cleanup is needed (TerminateExisting).  We only
+    // need the backend round-trip for TerminateExisting cleanup.
+    if prechecked {
+        if matches!(conflict_policy, ConflictPolicy::TerminateExisting) {
+            // Best-effort cleanup — if nothing exists the deletes are no-ops.
+            match backend.load_snapshot(&instance_id).await {
+                Ok(_existing) => {
+                    tracing::info!("terminating existing instance before restart");
+                    backend.delete_snapshot(&instance_id).await?;
+                    backend
+                        .clear_signal(&instance_id, SignalKind::Cancel)
+                        .await?;
+                    backend
+                        .clear_signal(&instance_id, SignalKind::Pause)
+                        .await?;
+                }
+                Err(sayiir_persistence::BackendError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    } else {
+        // Full safety-net path — check for an existing snapshot.
+        match backend.load_snapshot(&instance_id).await {
+            Ok(existing) => {
+                if existing.definition_hash != definition_hash {
+                    return Err(WorkflowError::DefinitionMismatch {
+                        expected: definition_hash,
+                        found: existing.definition_hash.clone(),
+                    }
+                    .into());
+                }
+                match conflict_policy {
+                    ConflictPolicy::Fail => {
+                        return Err(RuntimeError::InstanceAlreadyExists(instance_id));
+                    }
+                    ConflictPolicy::UseExisting => {
+                        let output = existing.state.completed_output().cloned();
+                        let status = existing.state.as_status();
+                        return Ok(PrepareRunOutcome::ExistingStatus(status, output));
+                    }
+                    ConflictPolicy::TerminateExisting => {
+                        tracing::info!("terminating existing instance before restart");
+                        backend.delete_snapshot(&instance_id).await?;
+                        backend
+                            .clear_signal(&instance_id, SignalKind::Cancel)
+                            .await?;
+                        backend
+                            .clear_signal(&instance_id, SignalKind::Pause)
+                            .await?;
+                    }
+                }
+            }
+            Err(sayiir_persistence::BackendError::NotFound(_)) => {
+                // No existing snapshot — proceed normally
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
     let mut snapshot =
         WorkflowSnapshot::with_initial_input(instance_id, definition_hash, input_bytes);
     #[cfg(feature = "otel")]
@@ -38,10 +177,11 @@ where
         snapshot.trace_parent = crate::trace_context::current_trace_parent();
     }
     snapshot.update_position(ExecutionPosition::AtTask {
-        task_id: first_task_id,
+        task_id: first_task.id.clone(),
     });
+    snapshot.set_task_hint(&first_task);
     backend.save_snapshot(&snapshot).await?;
-    Ok(snapshot)
+    Ok(PrepareRunOutcome::Fresh(Box::new(snapshot)))
 }
 
 /// Prepare to resume a workflow from a saved snapshot.

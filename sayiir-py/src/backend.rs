@@ -110,7 +110,9 @@ pub(crate) use with_backend;
 
 use sayiir_core::snapshot::{SignalKind, SignalRequest, WorkflowSnapshot};
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
-use sayiir_persistence::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
+use sayiir_persistence::{
+    BackendError, SignalStore, SnapshotStore, TaskClaimStore, TaskResultStore,
+};
 
 /// Dispatch macro for trait methods on `BackendKind`.
 macro_rules! dispatch {
@@ -233,7 +235,21 @@ impl TaskClaimStore for BackendKind {
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: chrono::Duration,
+        worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
-        dispatch!(self, |b| b.find_available_tasks(worker_id, limit).await)
+        dispatch!(self, |b| b
+            .find_available_tasks(worker_id, limit, aging_interval, worker_tags)
+            .await)
+    }
+}
+
+impl TaskResultStore for BackendKind {
+    async fn load_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> Result<Option<bytes::Bytes>, BackendError> {
+        dispatch!(self, |b| b.load_task_result(instance_id, task_id).await)
     }
 }

@@ -3,18 +3,19 @@
 mod common;
 
 use common::{ctx, setup};
-use sayiir_core::codec::Encoder;
+use sayiir_core::codec::{Decoder, Encoder};
 use sayiir_core::error::BoxError;
 use sayiir_core::task::BranchOutputs;
 use sayiir_core::workflow::{WorkflowBuilder, WorkflowStatus};
 use sayiir_persistence::{SignalStore, SnapshotStore};
 use sayiir_postgres::PostgresBackend;
-use sayiir_runtime::CheckpointingRunner;
 use sayiir_runtime::serialization::JsonCodec;
+use sayiir_runtime::{
+    CheckpointingRunner, ConflictPolicy, PooledWorker, RuntimeError, WorkflowClient,
+};
 use sqlx::PgPool;
 use std::sync::Arc;
-
-// ─── 1. run_single_task ──────────────────────────────────────────────────────
+use std::time::Duration;
 
 #[tokio::test]
 async fn run_single_task() {
@@ -32,8 +33,6 @@ async fn run_single_task() {
     let snapshot = runner.backend().load_snapshot("inst-1").await.unwrap();
     assert!(snapshot.state.is_completed());
 }
-
-// ─── 2. run_chained_tasks ────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn run_chained_tasks() {
@@ -57,8 +56,6 @@ async fn run_chained_tasks() {
     assert!(snapshot.final_output_bytes().is_some());
 }
 
-// ─── 3. resume_completed_is_noop ─────────────────────────────────────────────
-
 #[tokio::test]
 async fn resume_completed_is_noop() {
     let (_c, backend, _url) = setup().await;
@@ -77,8 +74,6 @@ async fn resume_completed_is_noop() {
     let status = runner.resume(&workflow, "inst-1").await.unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
 }
-
-// ─── 4. resume_after_simulated_crash ─────────────────────────────────────────
 
 #[tokio::test]
 async fn resume_after_simulated_crash() {
@@ -122,8 +117,6 @@ async fn resume_after_simulated_crash() {
     );
 }
 
-// ─── 5. cancel_and_resume ────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn cancel_and_resume() {
     let (_c, backend, _url) = setup().await;
@@ -150,8 +143,9 @@ async fn cancel_and_resume() {
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
-    // Signal cancellation
-    runner
+    // Signal cancellation via WorkflowClient
+    let client = WorkflowClient::from_shared(Arc::clone(runner.backend()));
+    client
         .cancel(
             "inst-cancel",
             Some("testing cancel".into()),
@@ -173,8 +167,6 @@ async fn cancel_and_resume() {
         other => panic!("Expected Cancelled, got {other:?}"),
     }
 }
-
-// ─── 6. pause_unpause_resume ─────────────────────────────────────────────────
 
 #[tokio::test]
 async fn pause_unpause_resume() {
@@ -199,8 +191,9 @@ async fn pause_unpause_resume() {
     });
     runner.backend().save_snapshot(&snapshot).await.unwrap();
 
-    // Request pause
-    runner
+    // Request pause via WorkflowClient
+    let client = WorkflowClient::from_shared(Arc::clone(runner.backend()));
+    client
         .pause("inst-pause", Some("maintenance".into()), Some("ops".into()))
         .await
         .unwrap();
@@ -215,9 +208,8 @@ async fn pause_unpause_resume() {
         other => panic!("Expected Paused, got {other:?}"),
     }
 
-    // Unpause
-    let unpaused = runner.unpause("inst-pause").await.unwrap();
-    assert!(unpaused.state.is_in_progress());
+    // Unpause via WorkflowClient
+    client.unpause("inst-pause").await.unwrap();
 
     // Resume should now continue execution
     let status = runner.resume(&workflow, "inst-pause").await.unwrap();
@@ -226,8 +218,6 @@ async fn pause_unpause_resume() {
         "Expected Completed after unpause, got {status:?}"
     );
 }
-
-// ─── 7. delay_returns_waiting_then_completes ─────────────────────────────────
 
 #[tokio::test]
 async fn delay_returns_waiting_then_completes() {
@@ -268,8 +258,6 @@ async fn delay_returns_waiting_then_completes() {
     assert!(snapshot.state.is_completed());
 }
 
-// ─── 8. fork_join ────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn fork_join() {
     let (_c, backend, _url) = setup().await;
@@ -297,8 +285,6 @@ async fn fork_join() {
     assert!(snapshot.state.is_completed());
     assert!(snapshot.final_output_bytes().is_some());
 }
-
-// ─── 9. task_failure_persists ────────────────────────────────────────────────
 
 #[tokio::test]
 async fn task_failure_persists() {
@@ -733,4 +719,355 @@ async fn same_task_version_allows_resume() {
         .await
         .unwrap();
     assert!(matches!(status, WorkflowStatus::Completed));
+}
+
+// ─── ConflictPolicy tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn run_fail_policy_rejects_duplicate() {
+    let (_c, backend, _url) = setup().await;
+    let runner = CheckpointingRunner::new(backend).with_conflict_policy(ConflictPolicy::Fail);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run succeeds
+    let status = runner.run(&workflow, "inst-dup", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run with same instance_id should fail
+    let err = runner.run(&workflow, "inst-dup", 5u32).await.unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::InstanceAlreadyExists(ref id) if id == "inst-dup"),
+        "expected InstanceAlreadyExists error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn run_use_existing_returns_completed() {
+    let (_c, backend, _url) = setup().await;
+    let backend = backend.clone();
+    let runner =
+        CheckpointingRunner::new(backend.clone()).with_conflict_policy(ConflictPolicy::UseExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run: 5 + 1 = 6
+    let status = runner.run(&workflow, "inst-reuse", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Second run with different input — UseExisting should NOT re-execute
+    let status = runner.run(&workflow, "inst-reuse", 99u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // The stored output should still be 6 (from the first run), not 100
+    let snapshot = backend.load_snapshot("inst-reuse").await.unwrap();
+    let output_bytes = snapshot.state.completed_output().unwrap().clone();
+    let output: u32 = JsonCodec.decode(output_bytes).unwrap();
+    assert_eq!(
+        output, 6,
+        "UseExisting should not re-execute; stored output should remain 6"
+    );
+}
+
+#[tokio::test]
+async fn run_terminate_existing_restarts() {
+    let (_c, backend, _url) = setup().await;
+    let backend = backend.clone();
+    let runner = CheckpointingRunner::new(backend.clone())
+        .with_conflict_policy(ConflictPolicy::TerminateExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First run: 5 + 1 = 6
+    let status = runner.run(&workflow, "inst-restart", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    let snapshot = backend.load_snapshot("inst-restart").await.unwrap();
+    let first_output: u32 = JsonCodec
+        .decode(snapshot.state.completed_output().unwrap().clone())
+        .unwrap();
+    assert_eq!(first_output, 6);
+
+    // Second run with different input — TerminateExisting should re-execute: 10 + 1 = 11
+    let status = runner.run(&workflow, "inst-restart", 10u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    let snapshot = backend.load_snapshot("inst-restart").await.unwrap();
+    let second_output: u32 = JsonCodec
+        .decode(snapshot.state.completed_output().unwrap().clone())
+        .unwrap();
+    assert_eq!(
+        second_output, 11,
+        "TerminateExisting should re-execute with new input; expected 11, got {second_output}"
+    );
+}
+
+// ─── WorkflowClient tests ────────────────────────────────────────────────────
+
+// ─── client: submit creates snapshot ─────────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_creates_snapshot() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    let (status, output) = client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+    assert!(output.is_none());
+
+    // Verify snapshot was created
+    let snapshot = client.backend().load_snapshot("inst-1").await.unwrap();
+    assert!(!snapshot.state.is_completed());
+}
+
+// ─── client: Fail policy rejects duplicate ───────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_fail_policy_rejects_duplicate() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First submit succeeds
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Second submit with default Fail policy should error
+    let result = client.submit(&workflow, "inst-1", 10u32).await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        RuntimeError::InstanceAlreadyExists(_)
+    ));
+}
+
+// ─── client: UseExisting returns status ──────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_use_existing_returns_status() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend).with_conflict_policy(ConflictPolicy::UseExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First submit
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Second submit with UseExisting should return current status
+    let (status, _output) = client.submit(&workflow, "inst-1", 10u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+}
+
+// ─── client: TerminateExisting recreates ─────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_terminate_existing_restarts() {
+    let (_c, backend, _url) = setup().await;
+    let client =
+        WorkflowClient::new(backend).with_conflict_policy(ConflictPolicy::TerminateExisting);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // First submit
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Second submit with TerminateExisting should succeed (recreate)
+    let (status, _output) = client.submit(&workflow, "inst-1", 10u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+}
+
+// ─── client: cancel stores signal ────────────────────────────────────────────
+
+#[tokio::test]
+async fn client_cancel_stores_signal() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::new(backend);
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .build()
+        .unwrap();
+
+    // Submit first
+    client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+
+    // Cancel
+    client
+        .cancel("inst-1", Some("testing".into()), Some("admin".into()))
+        .await
+        .unwrap();
+
+    // Verify signal was stored
+    use sayiir_core::snapshot::SignalKind;
+    let req = client
+        .backend()
+        .get_signal("inst-1", SignalKind::Cancel)
+        .await
+        .unwrap();
+    assert!(req.is_some());
+    assert_eq!(req.unwrap().reason, Some("testing".into()));
+}
+
+// ─── client: submit then runner executes ─────────────────────────────────────
+
+#[tokio::test]
+async fn client_submit_then_runner_executes() {
+    let (_c, backend, _url) = setup().await;
+    let client = WorkflowClient::from_shared(Arc::new(backend));
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("add_one", |i: u32| async move { Ok(i + 1) })
+        .then("double", |i: u32| async move { Ok(i * 2) })
+        .build()
+        .unwrap();
+
+    // Submit via client
+    let (status, _) = client.submit(&workflow, "inst-1", 5u32).await.unwrap();
+    assert!(matches!(status, WorkflowStatus::InProgress));
+
+    // Resume via CheckpointingRunner (simulating what a worker does)
+    let runner = CheckpointingRunner::from_shared(Arc::clone(client.backend()));
+    let status = runner.resume(&workflow, "inst-1").await.unwrap();
+    assert!(matches!(status, WorkflowStatus::Completed));
+
+    // Verify output
+    let snapshot = client.backend().load_snapshot("inst-1").await.unwrap();
+    assert!(snapshot.state.is_completed());
+    let codec = Arc::new(JsonCodec);
+    let output: u32 = codec
+        .decode(snapshot.state.completed_output().unwrap().clone())
+        .unwrap();
+    assert_eq!(output, 12); // (5+1)*2
+}
+
+// ─── multi-worker: two workers collaborate on workflow instances ──────────────
+
+/// Two PooledWorkers running in parallel against the same Postgres backend,
+/// collaboratively processing multiple workflow instances submitted via
+/// WorkflowClient.
+#[tokio::test]
+async fn two_workers_collaborate_on_workflows() {
+    let (_c, _backend, url) = setup().await;
+
+    // Each worker needs its own backend connection (just like production).
+    let backend_w1 = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_w2 = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+    let backend_client = PostgresBackend::<JsonCodec>::connect(&url).await.unwrap();
+
+    let workflow = WorkflowBuilder::new(ctx())
+        .then("step_a", |i: u32| async move { Ok(i + 1) })
+        .then("step_b", |i: u32| async move { Ok(i * 2) })
+        .then("step_c", |i: u32| async move { Ok(i + 10) })
+        .build()
+        .unwrap();
+
+    let wf = Arc::new(workflow);
+    let def_hash = wf.definition_hash().to_string();
+
+    // Submit 6 workflow instances via the client.
+    let client = WorkflowClient::new(backend_client);
+    for i in 0u32..6 {
+        let (status, _) = client
+            .submit(wf.as_ref(), format!("inst-{i}"), i)
+            .await
+            .unwrap();
+        assert!(matches!(status, WorkflowStatus::InProgress));
+    }
+
+    // Spawn two workers with short poll intervals.
+    let registry1 = sayiir_core::registry::TaskRegistry::new();
+    let registry2 = sayiir_core::registry::TaskRegistry::new();
+
+    let workflows1 = vec![(def_hash.clone(), Arc::clone(&wf))];
+    let workflows2 = vec![(def_hash.clone(), Arc::clone(&wf))];
+
+    let worker1 = PooledWorker::new("worker-1", backend_w1, registry1)
+        .with_claim_ttl(Some(Duration::from_secs(30)));
+    let worker2 = PooledWorker::new("worker-2", backend_w2, registry2)
+        .with_claim_ttl(Some(Duration::from_secs(30)));
+
+    let handle1 = worker1.spawn(Duration::from_millis(100), workflows1);
+    let handle2 = worker2.spawn(Duration::from_millis(100), workflows2);
+
+    // Poll until all instances are completed (or timeout).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("Timed out waiting for all workflow instances to complete");
+        }
+
+        let mut all_done = true;
+        for i in 0u32..6 {
+            let snapshot = client
+                .backend()
+                .load_snapshot(&format!("inst-{i}"))
+                .await
+                .unwrap();
+            if !snapshot.state.is_completed() {
+                all_done = false;
+                break;
+            }
+        }
+        if all_done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Verify outputs: input i → (i+1)*2+10
+    let codec = Arc::new(JsonCodec);
+    for i in 0u32..6 {
+        let snapshot = client
+            .backend()
+            .load_snapshot(&format!("inst-{i}"))
+            .await
+            .unwrap();
+        assert!(
+            snapshot.state.is_completed(),
+            "inst-{i} should be completed"
+        );
+        let output: u32 = codec
+            .decode(snapshot.state.completed_output().unwrap().clone())
+            .unwrap();
+        let expected = (i + 1) * 2 + 10;
+        assert_eq!(
+            output, expected,
+            "inst-{i}: expected {expected}, got {output}"
+        );
+    }
+
+    // Shutdown both workers.
+    handle1.shutdown();
+    handle2.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), handle1.join())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), handle2.join())
+        .await
+        .unwrap()
+        .unwrap();
 }

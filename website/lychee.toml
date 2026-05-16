@@ -31,8 +31,5 @@ max_retries = 3
 # Max concurrent requests
 max_concurrency = 8
 
-# Don't check fragments (anchors)
-include_fragments = false
-
 # Skip these paths
 exclude_path = ["node_modules"]

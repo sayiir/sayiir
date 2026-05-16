@@ -26,3 +26,4 @@ mod flow;
 mod task;
 mod telemetry;
 mod worker;
+mod workflow_client;

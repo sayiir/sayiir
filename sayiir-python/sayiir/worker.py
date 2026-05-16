@@ -55,34 +55,6 @@ class WorkerHandle:
         """
         self._inner.join()
 
-    def cancel_workflow(
-        self,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-        cancelled_by: str | None = None,
-    ) -> None:
-        """Request cancellation of a workflow instance."""
-        self._inner.cancel_workflow(instance_id, reason, cancelled_by)
-
-    def pause_workflow(
-        self,
-        instance_id: str,
-        *,
-        reason: str | None = None,
-        paused_by: str | None = None,
-    ) -> None:
-        """Request pausing of a workflow instance."""
-        self._inner.pause_workflow(instance_id, reason, paused_by)
-
-    def unpause_workflow(self, instance_id: str) -> None:
-        """Unpause a paused workflow instance."""
-        self._inner.unpause_workflow(instance_id)
-
-    def send_signal(self, instance_id: str, signal_name: str, payload: Any) -> None:
-        """Send an external signal to a workflow instance."""
-        self._inner.send_signal(instance_id, signal_name, payload)
-
 
 class Worker:
     """Distributed workflow worker.

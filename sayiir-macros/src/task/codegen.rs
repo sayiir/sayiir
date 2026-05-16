@@ -13,6 +13,7 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
     let core_task_impl = gen_core_task(parsed, &name);
     let registerable_impl = gen_registerable_task(parsed, &name);
     let default_impl = gen_default(parsed, &name);
+    let deps_impl = gen_deps_impl(parsed, &name);
     let original_fn = &parsed.original_fn;
 
     quote! {
@@ -21,6 +22,7 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
         #core_task_impl
         #registerable_impl
         #default_impl
+        #deps_impl
         #original_fn
     }
 }
@@ -29,7 +31,7 @@ pub fn generate(parsed: &ParsedTask) -> TokenStream {
 fn gen_struct(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
     let vis = &parsed.vis;
 
-    if parsed.inject_params.is_empty() {
+    if !parsed.has_injects() {
         quote! { #vis struct #name; }
     } else {
         let fields = parsed.inject_params.iter().map(|p| {
@@ -53,7 +55,7 @@ fn gen_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
     let output_ty = &parsed.output_type;
     let metadata_body = gen_metadata_body(parsed);
 
-    let new_fn = if parsed.inject_params.is_empty() {
+    let new_fn = if !parsed.has_injects() {
         quote! { pub fn new() -> Self { Self } }
     } else {
         let params = parsed.inject_params.iter().map(|p| {
@@ -142,6 +144,11 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
         Some(quote! { tags: vec![#(#tag_strs.to_string()),*], })
     };
 
+    let priority = attrs.priority.map(|p| {
+        // Range validated at parse time in ParsedTask::parse.
+        quote! { priority: ::sayiir_core::priority::Priority::from_u8(#p), }
+    });
+
     quote! {
         ::sayiir_core::task::TaskMetadata {
             #display_name
@@ -149,6 +156,7 @@ fn gen_metadata_body(parsed: &ParsedTask) -> TokenStream {
             #timeout
             #retries
             #tags
+            #priority
             ..::std::default::Default::default()
         }
     }
@@ -171,7 +179,7 @@ fn gen_registerable_task(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream 
 
 /// Generate `Default` impl for tasks without injected dependencies.
 fn gen_default(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
-    if parsed.inject_params.is_empty() {
+    if !parsed.has_injects() {
         quote! {
             impl ::std::default::Default for #name {
                 fn default() -> Self { Self }
@@ -179,6 +187,99 @@ fn gen_default(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
         }
     } else {
         quote! {}
+    }
+}
+
+/// Generate `from_deps` and `verify_deps` constructors for use with the
+/// `workflow!` macro's `deps:` field.
+///
+/// Emitted uniformly for **every** task:
+/// - No-inject tasks: `from_deps` returns `Self::default()`, `verify_deps`
+///   returns an empty `Vec<MissingDep>`.
+/// - Inject tasks: each `#[inject]` param resolves via `deps.expect::<T>()`,
+///   and `verify_deps` reports any missing types.
+fn gen_deps_impl(parsed: &ParsedTask, name: &syn::Ident) -> TokenStream {
+    let inherent = if !parsed.has_injects() {
+        quote! {
+            impl #name {
+                /// Construct from a `Deps` container.
+                ///
+                /// This task has no `#[inject]` parameters, so it is equivalent
+                /// to `Self::default()`.
+                #[must_use]
+                pub fn from_deps(_deps: &::sayiir_core::deps::Deps) -> Self {
+                    <Self as ::std::default::Default>::default()
+                }
+
+                /// Verify that the `Deps` container holds every dependency this
+                /// task requires. No-inject tasks always succeed.
+                #[must_use]
+                pub fn verify_deps(_deps: &::sayiir_core::deps::Deps) -> ::std::vec::Vec<::sayiir_core::deps::MissingDep> {
+                    ::std::vec::Vec::new()
+                }
+            }
+        }
+    } else {
+        let field_inits = parsed.inject_params.iter().map(|p| {
+            let ident = &p.ident;
+            let ty = &p.ty;
+            quote! { #ident: deps.expect::<#ty>() }
+        });
+        let verify_checks = parsed.inject_params.iter().map(|p| {
+            let ty = &p.ty;
+            quote! {
+                if !deps.contains::<#ty>() {
+                    missing.push(::sayiir_core::deps::MissingDep::of::<#ty>());
+                }
+            }
+        });
+
+        quote! {
+            impl #name {
+                /// Construct this task by resolving every `#[inject]` parameter
+                /// from the provided `Deps` container.
+                ///
+                /// # Panics
+                ///
+                /// Panics if any required dependency is absent. Prefer
+                /// [`Self::verify_deps`] at build time so missing deps surface
+                /// as a `BuildError::MissingDep` rather than a runtime panic.
+                #[must_use]
+                pub fn from_deps(deps: &::sayiir_core::deps::Deps) -> Self {
+                    Self {
+                        #(#field_inits,)*
+                    }
+                }
+
+                /// Verify that the `Deps` container holds every dependency this
+                /// task requires. Returns one `MissingDep` per missing type.
+                #[must_use]
+                pub fn verify_deps(deps: &::sayiir_core::deps::Deps) -> ::std::vec::Vec<::sayiir_core::deps::MissingDep> {
+                    let mut missing = ::std::vec::Vec::new();
+                    #(#verify_checks)*
+                    missing
+                }
+            }
+        }
+    };
+
+    // Trait impl delegates to inherent methods (which Rust resolves first via
+    // method precedence) so the generic `TaskRegistry::register_from_deps` and
+    // the `workflow!` macro can drive these uniformly.
+    let trait_impl = quote! {
+        impl ::sayiir_core::deps::DepsInjectable for #name {
+            fn from_deps(deps: &::sayiir_core::deps::Deps) -> Self {
+                Self::from_deps(deps)
+            }
+            fn verify_deps(deps: &::sayiir_core::deps::Deps) -> ::std::vec::Vec<::sayiir_core::deps::MissingDep> {
+                Self::verify_deps(deps)
+            }
+        }
+    };
+
+    quote! {
+        #inherent
+        #trait_impl
     }
 }
 

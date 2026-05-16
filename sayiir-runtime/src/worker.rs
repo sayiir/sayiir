@@ -26,7 +26,7 @@ use sayiir_core::snapshot::{
 };
 use sayiir_core::task_claim::AvailableTask;
 use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
-use sayiir_persistence::{PersistentBackend, SignalStore, TaskClaimStore};
+use sayiir_persistence::{PersistentBackend, TaskClaimStore};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -130,58 +130,6 @@ impl<B> WorkerHandle<B> {
     }
 }
 
-impl<B: SignalStore> WorkerHandle<B> {
-    /// Request cancellation of a workflow.
-    ///
-    /// This stores a cancel signal directly in the backend. The worker will
-    /// pick it up at the next guard check (task boundary).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the signal cannot be stored (workflow not found or in terminal state).
-    pub async fn cancel_workflow(
-        &self,
-        instance_id: &str,
-        reason: Option<String>,
-        cancelled_by: Option<String>,
-    ) -> Result<(), crate::error::RuntimeError> {
-        self.inner
-            .backend
-            .store_signal(
-                instance_id,
-                SignalKind::Cancel,
-                SignalRequest::new(reason, cancelled_by),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Request pausing of a workflow.
-    ///
-    /// This stores a pause signal directly in the backend. The worker will
-    /// pick it up at the next guard check (task boundary).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the signal cannot be stored (workflow not found or in terminal/paused state).
-    pub async fn pause_workflow(
-        &self,
-        instance_id: &str,
-        reason: Option<String>,
-        paused_by: Option<String>,
-    ) -> Result<(), crate::error::RuntimeError> {
-        self.inner
-            .backend
-            .store_signal(
-                instance_id,
-                SignalKind::Pause,
-                SignalRequest::new(reason, paused_by),
-            )
-            .await?;
-        Ok(())
-    }
-}
-
 /// Owns a claimed task and provides explicit release methods.
 ///
 /// No `Drop` impl — callers must explicitly call `release()` or `release_quietly()`.
@@ -278,6 +226,8 @@ pub struct PooledWorker<B> {
     registry: Arc<TaskRegistry>,
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
+    aging_interval: Duration,
+    tags: Vec<String>,
 }
 
 impl<B> PooledWorker<B>
@@ -302,8 +252,10 @@ where
             worker_id: worker_id.into(),
             backend: Arc::new(backend),
             registry: Arc::new(registry),
-            claim_ttl: Some(Duration::from_secs(5 * 60)), // Default 5 minutes
-            batch_size: NonZeroUsize::MIN,                // Default: fetch one task at a time (1)
+            claim_ttl: Some(Duration::from_mins(5)), // Default 5 minutes
+            batch_size: NonZeroUsize::MIN,           // Default: fetch one task at a time (1)
+            aging_interval: Duration::from_mins(5),  // Default 5 minutes
+            tags: vec![],
         }
     }
 
@@ -311,6 +263,22 @@ where
     #[must_use]
     pub fn with_claim_ttl(mut self, ttl: Option<Duration>) -> Self {
         self.claim_ttl = ttl;
+        self
+    }
+
+    /// Set the aging interval for priority-based scheduling.
+    ///
+    /// Lower-priority tasks that have been waiting longer than this interval
+    /// get their effective priority boosted, preventing starvation.
+    /// Default: 5 minutes (300 seconds).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is zero.
+    #[must_use]
+    pub fn with_aging_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "aging interval must be non-zero");
+        self.aging_interval = interval;
         self
     }
 
@@ -324,6 +292,17 @@ where
     #[must_use]
     pub fn with_batch_size(mut self, size: NonZeroUsize) -> Self {
         self.batch_size = size;
+        self
+    }
+
+    /// Set affinity tags for this worker.
+    ///
+    /// When tags are set, the worker only picks up tasks whose tags are a
+    /// subset of the worker's tags (or tasks with no tags). When no tags are
+    /// set (the default), the worker accepts all tasks.
+    #[must_use]
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
         self
     }
 
@@ -503,7 +482,13 @@ where
 
             let available_tasks = self
                 .backend
-                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .find_available_tasks(
+                    &self.worker_id,
+                    self.batch_size.get(),
+                    chrono::Duration::from_std(self.aging_interval)
+                        .unwrap_or(chrono::Duration::MAX),
+                    &self.tags,
+                )
                 .await?;
 
             for task in available_tasks {
@@ -798,7 +783,13 @@ where
 
             let available_tasks = self
                 .backend
-                .find_available_tasks(&self.worker_id, self.batch_size.get())
+                .find_available_tasks(
+                    &self.worker_id,
+                    self.batch_size.get(),
+                    chrono::Duration::from_std(self.aging_interval)
+                        .unwrap_or(chrono::Duration::MAX),
+                    &self.tags,
+                )
                 .await?;
 
             for task in available_tasks {
@@ -1673,9 +1664,11 @@ where
             | WorkflowContinuation::AwaitSignal { id, next, .. } => {
                 if id == completed_task_id {
                     if let Some(next_cont) = next {
+                        let hint = next_cont.first_task_hint();
                         snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id().to_string(),
+                            task_id: hint.id.clone(),
                         });
+                        snapshot.set_task_hint(&hint);
                     }
                 } else if let Some(next_cont) = next {
                     Self::update_position_after_task(next_cont, completed_task_id, snapshot);
@@ -1747,8 +1740,10 @@ where
             worker_id: None,
             backend,
             registry,
-            claim_ttl: Some(Duration::from_secs(5 * 60)),
+            claim_ttl: Some(Duration::from_mins(5)),
             batch_size: NonZeroUsize::MIN,
+            aging_interval: Duration::from_mins(5),
+            tags: vec![],
         }
     }
 
@@ -1956,6 +1951,8 @@ pub struct PooledWorkerBuilder<B> {
     registry: TaskRegistry,
     claim_ttl: Option<Duration>,
     batch_size: NonZeroUsize,
+    aging_interval: Duration,
+    tags: Vec<String>,
 }
 
 impl<B> PooledWorkerBuilder<B>
@@ -1985,6 +1982,29 @@ where
         self
     }
 
+    /// Set the aging interval for priority-based scheduling (default: 300s).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is zero.
+    #[must_use]
+    pub fn aging_interval(mut self, interval: Duration) -> Self {
+        assert!(!interval.is_zero(), "aging interval must be non-zero");
+        self.aging_interval = interval;
+        self
+    }
+
+    /// Set affinity tags for this worker.
+    ///
+    /// When tags are set, the worker only picks up tasks whose tags are a
+    /// subset of the worker's tags (or tasks with no tags). When no tags are
+    /// set (the default), the worker accepts all tasks.
+    #[must_use]
+    pub fn tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
     /// Build the [`PooledWorker`].
     ///
     /// If no `worker_id` was set, generates one from `{hostname}-{pid}`.
@@ -1997,6 +2017,8 @@ where
             registry: Arc::new(self.registry),
             claim_ttl: self.claim_ttl,
             batch_size: self.batch_size,
+            aging_interval: self.aging_interval,
+            tags: self.tags,
         }
     }
 }
@@ -2046,7 +2068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancel_via_handle() {
+    async fn test_cancel_via_client() {
         let backend = InMemoryBackend::new();
         let registry = TaskRegistry::new();
 
@@ -2057,8 +2079,10 @@ mod tests {
         let worker = PooledWorker::new("test-worker", backend, registry);
         let handle = worker.spawn(Duration::from_millis(50), EmptyWorkflows::new());
 
-        handle
-            .cancel_workflow(
+        // Cancel via WorkflowClient instead of handle
+        let client = crate::WorkflowClient::from_shared(std::sync::Arc::clone(handle.backend()));
+        client
+            .cancel(
                 "wf-1",
                 Some("test reason".to_string()),
                 Some("tester".to_string()),

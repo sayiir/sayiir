@@ -41,6 +41,7 @@ def my_task(input: dict) -> dict:
 - `retries` (int | RetryPolicy, optional) — Retry count (int shorthand with 1s/2x defaults) or full `RetryPolicy`
 - `tags` (list[str], optional) — Categorization tags
 - `description` (str, optional) — Human-readable description
+- `priority` (int, optional) — Execution priority (1–5, lower = higher priority, default: 3)
 
 The decorator attaches metadata to the function without wrapping it. The function can still be called directly for testing.
 
@@ -88,6 +89,7 @@ Metadata attached to a task.
 - `retries` (RetryPolicy | None) — Retry configuration
 - `tags` (list[str] | None) — Categorization tags
 - `version` (str | None) — Task version string
+- `priority` (int | None) — Execution priority (1–5, lower = higher priority)
 
 ```python
 @task(timeout="30s", retries=3, tags=["io"])
@@ -450,7 +452,7 @@ print(workflow.definition_hash)   # "abc123..."
 
 ## Execution Functions
 
-### run_workflow(workflow, input_data, *, instance_id=None, backend=None)
+### run_workflow(workflow, input_data, *, instance_id=None, backend=None, conflict_policy=None)
 
 Run a workflow to completion. Without `instance_id`, runs entirely in-memory with no persistence (fastest path for prototyping). With `instance_id` and `backend`, runs with full checkpointing — but still returns the output directly. If the workflow doesn't complete (e.g., parks on a delay or signal), raises `WorkflowError`.
 
@@ -463,6 +465,10 @@ result = run_workflow(workflow, 21)
 # Production — same function, just add params
 backend = PostgresBackend("postgresql://localhost/sayiir")
 result = run_workflow(workflow, 21, instance_id="run-001", backend=backend)
+
+# Idempotent — safe to call multiple times
+result = run_workflow(workflow, 21, instance_id="run-001", backend=backend,
+                      conflict_policy="use_existing")
 ```
 
 **Parameters:**
@@ -470,12 +476,15 @@ result = run_workflow(workflow, 21, instance_id="run-001", backend=backend)
 - `input_data` (Any) — Input to the first task
 - `instance_id` (str, optional) — Unique identifier for durable execution
 - `backend` (InMemoryBackend | PostgresBackend, optional) — Persistence backend (required with `instance_id`)
+- `conflict_policy` (str, optional) — What happens when `instance_id` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
 
 **Returns:** The workflow result (Any)
 
-**Raises:** `WorkflowError` if durable workflow did not complete. Use `run_durable_workflow()` when you need the full `WorkflowStatus` object.
+**Raises:**
+- `WorkflowError` if durable workflow did not complete. Use `run_durable_workflow()` when you need the full `WorkflowStatus` object.
+- `InstanceAlreadyExistsError` if `conflict_policy` is `"fail"` (default) and the instance already exists.
 
-### run_durable_workflow(workflow, instance_id, input_data, backend=None)
+### run_durable_workflow(workflow, instance_id, input_data, backend=None, conflict_policy=None)
 
 Run a workflow with checkpointing and durability. Returns WorkflowStatus.
 
@@ -501,6 +510,7 @@ if status.is_completed():
 - `instance_id` (str) — Unique identifier for this execution instance
 - `input_data` (Any) — Input to the first task
 - `backend` (InMemoryBackend | PostgresBackend, optional) — Persistence backend (defaults to InMemoryBackend)
+- `conflict_policy` (str, optional) — What happens when `instance_id` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
 
 **Returns:** WorkflowStatus
 
@@ -770,32 +780,61 @@ handle.shutdown()
 handle.join()  # blocks until shutdown completes
 ```
 
-#### .cancel_workflow(instance_id, *, reason=None, cancelled_by=None)
+:::note
+Lifecycle operations (cancel, pause, unpause, send signal) have moved to [`WorkflowClient`](#workflowclient). The `WorkerHandle` is now focused on worker lifecycle only (shutdown/join).
+:::
 
-Request cancellation of a workflow instance via the worker's backend.
+## WorkflowClient
+
+Client for submitting and controlling workflow instances. Unlike `run_durable_workflow()`, the client does **not** execute tasks — it only creates initial snapshots and stores lifecycle signals. A `Worker` picks up and executes the work.
+
+### WorkflowClient(backend, *, conflict_policy=None)
+
+Create a new workflow client.
 
 ```python
-handle.cancel_workflow(
-    "order-42",
-    reason="Out of stock",
-    cancelled_by="admin@example.com",
-)
+from sayiir import WorkflowClient, PostgresBackend
+
+backend = PostgresBackend("postgresql://localhost/sayiir")
+client = WorkflowClient(backend, conflict_policy="use_existing")
 ```
 
-#### .pause_workflow(instance_id, *, reason=None, paused_by=None)
+**Parameters:**
+- `backend` (InMemoryBackend | PostgresBackend) — Shared persistence backend
+- `conflict_policy` (str, optional) — What to do when an `instance_id` already exists: `"fail"` (default), `"use_existing"`, or `"terminate_existing"`
+
+#### .submit(workflow, instance_id, input)
+
+Submit a workflow for execution. Creates an initial snapshot so a Worker can pick it up.
+
+```python
+status = client.submit(workflow, "order-42", {"items": [1, 2, 3]})
+```
+
+**Returns:** `WorkflowStatus`
+
+#### .cancel(instance_id, *, reason=None, cancelled_by=None)
+
+Request cancellation of a workflow instance.
+
+```python
+client.cancel("order-42", reason="Out of stock", cancelled_by="admin@example.com")
+```
+
+#### .pause(instance_id, *, reason=None, paused_by=None)
 
 Pause a workflow instance at the next checkpoint.
 
 ```python
-handle.pause_workflow("order-42", reason="Maintenance window")
+client.pause("order-42", reason="Maintenance window")
 ```
 
-#### .unpause_workflow(instance_id)
+#### .unpause(instance_id)
 
 Unpause a paused workflow instance.
 
 ```python
-handle.unpause_workflow("order-42")
+client.unpause("order-42")
 ```
 
 #### .send_signal(instance_id, signal_name, payload)
@@ -803,8 +842,38 @@ handle.unpause_workflow("order-42")
 Send an external signal to a workflow instance.
 
 ```python
-handle.send_signal("order-42", "manager_approval", {"approved": True})
+client.send_signal("order-42", "manager_approval", {"approved": True})
 ```
+
+#### .status(instance_id)
+
+Get the current status of a workflow instance.
+
+```python
+status = client.status("order-42")
+if status.is_completed():
+    print(status.output)
+```
+
+**Returns:** `WorkflowStatus`
+
+#### .get_task_result(instance_id, task_id)
+
+Get a single task result from a workflow instance.
+
+Returns the decoded task output, or `None` if the task was never executed. For completed or failed workflows, the result is recovered from the backend's history or cache.
+
+```python
+result = client.get_task_result("order-42", "validate_order")
+if result is not None:
+    print(result)
+```
+
+**Parameters:**
+- `instance_id` (str) — The workflow instance ID
+- `task_id` (str) — The task ID to retrieve the result for
+
+**Returns:** `Any | None`
 
 ## Exceptions
 
@@ -845,6 +914,19 @@ try:
     backend = PostgresBackend("postgresql://invalid:url")
 except BackendError as e:
     print(f"Backend error: {e}")
+```
+
+### InstanceAlreadyExistsError
+
+Raised when running a durable workflow with an `instance_id` that already has a snapshot and `conflict_policy` is `"fail"` (the default).
+
+```python
+from sayiir import InstanceAlreadyExistsError
+
+try:
+    run_durable_workflow(workflow, "run-001", input_data, backend=backend)
+except InstanceAlreadyExistsError:
+    print("Instance already exists — use conflict_policy='use_existing' for idempotent runs")
 ```
 
 ## Type Annotations

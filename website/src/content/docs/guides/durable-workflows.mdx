@@ -105,8 +105,10 @@ cancelWorkflow("job-123", backend, {
 <TabItem label="Rust">
 
 ```rust
-// Cancel using the runner
-runner.cancel("job-123", Some("No longer needed".into()), Some("admin".into())).await?;
+use sayiir_runtime::WorkflowClient;
+
+let client = WorkflowClient::from_shared(runner.backend().clone());
+client.cancel("job-123", Some("No longer needed".into()), Some("admin".into())).await?;
 ```
 
 </TabItem>
@@ -147,11 +149,15 @@ unpauseWorkflow("job-123", backend);
 <TabItem label="Rust">
 
 ```rust
+use sayiir_runtime::WorkflowClient;
+
+let client = WorkflowClient::from_shared(runner.backend().clone());
+
 // Pause a running workflow
-runner.pause("job-123", Some("Maintenance window".into()), Some("ops-team".into())).await?;
+client.pause("job-123", Some("Maintenance window".into()), Some("ops-team".into())).await?;
 
 // Unpause to allow resumption
-runner.unpause("job-123").await?;
+client.unpause("job-123").await?;
 ```
 
 </TabItem>
@@ -272,3 +278,154 @@ let status = runner.run(&workflow, "campaign-1", 42u64).await?;
 </Tabs>
 
 If the process crashes during the 24-hour delay, calling `resume` will continue the delay from where it left off, not restart it from zero.
+
+## Idempotency and conflict policies
+
+Every durable workflow run requires an `instance_id`. By default, calling `run` with an `instance_id` that already has a snapshot will fail — this prevents accidental overwrites of in-flight state. You can change this behavior with a **conflict policy**:
+
+| Policy | Behavior |
+|---|---|
+| `fail` (default) | Raises an error if a snapshot already exists for this `instance_id`. |
+| `use_existing` | Returns the existing workflow status without re-running. Useful for at-least-once submission patterns where the caller may retry. |
+| `terminate_existing` | Deletes the existing snapshot and starts a fresh execution. Use when you want to force-restart a stuck or stale workflow. |
+
+### Usage
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import run_durable_workflow, InMemoryBackend
+
+backend = InMemoryBackend()
+
+# Default: fail if instance already exists
+status = run_durable_workflow(workflow, "order-42", input_data, backend=backend)
+
+# Idempotent submission — safe to call multiple times
+status = run_durable_workflow(
+    workflow, "order-42", input_data,
+    backend=backend,
+    conflict_policy="use_existing",
+)
+
+# Force restart
+status = run_durable_workflow(
+    workflow, "order-42", input_data,
+    backend=backend,
+    conflict_policy="terminate_existing",
+)
+```
+
+The convenience function `run_workflow` also accepts `conflict_policy` when used with `instance_id`:
+
+```python
+from sayiir import run_workflow
+
+result = run_workflow(
+    workflow, input_data,
+    instance_id="order-42",
+    backend=backend,
+    conflict_policy="use_existing",
+)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { runDurableWorkflow, runWorkflow, InMemoryBackend } from "sayiir";
+
+const backend = new InMemoryBackend();
+
+// Default: fail if instance already exists
+const status = runDurableWorkflow(workflow, "order-42", input, backend);
+
+// Idempotent submission — safe to call multiple times
+const status = runDurableWorkflow(workflow, "order-42", input, backend, "useExisting");
+
+// Force restart
+const status = runDurableWorkflow(workflow, "order-42", input, backend, "terminateExisting");
+
+// Or via runWorkflow options
+const result = await runWorkflow(workflow, input, {
+    instanceId: "order-42",
+    backend,
+    conflictPolicy: "useExisting",
+});
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_runtime::prelude::*;
+use sayiir_core::workflow::ConflictPolicy;
+
+let backend = InMemoryBackend::new();
+
+// Default: Fail
+let runner = CheckpointingRunner::new(backend.clone());
+let status = runner.run(&workflow, "order-42", input).await?;
+
+// Idempotent submission
+let runner = CheckpointingRunner::new(backend.clone())
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+let status = runner.run(&workflow, "order-42", input).await?;
+
+// Force restart
+let runner = CheckpointingRunner::new(backend.clone())
+    .with_conflict_policy(ConflictPolicy::TerminateExisting);
+let status = runner.run(&workflow, "order-42", input).await?;
+```
+
+</TabItem>
+</Tabs>
+
+### Catching duplicate instance errors
+
+When using the default `fail` policy, you can catch the specific error:
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+from sayiir import run_durable_workflow, InstanceAlreadyExistsError
+
+try:
+    run_durable_workflow(workflow, "order-42", input_data, backend=backend)
+except InstanceAlreadyExistsError:
+    print("Workflow already running for this instance ID")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```typescript
+import { runDurableWorkflow, WorkflowError } from "sayiir";
+
+try {
+    runDurableWorkflow(workflow, "order-42", input, backend);
+} catch (e) {
+    if (e instanceof WorkflowError && e.message.includes("already exists")) {
+        console.log("Workflow already running for this instance ID");
+    }
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use sayiir_runtime::RuntimeError;
+
+match runner.run(&workflow, "order-42", input).await {
+    Err(RuntimeError::InstanceAlreadyExists(id)) => {
+        println!("Workflow already running: {id}");
+    }
+    other => { /* handle normally */ }
+}
+```
+
+</TabItem>
+</Tabs>

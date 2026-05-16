@@ -28,6 +28,8 @@ class PyTaskMetadata:
         timeout_secs: float | None = None,
         retries: PyRetryPolicy | None = None,
         tags: list[str] | None = None,
+        version: str | None = None,
+        priority: int | None = None,
     ) -> None: ...
 
 class PyFlowBuilder:
@@ -69,6 +71,18 @@ class PyFlowBuilder:
     ) -> None: ...
     def build(self) -> PyWorkflow: ...
 
+class NodeInfo:
+    """Metadata about a single node in the workflow DAG."""
+
+    id: str
+    kind: str
+    predecessor_id: str | None
+    timeout_secs: float | None
+    retry_policy: PyRetryPolicy | None
+    priority: int | None
+
+    def __repr__(self) -> str: ...
+
 class PyWorkflow:
     """Compiled workflow definition."""
 
@@ -78,6 +92,7 @@ class PyWorkflow:
     def definition_hash(self) -> str: ...
     @property
     def metadata_json(self) -> str | None: ...
+    def iter_nodes(self) -> list[NodeInfo]: ...
 
 class PyWorkflowStatus:
     """Workflow execution status."""
@@ -128,7 +143,11 @@ class PyPostgresBackend:
 class PyDurableEngine:
     """Durable workflow engine with checkpointing, cancellation, and resume."""
 
-    def __init__(self, backend: PyInMemoryBackend | PyPostgresBackend) -> None: ...
+    def __init__(
+        self,
+        backend: PyInMemoryBackend | PyPostgresBackend,
+        conflict_policy: str | None = None,
+    ) -> None: ...
     def run(
         self,
         workflow: PyWorkflow,
@@ -172,6 +191,7 @@ class PyWorker:
         backend: PyInMemoryBackend | PyPostgresBackend,
         poll_interval_secs: float = 5.0,
         claim_ttl_secs: float = 300.0,
+        tags: list[str] | None = None,
     ) -> None: ...
     def start(
         self,
@@ -184,25 +204,43 @@ class PyWorkerHandle:
 
     def shutdown(self) -> None: ...
     def join(self) -> None: ...
-    def cancel_workflow(
+    def __repr__(self) -> str: ...
+
+class PyWorkflowClient:
+    """Client for submitting and controlling workflow instances."""
+
+    def __new__(
+        cls,
+        backend: PyInMemoryBackend | PyPostgresBackend,
+        conflict_policy: str | None = None,
+    ) -> PyWorkflowClient: ...
+    def submit(
+        self,
+        workflow: Any,
+        instance_id: str,
+        input: Any,
+    ) -> PyWorkflowStatus: ...
+    def cancel(
         self,
         instance_id: str,
         reason: str | None = None,
         cancelled_by: str | None = None,
     ) -> None: ...
-    def pause_workflow(
+    def pause(
         self,
         instance_id: str,
         reason: str | None = None,
         paused_by: str | None = None,
     ) -> None: ...
-    def unpause_workflow(self, instance_id: str) -> None: ...
+    def unpause(self, instance_id: str) -> None: ...
     def send_signal(
         self,
         instance_id: str,
         signal_name: str,
         payload: Any,
     ) -> None: ...
+    def status(self, instance_id: str) -> PyWorkflowStatus: ...
+    def get_task_result(self, instance_id: str, task_id: str) -> Any | None: ...
     def __repr__(self) -> str: ...
 
 class PyTaskExecutionContext:
@@ -251,5 +289,10 @@ class TaskError(WorkflowError):
 
 class BackendError(WorkflowError):
     """A persistence backend operation failed."""
+
+    ...
+
+class InstanceAlreadyExistsError(WorkflowError):
+    """A workflow instance with this ID already exists."""
 
     ...

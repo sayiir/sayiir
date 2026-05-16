@@ -191,6 +191,54 @@ impl TaskRegistry {
         self.register_task_arc(id, codec, Arc::new(task), metadata);
     }
 
+    /// Build a task from a [`Deps`] container and register it.
+    ///
+    /// Calls [`DepsInjectable::verify_deps`] first, so a missing service
+    /// surfaces as `Err(Vec<MissingDep>)` before the registry is mutated.
+    /// Use this when populating a registry for a `PooledWorker` or a
+    /// hand-rolled task library — the `workflow!` macro already handles this
+    /// internally via the `deps:` field.
+    ///
+    /// # Errors
+    ///
+    /// Returns the list of missing dependency types if the container does not
+    /// satisfy `T`'s `#[inject]` parameters. The registry is left untouched on
+    /// error.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use sayiir_core::deps::Deps;
+    /// use sayiir_core::registry::TaskRegistry;
+    ///
+    /// let mut registry = TaskRegistry::new();
+    /// registry.register_from_deps::<ChargeTask, _>(codec.clone(), &deps)?;
+    /// registry.register_from_deps::<RefundTask, _>(codec, &deps)?;
+    /// ```
+    ///
+    /// [`Deps`]: crate::deps::Deps
+    /// [`DepsInjectable::verify_deps`]: crate::deps::DepsInjectable::verify_deps
+    pub fn register_from_deps<T, C>(
+        &mut self,
+        codec: Arc<C>,
+        deps: &crate::deps::Deps,
+    ) -> Result<(), Vec<crate::deps::MissingDep>>
+    where
+        T: crate::deps::DepsInjectable,
+        T::Input: Send + 'static,
+        T::Output: Send + 'static,
+        T::Future: Send + 'static,
+        C: Codec + sealed::DecodeValue<T::Input> + sealed::EncodeValue<T::Output> + 'static,
+    {
+        let missing = T::verify_deps(deps);
+        if !missing.is_empty() {
+            return Err(missing);
+        }
+        let task = T::from_deps(deps);
+        self.register_with_metadata(T::task_id(), codec, task, T::metadata());
+        Ok(())
+    }
+
     /// Register a task using an Arc-wrapped `CoreTask`.
     pub(crate) fn register_task_arc<T, C>(
         &mut self,

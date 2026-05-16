@@ -8,11 +8,11 @@ description: Get started with Sayiir in Rust — fast, native durable workflows 
 ```toml
 # Cargo.toml
 [dependencies]
-sayiir-runtime = "0.2"       # core runtime + runners + macros
+sayiir-runtime = "0.4"       # core runtime + runners + macros
 
 # Optional — pick your backend
-sayiir-persistence = "0.2"   # InMemoryBackend (dev/testing)
-sayiir-postgres = "0.2"      # PostgreSQL backend (production)
+sayiir-persistence = "0.4"   # InMemoryBackend (dev/testing)
+sayiir-postgres = "0.4"      # PostgreSQL backend (production)
 ```
 
 Import the prelude:
@@ -41,7 +41,7 @@ async fn charge(order: Order, #[inject] stripe: Arc<Stripe>) -> Result<Receipt, 
 // The original `charge` function is preserved for direct use/testing.
 ```
 
-The `#[task]` macro generates a struct named `{PascalCase}Task` (e.g., `fn charge` → `ChargeTask`) that implements `CoreTask`. The struct has `new()` (accepting injected deps), `task_id()`, `metadata()`, and `register()` methods. Your original function is kept intact so you can call it directly in tests.
+The `#[task]` macro generates a struct named `{PascalCase}Task` (e.g., `fn charge` → `ChargeTask`) that implements `CoreTask`. The struct has `new()` (accepting injected deps), `from_deps(&Deps)` for use with the `workflow!` macro's `deps:` field, `task_id()`, `metadata()`, and `register()` methods. Your original function is kept intact so you can call it directly in tests.
 
 :::tip[Set an explicit `id`]
 Always use `id = "stable_name"` in production. Without it, the task ID defaults to the function name — renaming the function breaks in-flight workflows on resume.
@@ -57,6 +57,39 @@ Always use `id = "stable_name"` in production. Without it, the task ID defaults 
 | `backoff` | `backoff = "100ms"` | Initial retry delay |
 | `backoff_multiplier` | `backoff_multiplier = 2.0` | Exponential multiplier (default: 2.0) |
 | `tags` | `tags = "io"` | Categorization tags (repeatable) |
+
+## Wire dependencies with `Deps`
+
+A `#[task]` that declares `#[inject]` parameters cannot be referenced by name in the `workflow!` macro unless you tell the macro how to resolve those dependencies. Build a `Deps` container once and pass it to `workflow!` via the `deps:` field:
+
+```rust
+use sayiir_runtime::prelude::*;
+
+let stripe = Arc::new(StripeClient::new("sk_test_..."));
+let mailer = Arc::new(Mailer::new(...));
+
+let deps = Deps::builder()
+    .insert(stripe)         // Arc<StripeClient> is the key
+    .insert(mailer)         // Arc<Mailer> is the key
+    .build();
+
+let workflow = workflow! {
+    name: "checkout",
+    deps: &deps,
+    steps: [validate, charge, send_email]
+}.unwrap();
+```
+
+The macro:
+
+1. Builds every referenced `#[task]` via `Task::from_deps(&deps)` instead of `Task::new()`.
+2. Calls `verify_deps` for each task **before** construction. If any task asks for a type that wasn't inserted, the macro returns a `BuildErrors` containing one `BuildError::MissingDep { task_id, type_name }` per absent service, rather than panicking at first invocation.
+
+Lookup is by exact `TypeId`. Insert `Arc<HttpClient>` → inject `Arc<HttpClient>`. There is no coercion to a trait object or a parent type — what you insert is what each task receives.
+
+:::caution[Inline tasks can't be injected]
+Inline closure steps in `workflow!` (`name(param: T) { … }`) have no `#[inject]` syntax. If an inline task needs a shared service, promote it to a named `#[task]` function — that lets `from_deps` resolve services for you and lets the macro auto-register it.
+:::
 
 ## Build workflows with `workflow!`
 

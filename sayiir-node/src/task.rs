@@ -4,6 +4,7 @@ use napi_derive::napi;
 use std::time::Duration;
 
 use sayiir_core::context::TaskExecutionContext;
+use sayiir_core::priority::Priority;
 use sayiir_core::task::{RetryPolicy, TaskMetadata};
 
 /// Retry policy for task execution.
@@ -38,6 +39,8 @@ pub struct NapiTaskMetadata {
     pub retries: Option<NapiRetryPolicy>,
     pub tags: Option<Vec<String>>,
     pub version: Option<String>,
+    /// Execution priority (1 = Critical … 5 = Minimal). `None` defaults to Normal (3).
+    pub priority: Option<u32>,
 }
 
 impl From<NapiTaskMetadata> for TaskMetadata {
@@ -49,6 +52,7 @@ impl From<NapiTaskMetadata> for TaskMetadata {
             retries: n.retries.map(Into::into),
             tags: n.tags.unwrap_or_default(),
             version: n.version,
+            priority: n.priority.and_then(|v| Priority::from_u8(v as u8)),
         }
     }
 }
@@ -59,6 +63,7 @@ impl From<NapiTaskMetadata> for TaskMetadata {
 /// Retrieve via `getTaskContext()`.
 #[napi(object)]
 #[derive(Clone)]
+#[allow(dead_code)] // Exposed via #[napi] for N-API runtime
 pub struct NapiTaskExecutionContext {
     pub workflow_id: String,
     pub instance_id: String,
@@ -88,6 +93,7 @@ impl From<TaskExecutionContext> for NapiTaskExecutionContext {
                 }),
                 tags: Some(ctx.metadata.tags),
                 version: ctx.metadata.version,
+                priority: ctx.metadata.priority.map(|p| u32::from(p.as_u8())),
             },
             workflow_metadata,
         }
@@ -98,6 +104,7 @@ impl From<TaskExecutionContext> for NapiTaskExecutionContext {
 ///
 /// Returns `null` if called outside of a task execution.
 #[napi]
+#[allow(dead_code)] // Exposed via #[napi] for N-API runtime
 pub fn get_task_context() -> Option<NapiTaskExecutionContext> {
     sayiir_core::context::get_task_context().map(Into::into)
 }

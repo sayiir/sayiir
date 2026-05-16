@@ -384,7 +384,7 @@ where
                     Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
                         delay_id: id.clone(),
                         wake_at,
-                        next_task_id: None,
+                        next_task: None,
                         passthrough: current_input.clone(),
                     })))
                 }
@@ -405,7 +405,7 @@ where
                             signal_id: id.clone(),
                             signal_name: signal_name.clone(),
                             timeout: wake_at,
-                            next_task_id: None,
+                            next_task: None,
                         },
                     )))
                 }

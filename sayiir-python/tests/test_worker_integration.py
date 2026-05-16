@@ -17,6 +17,7 @@ from sayiir import (
     PostgresBackend,
     Worker,
     WorkerHandle,
+    WorkflowClient,
     resume_workflow,
     run_durable_workflow,
     task,
@@ -146,7 +147,7 @@ class TestWorkerIntegration:
             handle.shutdown()
             handle.join()
 
-    def test_worker_cancel_via_handle(self, backend):
+    def test_worker_cancel_via_client(self, backend):
         wf = (
             Flow("cancel")
             .then(identity)
@@ -156,13 +157,14 @@ class TestWorkerIntegration:
         )
         iid = uid("cancel")
 
-        run_durable_workflow(wf, iid, "start", backend)
+        client = WorkflowClient(backend)
+        client.submit(wf, iid, "start")
 
         handle = start_worker(backend, [wf])
         try:
             # Let the worker pick up and reach the signal wait
             time.sleep(0.5)
-            handle.cancel_workflow(iid, reason="test cancel")
+            client.cancel(iid, reason="test cancel")
 
             result = poll_until_terminal(wf, iid, backend)
             assert result.status == "cancelled"
@@ -170,24 +172,25 @@ class TestWorkerIntegration:
             handle.shutdown()
             handle.join()
 
-    def test_worker_pause_unpause_via_handle(self, backend):
+    def test_worker_pause_unpause_via_client(self, backend):
         wf = Flow("pause").then(identity).wait_for_signal("gate").then(identity).build()
         iid = uid("pause")
 
-        run_durable_workflow(wf, iid, "data", backend)
+        client = WorkflowClient(backend)
+        client.submit(wf, iid, "data")
 
         handle = start_worker(backend, [wf])
         try:
             time.sleep(0.5)
-            handle.pause_workflow(iid, reason="test pause")
+            client.pause(iid, reason="test pause")
 
             # Verify paused
             status = resume_workflow(wf, iid, backend)
             assert status.status == "paused"
 
             # Unpause and send signal so it can complete
-            handle.unpause_workflow(iid)
-            handle.send_signal(iid, "gate", "go")
+            client.unpause(iid)
+            client.send_signal(iid, "gate", "go")
 
             result = poll_until_terminal(wf, iid, backend)
             assert result.status == "completed"
@@ -195,7 +198,7 @@ class TestWorkerIntegration:
             handle.shutdown()
             handle.join()
 
-    def test_worker_send_signal_via_handle(self, backend):
+    def test_worker_send_signal_via_client(self, backend):
         wf = (
             Flow("signal")
             .then(identity)
@@ -205,16 +208,42 @@ class TestWorkerIntegration:
         )
         iid = uid("signal")
 
-        run_durable_workflow(wf, iid, "input", backend)
+        client = WorkflowClient(backend)
+        client.submit(wf, iid, "input")
 
         handle = start_worker(backend, [wf])
         try:
             time.sleep(0.5)
-            handle.send_signal(iid, "approval", {"approved": True})
+            client.send_signal(iid, "approval", {"approved": True})
 
             result = poll_until_terminal(wf, iid, backend)
             assert result.status == "completed"
             assert result.output == "input"
+        finally:
+            handle.shutdown()
+            handle.join()
+
+    def test_workflow_client_submit_and_worker_execute(self, backend):
+        wf = Flow("client-submit").then(double).then(add_one).build()
+        iid = uid("client-submit")
+
+        client = WorkflowClient(backend)
+        status = client.submit(wf, iid, 10)
+        assert status.status == "in_progress"
+
+        # Check status via client
+        s = client.status(iid)
+        assert s.status == "in_progress"
+
+        handle = start_worker(backend, [wf])
+        try:
+            result = poll_until_terminal(wf, iid, backend)
+            assert result.status == "completed"
+            assert result.output == 21  # (10 * 2) + 1
+
+            # Check completed status via client
+            s = client.status(iid)
+            assert s.status == "completed"
         finally:
             handle.shutdown()
             handle.join()

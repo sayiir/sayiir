@@ -105,6 +105,157 @@ macro_rules! impl_find_duplicate_id {
     };
 }
 
+/// The kind of node in a workflow continuation tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum NodeKind {
+    /// A sequential task node.
+    Task,
+    /// A parallel fork node.
+    Fork,
+    /// A durable delay node.
+    Delay,
+    /// A signal-wait node.
+    AwaitSignal,
+    /// A conditional branching node.
+    Branch,
+    /// A loop node.
+    Loop,
+    /// A child workflow node.
+    ChildWorkflow,
+}
+
+/// Metadata about a single node in the workflow DAG, returned by
+/// topological iteration.
+#[derive(Debug, Clone)]
+pub struct NodeInfo<'a> {
+    /// Unique node identifier.
+    pub id: &'a str,
+    /// The structural kind of this node.
+    pub kind: NodeKind,
+    /// ID of the node that precedes this one in execution order.
+    /// `None` for the root node.
+    pub predecessor_id: Option<&'a str>,
+    /// Timeout (task timeout, delay duration, or signal timeout).
+    pub timeout: Option<std::time::Duration>,
+    /// Retry policy (only populated for [`NodeKind::Task`]).
+    pub retry_policy: Option<&'a RetryPolicy>,
+    /// Execution priority (only populated for [`NodeKind::Task`]).
+    pub priority: Option<u8>,
+}
+
+/// Lazy, stack-based iterator over workflow nodes in topological order.
+///
+/// Created by [`WorkflowContinuation::iter_nodes`].
+pub struct NodeIter<'a> {
+    stack: Vec<(&'a WorkflowContinuation, Option<&'a str>)>,
+}
+
+impl<'a> Iterator for NodeIter<'a> {
+    type Item = NodeInfo<'a>;
+
+    #[allow(clippy::too_many_lines)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let (cont, predecessor) = self.stack.pop()?;
+
+        let (id, kind, timeout, retry_policy, priority) = match cont {
+            WorkflowContinuation::Task {
+                id,
+                timeout,
+                retry_policy,
+                priority,
+                ..
+            } => (
+                id.as_str(),
+                NodeKind::Task,
+                *timeout,
+                retry_policy.as_ref(),
+                *priority,
+            ),
+            WorkflowContinuation::Fork { id, .. } => {
+                (id.as_str(), NodeKind::Fork, None, None, None)
+            }
+            WorkflowContinuation::Delay { id, duration, .. } => {
+                (id.as_str(), NodeKind::Delay, Some(*duration), None, None)
+            }
+            WorkflowContinuation::AwaitSignal { id, timeout, .. } => {
+                (id.as_str(), NodeKind::AwaitSignal, *timeout, None, None)
+            }
+            WorkflowContinuation::Branch { id, .. } => {
+                (id.as_str(), NodeKind::Branch, None, None, None)
+            }
+            WorkflowContinuation::Loop { id, .. } => {
+                (id.as_str(), NodeKind::Loop, None, None, None)
+            }
+            WorkflowContinuation::ChildWorkflow { id, .. } => {
+                (id.as_str(), NodeKind::ChildWorkflow, None, None, None)
+            }
+        };
+
+        // Push children in reverse order so the first child is popped next.
+        match cont {
+            WorkflowContinuation::Task { id, next, .. }
+            | WorkflowContinuation::Delay { id, next, .. }
+            | WorkflowContinuation::AwaitSignal { id, next, .. } => {
+                if let Some(n) = next {
+                    self.stack.push((n, Some(id)));
+                }
+            }
+            WorkflowContinuation::Fork { id, branches, join } => {
+                if let Some(j) = join {
+                    self.stack.push((j, Some(id)));
+                }
+                for b in branches.iter().rev() {
+                    self.stack.push((b, Some(id)));
+                }
+            }
+            WorkflowContinuation::Branch {
+                id,
+                branches,
+                default,
+                next,
+                ..
+            } => {
+                if let Some(n) = next {
+                    self.stack.push((n, Some(id)));
+                }
+                if let Some(d) = default {
+                    self.stack.push((d, Some(id)));
+                }
+                // stable sort for deterministic iteration
+                let mut keys: Vec<&String> = branches.keys().collect();
+                keys.sort();
+                for k in keys.into_iter().rev() {
+                    self.stack.push((&branches[k], Some(id)));
+                }
+            }
+            WorkflowContinuation::Loop { id, body, next, .. } => {
+                if let Some(n) = next {
+                    self.stack.push((n, Some(id)));
+                }
+                self.stack.push((body, Some(id)));
+            }
+            WorkflowContinuation::ChildWorkflow {
+                id, child, next, ..
+            } => {
+                if let Some(n) = next {
+                    self.stack.push((n, Some(id)));
+                }
+                self.stack.push((child, Some(id)));
+            }
+        }
+
+        Some(NodeInfo {
+            id,
+            kind,
+            predecessor_id: predecessor,
+            timeout,
+            retry_policy,
+            priority,
+        })
+    }
+}
+
 /// A workflow structure representing the tasks to execute.
 pub enum WorkflowContinuation {
     /// A sequential task node.
@@ -120,6 +271,10 @@ pub enum WorkflowContinuation {
         retry_policy: Option<RetryPolicy>,
         /// Schema version string (included in definition hash).
         version: Option<String>,
+        /// Execution priority (1–5). `None` inherits the default (Normal = 3).
+        priority: Option<u8>,
+        /// Affinity tags for worker routing.
+        tags: Vec<String>,
         /// Next node in the chain.
         next: Option<Box<WorkflowContinuation>>,
     },
@@ -282,6 +437,58 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Get the execution priority of the first task in this continuation.
+    ///
+    /// Returns `Some(priority)` for `Task` nodes, `None` for non-task nodes
+    /// (Delay, Signal, Branch). Recurses through Fork, Loop, and `ChildWorkflow`.
+    #[must_use]
+    pub fn first_task_priority(&self) -> Option<u8> {
+        match self {
+            WorkflowContinuation::Task { priority, .. } => *priority,
+            WorkflowContinuation::Delay { .. }
+            | WorkflowContinuation::AwaitSignal { .. }
+            | WorkflowContinuation::Branch { .. } => None,
+            WorkflowContinuation::Fork { branches, .. } => {
+                branches.first().and_then(|b| b.first_task_priority())
+            }
+            WorkflowContinuation::Loop { body, .. } => body.first_task_priority(),
+            WorkflowContinuation::ChildWorkflow { child, .. } => child.first_task_priority(),
+        }
+    }
+
+    /// Get the affinity tags of the first task in this continuation.
+    ///
+    /// Returns the tags for `Task` nodes, empty for non-task nodes
+    /// (Delay, Signal, Branch). Recurses through Fork, Loop, and `ChildWorkflow`.
+    #[must_use]
+    pub fn first_task_tags(&self) -> Vec<String> {
+        match self {
+            WorkflowContinuation::Task { tags, .. } => tags.clone(),
+            WorkflowContinuation::Delay { .. }
+            | WorkflowContinuation::AwaitSignal { .. }
+            | WorkflowContinuation::Branch { .. } => vec![],
+            WorkflowContinuation::Fork { branches, .. } => branches
+                .first()
+                .map(|b| b.first_task_tags())
+                .unwrap_or_default(),
+            WorkflowContinuation::Loop { body, .. } => body.first_task_tags(),
+            WorkflowContinuation::ChildWorkflow { child, .. } => child.first_task_tags(),
+        }
+    }
+
+    /// Build a [`TaskHint`] from the first task in this continuation.
+    ///
+    /// Combines [`first_task_id`], [`first_task_priority`], and [`first_task_tags`]
+    /// into a single struct for passing through `prepare_run` and `ParkReason`.
+    #[must_use]
+    pub fn first_task_hint(&self) -> crate::snapshot::TaskHint {
+        crate::snapshot::TaskHint {
+            id: self.first_task_id().to_string(),
+            priority: self.first_task_priority(),
+            tags: self.first_task_tags(),
+        }
+    }
+
     /// Get the terminal task ID of this continuation chain.
     ///
     /// Follows `get_next()` pointers to the end and returns the ID of the
@@ -436,11 +643,36 @@ impl WorkflowContinuation {
         }
     }
 
+    /// Look up the priority configured on a specific task by ID.
+    #[must_use]
+    pub fn get_task_priority(&self, task_id: &str) -> Option<u8> {
+        match self.find_task(task_id)? {
+            WorkflowContinuation::Task { priority, .. } => *priority,
+            _ => None,
+        }
+    }
+
+    /// Look up the affinity tags configured on a specific task by ID.
+    #[must_use]
+    pub fn get_task_tags(&self, task_id: &str) -> Vec<String> {
+        match self.find_task(task_id) {
+            Some(WorkflowContinuation::Task { tags, .. }) => tags.clone(),
+            _ => vec![],
+        }
+    }
+
+    /// Set the affinity tags on a specific task node found by ID.
+    pub fn set_task_tags(&mut self, target_id: &str, new_tags: Vec<String>) {
+        if let Some(WorkflowContinuation::Task { tags, .. }) = self.find_task_mut(target_id) {
+            *tags = new_tags;
+        }
+    }
+
     /// Build a [`TaskMetadata`](crate::task::TaskMetadata) from the fields
     /// available on the continuation node for the given task.
     ///
-    /// Only `timeout`, `retries`, and `version` are populated — display name,
-    /// description, and tags are left as defaults since they are not stored in
+    /// Only `timeout`, `retries`, `version`, and `tags` are populated — display
+    /// name and description are left as defaults since they are not stored in
     /// the continuation tree.
     #[must_use]
     pub fn build_task_metadata(&self, task_id: &str) -> crate::task::TaskMetadata {
@@ -449,14 +681,33 @@ impl WorkflowContinuation {
                 timeout,
                 retry_policy,
                 version,
+                priority,
+                tags,
                 ..
             }) => crate::task::TaskMetadata {
                 timeout: *timeout,
                 retries: retry_policy.clone(),
                 version: version.clone(),
+                priority: priority.and_then(crate::priority::Priority::from_u8),
+                tags: tags.clone(),
                 ..Default::default()
             },
             _ => crate::task::TaskMetadata::default(),
+        }
+    }
+
+    /// Returns a lazy iterator over all nodes in topological (execution) order.
+    ///
+    /// The traversal mirrors the order that the workflow engine would visit
+    /// each node during execution, making the result useful for introspection,
+    /// UI visualisation, and documentation generation.
+    ///
+    /// Each [`NodeInfo`] includes a `predecessor_id` linking back to the node
+    /// whose completion triggers this one. The root node has `None`.
+    #[must_use]
+    pub fn iter_nodes(&self) -> NodeIter<'_> {
+        NodeIter {
+            stack: vec![(self, None)],
         }
     }
 
@@ -470,6 +721,8 @@ impl WorkflowContinuation {
                 timeout,
                 retry_policy,
                 version,
+                priority,
+                tags,
                 next,
                 ..
             } => SerializableContinuation::Task {
@@ -477,6 +730,8 @@ impl WorkflowContinuation {
                 timeout_ms: timeout.map(|d| d.as_millis() as u64),
                 retry_policy: retry_policy.clone(),
                 version: version.clone(),
+                priority: *priority,
+                tags: tags.clone(),
                 next: next.as_ref().map(|n| Box::new(n.to_serializable())),
             },
             WorkflowContinuation::Fork { id, branches, join } => SerializableContinuation::Fork {
@@ -618,6 +873,12 @@ pub enum SerializableContinuation {
         /// Schema version string (included in definition hash).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,
+        /// Execution priority (1–5). `None` inherits the default (Normal = 3).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<u8>,
+        /// Affinity tags for worker routing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
         /// Next node in the chain.
         next: Option<Box<SerializableContinuation>>,
     },
@@ -726,6 +987,8 @@ impl SerializableContinuation {
                 timeout_ms,
                 retry_policy,
                 version,
+                priority,
+                tags,
                 next,
             } => {
                 let func = registry
@@ -741,6 +1004,8 @@ impl SerializableContinuation {
                     timeout: timeout_ms.map(std::time::Duration::from_millis),
                     retry_policy: retry_policy.clone(),
                     version: version.clone(),
+                    priority: *priority,
+                    tags: tags.clone(),
                     next,
                 })
             }
@@ -914,7 +1179,7 @@ impl SerializableContinuation {
                 }
             }
         }
-        let mut ids = Vec::new();
+        let mut ids = vec![];
         collect(self, &mut ids);
         ids
     }
@@ -939,6 +1204,7 @@ impl SerializableContinuation {
                     retry_policy,
                     version,
                     next,
+                    ..
                 } => {
                     hasher.update(b"T:"); // Tag for Task
                     hasher.update(id.as_bytes());
@@ -1097,6 +1363,22 @@ pub struct SerializedWorkflowState {
     pub definition_hash: String,
     /// The serializable continuation structure.
     pub continuation: SerializableContinuation,
+}
+
+/// Policy controlling what happens when [`run()`] is called with an
+/// `instance_id` that already has a persisted snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, strum::EnumString, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum ConflictPolicy {
+    /// Return an error if the instance already exists (default).
+    #[default]
+    Fail,
+    /// Reuse the existing snapshot: return its current status without re-executing.
+    #[strum(serialize = "use_existing", serialize = "useExisting")]
+    UseExisting,
+    /// Terminate the existing instance (delete snapshot + clear signals) and start fresh.
+    #[strum(serialize = "terminate_existing", serialize = "terminateExisting")]
+    TerminateExisting,
 }
 
 /// The status of a workflow execution.
@@ -1274,6 +1556,14 @@ impl<C, Input, M> Workflow<C, Input, M> {
         &self.context.metadata
     }
 
+    /// Returns a lazy iterator over all nodes in topological (execution) order.
+    ///
+    /// Convenience wrapper around [`WorkflowContinuation::iter_nodes`].
+    #[must_use]
+    pub fn iter_nodes(&self) -> NodeIter<'_> {
+        self.continuation.iter_nodes()
+    }
+
     /// Consume the workflow and return its continuation tree.
     ///
     /// Useful for inlining this workflow as a child inside another workflow.
@@ -1447,7 +1737,8 @@ impl<C, Input, M> Deref for SerializableWorkflow<C, Input, M> {
     clippy::uninlined_format_args,
     clippy::manual_let_else,
     clippy::too_many_lines,
-    clippy::items_after_statements
+    clippy::items_after_statements,
+    clippy::indexing_slicing
 )]
 mod tests {
     use crate::codec::{Decoder, Encoder, sealed};
@@ -1524,18 +1815,13 @@ mod tests {
         // Verify the continuation chain structure
         // Tasks should be linked in order: first -> second -> third
         let mut current = workflow.continuation();
-        let mut task_ids = Vec::new();
+        let mut task_ids = vec![];
 
-        loop {
-            match current {
-                crate::workflow::WorkflowContinuation::Task { id, next, .. } => {
-                    task_ids.push(id.clone());
-                    match next {
-                        Some(next_box) => current = next_box.as_ref(),
-                        None => break,
-                    }
-                }
-                _ => break,
+        while let crate::workflow::WorkflowContinuation::Task { id, next, .. } = current {
+            task_ids.push(id.clone());
+            match next {
+                Some(next_box) => current = next_box.as_ref(),
+                None => break,
             }
         }
 
@@ -1869,11 +2155,17 @@ mod tests {
             timeout_ms: None,
             retry_policy: None,
             version: None,
+            priority: None,
+
+            tags: vec![],
             next: Some(Box::new(SerializableContinuation::Task {
                 id: "step1".to_string(), // Duplicate!
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
+
+                tags: vec![],
                 next: None,
             })),
         };
@@ -1906,7 +2198,7 @@ mod tests {
             .unwrap();
 
         // Verify the chain structure: Task -> Delay -> Task
-        let mut ids = Vec::new();
+        let mut ids = vec![];
         let mut current = workflow.continuation();
         loop {
             match current {
@@ -2356,6 +2648,195 @@ mod tests {
             "version should be present in JSON: {json}"
         );
     }
+
+    // ========================================================================
+    // Topological nodes() tests
+    // ========================================================================
+
+    #[test]
+    fn test_nodes_single_task() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::{NodeKind, Workflow};
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .then("only", |i: u32| async move { Ok(i + 1) })
+            .build()
+            .unwrap();
+
+        let nodes: Vec<_> = workflow.iter_nodes().collect();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, "only");
+        assert_eq!(nodes[0].kind, NodeKind::Task);
+        assert!(nodes[0].predecessor_id.is_none());
+    }
+
+    #[test]
+    fn test_nodes_chain_order() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::{NodeKind, Workflow};
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .then("a", |i: u32| async move { Ok(i + 1) })
+            .then("b", |i: u32| async move { Ok(i + 2) })
+            .then("c", |i: u32| async move { Ok(i + 3) })
+            .build()
+            .unwrap();
+
+        let nodes: Vec<_> = workflow.iter_nodes().collect();
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        assert!(nodes.iter().all(|n| n.kind == NodeKind::Task));
+
+        // Predecessor chain
+        assert_eq!(nodes[0].predecessor_id, None);
+        assert_eq!(nodes[1].predecessor_id, Some("a"));
+        assert_eq!(nodes[2].predecessor_id, Some("b"));
+    }
+
+    #[test]
+    fn test_nodes_fork_with_join() {
+        use crate::context::WorkflowContext;
+        use crate::task::BranchOutputs;
+        use crate::workflow::{NodeKind, Workflow};
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .then("prepare", |i: u32| async move { Ok(i) })
+            .branches(|b| {
+                b.add("left", |i: u32| async move { Ok(i * 2) });
+                b.add("right", |i: u32| async move { Ok(i + 10) });
+            })
+            .join(
+                "merge",
+                |_: BranchOutputs<DummyCodec>| async move { Ok(0u32) },
+            )
+            .build()
+            .unwrap();
+
+        let nodes: Vec<_> = workflow.iter_nodes().collect();
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id).collect();
+
+        // prepare → fork → (left, right) → merge
+        assert_eq!(ids[0], "prepare");
+        assert_eq!(nodes[1].kind, NodeKind::Fork);
+        assert!(ids.contains(&"left"));
+        assert!(ids.contains(&"right"));
+        assert_eq!(*ids.last().unwrap(), "merge");
+
+        // Fork's predecessor is prepare
+        assert_eq!(nodes[1].predecessor_id, Some("prepare"));
+
+        // Branches' predecessor is the fork node
+        let fork_id = nodes[1].id;
+        let left_node = nodes.iter().find(|n| n.id == "left").unwrap();
+        let right_node = nodes.iter().find(|n| n.id == "right").unwrap();
+        assert_eq!(left_node.predecessor_id, Some(fork_id));
+        assert_eq!(right_node.predecessor_id, Some(fork_id));
+
+        // Merge's predecessor is the fork node
+        let merge_node = nodes.iter().find(|n| n.id == "merge").unwrap();
+        assert_eq!(merge_node.predecessor_id, Some(fork_id));
+    }
+
+    #[test]
+    fn test_nodes_loop() {
+        use crate::context::WorkflowContext;
+        use crate::loop_result::LoopResult;
+        use crate::workflow::{NodeKind, Workflow};
+        use std::sync::Arc;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .loop_task(
+                "iterate",
+                |i: u32| async move { Ok(LoopResult::Done(i)) },
+                5,
+            )
+            .then("after", |i: u32| async move { Ok(i) })
+            .build()
+            .unwrap();
+
+        let nodes: Vec<_> = workflow.iter_nodes().collect();
+
+        // loop_0 (Loop) → iterate (Task, body) → after (Task, next)
+        assert_eq!(nodes[0].kind, NodeKind::Loop);
+        assert_eq!(nodes[1].id, "iterate");
+        assert_eq!(nodes[1].kind, NodeKind::Task);
+        assert_eq!(nodes[2].id, "after");
+        assert_eq!(nodes[2].kind, NodeKind::Task);
+
+        // Predecessors
+        assert_eq!(nodes[0].predecessor_id, None);
+        assert_eq!(nodes[1].predecessor_id, Some(nodes[0].id)); // body → loop
+        assert_eq!(nodes[2].predecessor_id, Some(nodes[0].id)); // next → loop
+    }
+
+    #[test]
+    fn test_nodes_delay_reports_duration_as_timeout() {
+        use crate::context::WorkflowContext;
+        use crate::workflow::{NodeKind, Workflow};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow: Workflow<DummyCodec, u32> = WorkflowBuilder::new(ctx)
+            .delay("wait_5s", Duration::from_secs(5))
+            .then("after", |i: u32| async move { Ok(i) })
+            .build()
+            .unwrap();
+
+        let nodes: Vec<_> = workflow.iter_nodes().collect();
+        assert_eq!(nodes[0].id, "wait_5s");
+        assert_eq!(nodes[0].kind, NodeKind::Delay);
+        assert_eq!(nodes[0].timeout, Some(Duration::from_secs(5)));
+        assert_eq!(nodes[0].predecessor_id, None);
+
+        assert_eq!(nodes[1].id, "after");
+        assert_eq!(nodes[1].predecessor_id, Some("wait_5s"));
+    }
+
+    #[test]
+    fn test_nodes_metadata_extraction() {
+        use crate::context::WorkflowContext;
+        use crate::task::{RetryPolicy, TaskMetadata};
+        use crate::workflow::NodeKind;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let retry = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(100),
+            backoff_multiplier: 2.0,
+            max_delay: Some(Duration::from_secs(10)),
+        };
+
+        let ctx = WorkflowContext::new("test-workflow", Arc::new(DummyCodec), Arc::new(()));
+        let workflow = WorkflowBuilder::new(ctx)
+            .with_registry()
+            .then("step", |i: u32| async move { Ok(i) })
+            .with_metadata(TaskMetadata {
+                timeout: Some(Duration::from_secs(30)),
+                retries: Some(retry.clone()),
+                version: Some("2.0".into()),
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+
+        let nodes: Vec<_> = workflow.iter_nodes().collect();
+        assert_eq!(nodes.len(), 1);
+        let node = &nodes[0];
+
+        assert_eq!(node.id, "step");
+        assert_eq!(node.kind, NodeKind::Task);
+        assert_eq!(node.timeout, Some(Duration::from_secs(30)));
+        assert_eq!(node.retry_policy.unwrap().max_retries, 3);
+    }
 }
 
 #[cfg(test)]
@@ -2383,6 +2864,9 @@ mod proptests {
             timeout_ms: None,
             retry_policy: None,
             version: None,
+            priority: None,
+
+            tags: vec![],
             next: None,
         });
 
@@ -2402,6 +2886,9 @@ mod proptests {
                     timeout_ms,
                     retry_policy: None,
                     version: None,
+                    priority: None,
+
+                    tags: vec![],
                     next,
                 }),
             // Fork with branches and optional join
@@ -2509,6 +2996,9 @@ mod proptests {
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
+
+                tags: vec![],
                 next: None,
             })
             .boxed();
@@ -2525,6 +3015,9 @@ mod proptests {
                 timeout_ms: None,
                 retry_policy: None,
                 version: None,
+                priority: None,
+
+                tags: vec![],
                 next,
             }),
             // Fork with 0..3 branches (each gets unique prefix) and optional join
@@ -2679,7 +3172,7 @@ mod proptests {
 
     /// Collect all IDs in a continuation tree.
     fn collect_ids(cont: &SerializableContinuation) -> Vec<String> {
-        let mut ids = Vec::new();
+        let mut ids = vec![];
         fn walk(c: &SerializableContinuation, out: &mut Vec<String>) {
             match c {
                 SerializableContinuation::Task { id, next, .. }
@@ -2750,6 +3243,8 @@ mod proptests {
                 timeout_ms: *timeout_ms,
                 retry_policy: retry_policy.clone(),
                 version: version.clone(),
+                priority: None,
+                tags: vec![],
                 next: next.clone(),
             },
             SerializableContinuation::Fork { branches, join, .. } => {

@@ -29,6 +29,7 @@ declare module "sayiir" {
     retry?: RetryPolicy;
     description?: string;
     tags?: string[];
+    priority?: number;
     input?: ZodLike<TIn>;
     output?: ZodLike<TOut>;
   }
@@ -232,10 +233,37 @@ declare module "sayiir" {
     done(): Flow<TInput, BranchEnvelope<TBranchOut>>;
   }
 
+  /** The kind of node in a workflow DAG. */
+  type NodeKind = "task" | "fork" | "delay" | "await_signal" | "branch" | "loop" | "child_workflow";
+
+  /** Metadata about a single node in the workflow DAG. */
+  interface NodeInfo {
+    /** Unique node identifier. */
+    id: string;
+    /** Node kind. */
+    kind: NodeKind;
+    /** ID of the preceding node, or `undefined` for the root. */
+    predecessorId?: string;
+    /** Timeout in seconds (task timeout, delay duration, or signal timeout). */
+    timeoutSecs?: number;
+    /** Retry policy (tasks only). */
+    retryPolicy?: RetryPolicy;
+    /** Execution priority 1–5 (tasks only). */
+    priority?: number;
+  }
+
   class Workflow<TIn, TOut> {
     readonly workflowId: string;
     readonly definitionHash: string;
     readonly metadata?: Record<string, unknown>;
+
+    /**
+     * Return all nodes in topological (execution) order.
+     *
+     * Each `NodeInfo` carries the node's ID, kind, predecessor,
+     * and any configured timeout / retry / priority metadata.
+     */
+    iterNodes(): NodeInfo[];
   }
 
   /** Create a new flow builder. */
@@ -262,6 +290,7 @@ declare module "sayiir" {
     instanceId: string,
     input: TIn,
     backend: Backend,
+    conflictPolicy?: ConflictPolicy,
   ): WorkflowStatus<TOut>;
 
   /** Resume a workflow from its last checkpoint. */
@@ -296,9 +325,14 @@ declare module "sayiir" {
     backend: Backend,
   ): void;
 
+  /** Conflict policy when an `instanceId` already exists. */
+  type ConflictPolicy = "fail" | "useExisting" | "terminateExisting";
+
   interface DurableRunOptions {
     instanceId: string;
     backend: Backend;
+    /** What to do when `instanceId` already has a snapshot. Default: `"fail"`. */
+    conflictPolicy?: ConflictPolicy;
   }
 
   // ── Backends ──
@@ -351,15 +385,30 @@ declare module "sayiir" {
 
   class WorkerHandle {
     shutdown(): void;
-    cancelWorkflow(
+  }
+
+  interface WorkflowClientOptions {
+    conflictPolicy?: ConflictPolicy;
+  }
+
+  class WorkflowClient {
+    constructor(backend: Backend, opts?: WorkflowClientOptions);
+    submit<TIn, TOut>(
+      workflow: Workflow<TIn, TOut>,
+      instanceId: string,
+      input: TIn,
+    ): WorkflowStatus<TOut>;
+    cancel(
       instanceId: string,
       opts?: { reason?: string; cancelledBy?: string },
     ): void;
-    pauseWorkflow(
+    pause(
       instanceId: string,
       opts?: { reason?: string; pausedBy?: string },
     ): void;
-    unpauseWorkflow(instanceId: string): void;
+    unpause(instanceId: string): void;
     sendSignal(instanceId: string, signalName: string, payload: unknown): void;
+    status<TOut = unknown>(instanceId: string): WorkflowStatus<TOut>;
+    getTaskResult(instanceId: string, taskId: string): string | null;
   }
 }

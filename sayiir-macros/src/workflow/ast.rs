@@ -23,6 +23,10 @@ pub struct WorkflowDef {
     pub registry: Option<Expr>,
     /// Metadata expression (optional — defaults to `()`).
     pub metadata: Option<Expr>,
+    /// `Deps` container expression (optional — when present, tasks are built
+    /// via `Task::from_deps(deps)` instead of `Task::new()`, and missing
+    /// dependencies surface as `BuildErrors` at workflow construction time).
+    pub deps: Option<Expr>,
     /// Pipeline steps.
     pub steps: Vec<WorkflowStep>,
 }

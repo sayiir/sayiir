@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   Worker,
+  WorkflowClient,
   PostgresBackend,
   flow,
   task,
@@ -149,8 +150,9 @@ describe("Worker integration (Postgres)", () => {
     }
   });
 
-  it("cancels a workflow via handle", async () => {
+  it("cancels a workflow via client", async () => {
     const backend = makeBackend();
+    const client = new WorkflowClient(backend);
     const wf = flow<string>("cancel")
       .then(identity)
       .waitForSignal("sig", "approval")
@@ -158,13 +160,13 @@ describe("Worker integration (Postgres)", () => {
       .build();
     const iid = uid("cancel");
 
-    runDurableWorkflow(wf, iid, "start", backend);
+    client.submit(wf, iid, "start");
 
     const worker = new Worker(uid("w"), backend, [wf], { pollInterval: 100 });
     const handle = worker.start();
     try {
       await sleep(500);
-      handle.cancelWorkflow(iid, { reason: "test cancel" });
+      client.cancel(iid, { reason: "test cancel" });
 
       const result = await pollUntilTerminal(wf, iid, backend);
       expect(result.status).toBe("cancelled");
@@ -173,8 +175,9 @@ describe("Worker integration (Postgres)", () => {
     }
   });
 
-  it("pauses and unpauses a workflow via handle", async () => {
+  it("pauses and unpauses a workflow via client", async () => {
     const backend = makeBackend();
+    const client = new WorkflowClient(backend);
     const wf = flow<string>("pause")
       .then(identity)
       .waitForSignal("sig", "gate")
@@ -182,19 +185,19 @@ describe("Worker integration (Postgres)", () => {
       .build();
     const iid = uid("pause");
 
-    runDurableWorkflow(wf, iid, "data", backend);
+    client.submit(wf, iid, "data");
 
     const worker = new Worker(uid("w"), backend, [wf], { pollInterval: 100 });
     const handle = worker.start();
     try {
       await sleep(500);
-      handle.pauseWorkflow(iid, { reason: "test pause" });
+      client.pause(iid, { reason: "test pause" });
 
       const paused = resumeWorkflow(wf, iid, backend);
       expect(paused.status).toBe("paused");
 
-      handle.unpauseWorkflow(iid);
-      handle.sendSignal(iid, "gate", "go");
+      client.unpause(iid);
+      client.sendSignal(iid, "gate", "go");
 
       const result = await pollUntilTerminal(wf, iid, backend);
       expect(result.status).toBe("completed");
@@ -203,8 +206,9 @@ describe("Worker integration (Postgres)", () => {
     }
   });
 
-  it("sends a signal via handle", async () => {
+  it("sends a signal via client", async () => {
     const backend = makeBackend();
+    const client = new WorkflowClient(backend);
     const wf = flow<string>("signal")
       .then(identity)
       .waitForSignal("sig", "approval")
@@ -212,13 +216,13 @@ describe("Worker integration (Postgres)", () => {
       .build();
     const iid = uid("signal");
 
-    runDurableWorkflow(wf, iid, "input", backend);
+    client.submit(wf, iid, "input");
 
     const worker = new Worker(uid("w"), backend, [wf], { pollInterval: 100 });
     const handle = worker.start();
     try {
       await sleep(500);
-      handle.sendSignal(iid, "approval", { approved: true });
+      client.sendSignal(iid, "approval", { approved: true });
 
       const result = await pollUntilTerminal<{ approved: boolean }>(
         wf,
@@ -229,6 +233,39 @@ describe("Worker integration (Postgres)", () => {
       if (result.status === "completed") {
         expect(result.output).toEqual("input");
       }
+    } finally {
+      handle.shutdown();
+    }
+  });
+
+  it("submits via client and worker executes", async () => {
+    const backend = makeBackend();
+    const client = new WorkflowClient(backend);
+    const wf = flow<number>("client-submit")
+      .then(double)
+      .then(addOne)
+      .build();
+    const iid = uid("client-submit");
+
+    const submitStatus = client.submit(wf, iid, 10);
+    expect(submitStatus.status).toBe("in_progress");
+
+    // Check status via client
+    const s = client.status(iid);
+    expect(s.status).toBe("in_progress");
+
+    const worker = new Worker(uid("w"), backend, [wf], { pollInterval: 100 });
+    const handle = worker.start();
+    try {
+      const result = await pollUntilTerminal<number>(wf, iid, backend);
+      expect(result.status).toBe("completed");
+      if (result.status === "completed") {
+        expect(result.output).toBe(21); // (10 * 2) + 1
+      }
+
+      // Check completed status via client
+      const completedStatus = client.status<number>(iid);
+      expect(completedStatus.status).toBe("completed");
     } finally {
       handle.shutdown();
     }

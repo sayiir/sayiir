@@ -11,6 +11,20 @@ use std::collections::HashMap;
 
 use crate::task::RetryPolicy;
 
+/// Pre-computed metadata about the next task to execute.
+///
+/// Carried through `ParkReason` and `prepare_run` so that persistence-layer
+/// advancement inherits priority and tags without re-reading the continuation.
+#[derive(Debug, Clone, Default)]
+pub struct TaskHint {
+    /// The task identifier.
+    pub id: String,
+    /// Optional execution priority (lower = higher priority).
+    pub priority: Option<u8>,
+    /// Affinity tags for worker routing.
+    pub tags: Vec<String>,
+}
+
 /// A persisted deadline for a running task.
 ///
 /// When a task with a timeout starts, the absolute wall-clock deadline is
@@ -378,6 +392,54 @@ impl WorkflowSnapshotState {
         }
     }
 
+    /// Convert the snapshot state to a [`WorkflowStatus`], including parked
+    /// in-progress positions (delay, signal, fork) instead of collapsing them
+    /// to [`WorkflowStatus::InProgress`].
+    #[must_use]
+    pub fn as_status(&self) -> crate::workflow::WorkflowStatus {
+        use crate::workflow::WorkflowStatus;
+        if let Some(terminal) = self.as_terminal_status() {
+            return terminal;
+        }
+        match self {
+            Self::InProgress {
+                position:
+                    ExecutionPosition::AtDelay {
+                        wake_at, delay_id, ..
+                    },
+                ..
+            } => WorkflowStatus::Waiting {
+                wake_at: *wake_at,
+                delay_id: delay_id.clone(),
+            },
+            Self::InProgress {
+                position:
+                    ExecutionPosition::AtFork {
+                        fork_id, wake_at, ..
+                    },
+                ..
+            } => WorkflowStatus::Waiting {
+                wake_at: *wake_at,
+                delay_id: fork_id.clone(),
+            },
+            Self::InProgress {
+                position:
+                    ExecutionPosition::AtSignal {
+                        signal_id,
+                        signal_name,
+                        wake_at,
+                        ..
+                    },
+                ..
+            } => WorkflowStatus::AwaitingSignal {
+                signal_id: signal_id.clone(),
+                signal_name: signal_name.clone(),
+                wake_at: *wake_at,
+            },
+            _ => WorkflowStatus::InProgress,
+        }
+    }
+
     /// Extract the final output if in `Completed` state.
     #[must_use]
     pub fn completed_output(&self) -> Option<&Bytes> {
@@ -453,6 +515,18 @@ pub struct WorkflowSnapshot {
     /// Current iteration counts for active loops (keyed by loop ID).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub loop_iterations: HashMap<String, u32>,
+    /// Execution priority of the current task (1–5).
+    ///
+    /// Set from the continuation tree when advancing to a new task. Used by
+    /// persistence backends to order `find_available_tasks` results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_priority: Option<u8>,
+    /// Affinity tags of the current task.
+    ///
+    /// Set from the continuation tree when advancing to a new task. Used by
+    /// persistence backends to filter `find_available_tasks` results by worker tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_tags: Vec<String>,
     /// W3C `traceparent` header for distributed trace context propagation.
     ///
     /// This is an in-memory carrier — never serialized in the snapshot blob.
@@ -462,6 +536,12 @@ pub struct WorkflowSnapshot {
 }
 
 impl WorkflowSnapshot {
+    /// Apply a [`TaskHint`] to this snapshot, setting priority and tags.
+    pub fn set_task_hint(&mut self, hint: &TaskHint) {
+        self.task_priority = hint.priority;
+        self.task_tags.clone_from(&hint.tags);
+    }
+
     /// Get the current Unix timestamp.
     #[allow(clippy::cast_sign_loss)] // Timestamps are always positive
     fn current_timestamp() -> u64 {
@@ -486,6 +566,8 @@ impl WorkflowSnapshot {
             task_deadline: None,
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
+            task_priority: None,
+            task_tags: vec![],
             trace_parent: None,
         }
     }
@@ -511,6 +593,8 @@ impl WorkflowSnapshot {
             task_deadline: None,
             task_retries: HashMap::new(),
             loop_iterations: HashMap::new(),
+            task_priority: None,
+            task_tags: vec![],
             trace_parent: None,
         }
     }
@@ -539,6 +623,27 @@ impl WorkflowSnapshot {
     /// Get the result of a completed task as Bytes, if available.
     pub fn get_task_result_bytes(&self, task_id: &str) -> Option<Bytes> {
         self.get_task_result(task_id).map(|r| r.output.clone())
+    }
+
+    /// Get all completed task results, if the state carries them.
+    ///
+    /// Returns `Some` for `InProgress`, `Cancelled`, and `Paused` states (which
+    /// retain `completed_tasks`), and `None` for `Completed` and `Failed` states
+    /// (where task results have been discarded).
+    #[must_use]
+    pub fn get_all_task_results(&self) -> Option<&HashMap<String, TaskResult>> {
+        match &self.state {
+            WorkflowSnapshotState::InProgress {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Cancelled {
+                completed_tasks, ..
+            }
+            | WorkflowSnapshotState::Paused {
+                completed_tasks, ..
+            } => Some(completed_tasks),
+            WorkflowSnapshotState::Completed { .. } | WorkflowSnapshotState::Failed { .. } => None,
+        }
     }
 
     /// Mark a task as completed and store its result.
@@ -823,6 +928,29 @@ impl WorkflowSnapshot {
         self.updated_at = Self::current_timestamp();
     }
 
+    /// The task priority of the current task, defaulting to 3 (Normal).
+    #[must_use]
+    pub fn current_task_priority(&self) -> u8 {
+        self.task_priority.unwrap_or(3)
+    }
+
+    /// The affinity tags of the current task.
+    #[must_use]
+    pub fn current_task_tags(&self) -> &[String] {
+        &self.task_tags
+    }
+
+    /// Returns `true` if the given task last failed on the specified worker.
+    ///
+    /// Used as a soft bias to prefer a different worker on retry.
+    #[must_use]
+    pub fn has_failed_on_worker(&self, task_id: &str, worker_id: &str) -> bool {
+        self.task_retries
+            .get(task_id)
+            .and_then(|rs| rs.last_failed_worker.as_deref())
+            .is_some_and(|w| w == worker_id)
+    }
+
     // --- Persistence helpers (database column extraction) ---
 
     /// The current task ID, if the workflow is at a task position.
@@ -1058,6 +1186,60 @@ mod tests {
         let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
         snapshot.mark_failed("err".into());
         assert!(snapshot.get_task_result("task-1").is_none());
+    }
+
+    #[test]
+    fn test_get_all_task_results_in_progress() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_task_completed("task-2".into(), Bytes::from("out2"));
+
+        let results = snapshot.get_all_task_results();
+        assert!(results.is_some());
+        let results = results.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results["task-1"].output, Bytes::from("out1"));
+        assert_eq!(results["task-2"].output, Bytes::from("out2"));
+    }
+
+    #[test]
+    fn test_get_all_task_results_cancelled() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_cancelled(Some("reason".into()), None, Some("task-2".into()));
+
+        let results = snapshot.get_all_task_results();
+        assert!(results.is_some());
+        assert_eq!(results.unwrap().len(), 1);
+        assert_eq!(results.unwrap()["task-1"].output, Bytes::from("out1"));
+    }
+
+    #[test]
+    fn test_get_all_task_results_paused() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        let request = PauseRequest::new(Some("maintenance".into()), None);
+        snapshot.mark_paused(&request);
+
+        let results = snapshot.get_all_task_results();
+        assert!(results.is_some());
+        assert_eq!(results.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_get_all_task_results_completed() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_completed(Bytes::from("final"));
+        assert!(snapshot.get_all_task_results().is_none());
+    }
+
+    #[test]
+    fn test_get_all_task_results_failed() {
+        let mut snapshot = WorkflowSnapshot::new("inst-1".into(), "hash-1".into());
+        snapshot.mark_task_completed("task-1".into(), Bytes::from("out1"));
+        snapshot.mark_failed("error".into());
+        assert!(snapshot.get_all_task_results().is_none());
     }
 
     #[test]

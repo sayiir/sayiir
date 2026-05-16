@@ -31,3 +31,9 @@ create_exception!(
     WorkflowError,
     "Schema mismatch: failed to decode a task input or output."
 );
+create_exception!(
+    _sayiir,
+    InstanceAlreadyExistsError,
+    WorkflowError,
+    "A workflow instance with this ID already exists."
+);

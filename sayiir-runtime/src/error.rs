@@ -32,6 +32,10 @@ pub enum RuntimeError {
     /// Tokio task join error (branch spawn failures).
     #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
+
+    /// A workflow instance with this ID already exists (conflict policy = Fail).
+    #[error("Workflow instance already exists: {0}")]
+    InstanceAlreadyExists(String),
 }
 
 impl From<BoxError> for RuntimeError {

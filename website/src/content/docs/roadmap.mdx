@@ -92,6 +92,19 @@ Production observability for understanding what's happening: which tasks are run
 
 This ships as part of the open-source library, independent of [Sayiir Server](/server/).
 
+### Dependency injection for Python & Node.js
+
+**Status:** Planned
+
+Rust v0.5 introduced a `Deps` container that resolves `#[inject]` services into `#[task]` constructors by type, with build-time verification of missing services (see the [v0.5 changelog](/changelog/v05/)). The Python and Node.js bindings don't have an equivalent yet — tasks today rely on closures or module-level state for shared services.
+
+**What we're considering:**
+- A `Deps` container surfaced in the binding layer with the same type-keyed semantics
+- Decorator-side opt-in (`@task` / `task()` argument) that mirrors Rust's `#[inject]`
+- Build-time error reporting through the existing `WorkflowError`/`BuildError` exceptions
+
+This is purely ergonomics — both bindings can already support DI patterns through plain Python/JS conventions; the work is about giving them the same first-class, build-time-checked story Rust has.
+
 ### Streaming Support
 
 **Status:** Exploring

@@ -41,6 +41,7 @@ const configured = task("configured-task", (input: string) => {
 - `retry` (RetryPolicy, optional) — Full retry configuration
 - `tags` (string[], optional) — Categorization tags
 - `description` (string, optional) — Human-readable description
+- `priority` (number, optional) — Execution priority (1–5, lower = higher priority, default: 3)
 - `input` (ZodLike, optional) — Zod schema for input validation
 - `output` (ZodLike, optional) — Zod schema for output validation
 
@@ -94,6 +95,7 @@ interface TaskMetadata {
   };
   tags?: string[];
   version?: string;
+  priority?: number;
 }
 ```
 
@@ -472,12 +474,24 @@ const result = await runWorkflow(workflow, 42, {
   instanceId: "run-001",
   backend,
 });
+
+// Idempotent — safe to call multiple times
+const result = await runWorkflow(workflow, 42, {
+  instanceId: "run-001",
+  backend,
+  conflictPolicy: "useExisting",
+});
 ```
 
 **Parameters:**
 - `workflow` (Workflow\<TIn, TOut\>) — The workflow to run
 - `input` (TIn) — Input to the first task
-- `opts` (DurableRunOptions, optional) — `{ instanceId: string, backend: Backend }` for durable execution
+- `opts` (DurableRunOptions, optional) — Durable execution options
+
+**DurableRunOptions:**
+- `instanceId` (string) — Unique execution instance ID
+- `backend` (Backend) — Persistence backend
+- `conflictPolicy` (ConflictPolicy, optional) — What to do when `instanceId` already has a snapshot: `"fail"` (default), `"useExisting"`, or `"terminateExisting"`
 
 **Returns:** Promise\<TOut\> — The workflow result
 
@@ -499,7 +513,7 @@ const result = runWorkflowSync(workflow, 42);
 
 **Returns:** TOut — The workflow result
 
-### runDurableWorkflow(workflow, instanceId, input, backend)
+### runDurableWorkflow(workflow, instanceId, input, backend, conflictPolicy?)
 
 Run a workflow with checkpointing and durability. Returns `WorkflowStatus`.
 
@@ -512,6 +526,9 @@ const status = runDurableWorkflow(workflow, "run-001", 42, backend);
 if (status.status === "completed") {
   console.log(status.output); // 42
 }
+
+// Idempotent — returns existing status if already run
+const status = runDurableWorkflow(workflow, "run-001", 42, backend, "useExisting");
 ```
 
 **Parameters:**
@@ -519,6 +536,7 @@ if (status.status === "completed") {
 - `instanceId` (string) — Unique identifier for this execution
 - `input` (TIn) — Input to the first task
 - `backend` (Backend) — Persistence backend
+- `conflictPolicy` (ConflictPolicy, optional) — `"fail"` (default), `"useExisting"`, or `"terminateExisting"`
 
 **Returns:** `WorkflowStatus<TOut>`
 
@@ -797,12 +815,44 @@ Request a graceful shutdown. The worker finishes in-flight tasks before stopping
 handle.shutdown();
 ```
 
-#### .cancelWorkflow(instanceId, opts?)
+:::note
+Lifecycle operations (cancel, pause, unpause, send signal) have moved to [`WorkflowClient`](#workflowclient). The `WorkerHandle` is now focused on worker lifecycle only (shutdown).
+:::
 
-Request cancellation of a workflow instance via the worker's backend.
+## WorkflowClient
+
+Client for submitting and controlling workflow instances. Unlike `runDurableWorkflow()`, the client does **not** execute tasks — it only creates initial snapshots and stores lifecycle signals. A `Worker` picks up and executes the work.
+
+### new WorkflowClient(backend, opts?)
+
+Create a new workflow client.
 
 ```typescript
-handle.cancelWorkflow("order-42", {
+import { WorkflowClient, PostgresBackend } from "sayiir";
+
+const backend = PostgresBackend.connect("postgresql://localhost/sayiir");
+const client = new WorkflowClient(backend, { conflictPolicy: "useExisting" });
+```
+
+**WorkflowClientOptions:**
+- `conflictPolicy` (ConflictPolicy, optional) — What to do when an `instanceId` already exists: `"fail"` (default), `"useExisting"`, or `"terminateExisting"`
+
+#### .submit(workflow, instanceId, input)
+
+Submit a workflow for execution. Creates an initial snapshot so a Worker can pick it up.
+
+```typescript
+const status = client.submit(workflow, "order-42", { items: [1, 2, 3] });
+```
+
+**Returns:** `WorkflowStatus<TOut>`
+
+#### .cancel(instanceId, opts?)
+
+Request cancellation of a workflow instance.
+
+```typescript
+client.cancel("order-42", {
   reason: "Out of stock",
   cancelledBy: "admin@example.com",
 });
@@ -813,12 +863,12 @@ handle.cancelWorkflow("order-42", {
 - `opts.reason` (string, optional) — Reason for cancellation
 - `opts.cancelledBy` (string, optional) — Identifier of who requested cancellation
 
-#### .pauseWorkflow(instanceId, opts?)
+#### .pause(instanceId, opts?)
 
 Pause a workflow instance at the next checkpoint.
 
 ```typescript
-handle.pauseWorkflow("order-42", { reason: "Maintenance window" });
+client.pause("order-42", { reason: "Maintenance window" });
 ```
 
 **Parameters:**
@@ -826,12 +876,12 @@ handle.pauseWorkflow("order-42", { reason: "Maintenance window" });
 - `opts.reason` (string, optional) — Reason for pause
 - `opts.pausedBy` (string, optional) — Identifier of who requested pause
 
-#### .unpauseWorkflow(instanceId)
+#### .unpause(instanceId)
 
 Unpause a paused workflow instance.
 
 ```typescript
-handle.unpauseWorkflow("order-42");
+client.unpause("order-42");
 ```
 
 #### .sendSignal(instanceId, signalName, payload)
@@ -839,13 +889,46 @@ handle.unpauseWorkflow("order-42");
 Send an external signal to a workflow instance.
 
 ```typescript
-handle.sendSignal("order-42", "manager_approval", { approved: true });
+client.sendSignal("order-42", "manager_approval", { approved: true });
 ```
 
 **Parameters:**
 - `instanceId` (string) — The workflow instance ID
 - `signalName` (string) — The signal name
 - `payload` (unknown) — The signal payload (serialized to JSON)
+
+#### .status(instanceId)
+
+Get the current status of a workflow instance.
+
+```typescript
+const status = client.status<string>("order-42");
+if (status.status === "completed") {
+  console.log(status.output);
+}
+```
+
+**Returns:** `WorkflowStatus<TOut>`
+
+#### .getTaskResult(instanceId, taskId)
+
+Get a single task result from a workflow instance.
+
+Returns the JSON-encoded task output, or `null` if the task was never executed. For completed or failed workflows, the result is recovered from the backend's history or cache.
+
+```typescript
+const result = client.getTaskResult("order-42", "validate_order");
+if (result !== null) {
+  const parsed = JSON.parse(result);
+  console.log(parsed);
+}
+```
+
+**Parameters:**
+- `instanceId` (string) — The workflow instance ID
+- `taskId` (string) — The task ID to retrieve the result for
+
+**Returns:** `string | null`
 
 ## Exceptions
 

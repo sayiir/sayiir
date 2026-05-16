@@ -604,9 +604,11 @@ where
     .await?;
 
     if let Some(next_cont) = params.next {
+        let hint = next_cont.first_task_hint();
         snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: next_cont.first_task_id().to_string(),
+            task_id: hint.id.clone(),
         });
+        snapshot.set_task_hint(&hint);
     }
     #[cfg(feature = "otel")]
     {

@@ -18,8 +18,8 @@ use sayiir_core::codec::sealed;
 use sayiir_core::codec::{Codec, EnvelopeCodec};
 use sayiir_core::context::WorkflowContext;
 use sayiir_core::error::WorkflowError;
-use sayiir_core::snapshot::{ExecutionPosition, SignalKind, SignalRequest, WorkflowSnapshot};
-use sayiir_core::workflow::{Workflow, WorkflowContinuation, WorkflowStatus};
+use sayiir_core::snapshot::{ExecutionPosition, TaskHint, WorkflowSnapshot};
+use sayiir_core::workflow::{ConflictPolicy, Workflow, WorkflowContinuation, WorkflowStatus};
 use sayiir_persistence::PersistentBackend;
 
 use crate::error::RuntimeError;
@@ -75,6 +75,7 @@ use crate::execution::{
 /// ```
 pub struct CheckpointingRunner<B> {
     backend: Arc<B>,
+    conflict_policy: ConflictPolicy,
 }
 
 impl<B> CheckpointingRunner<B>
@@ -85,73 +86,25 @@ where
     pub fn new(backend: B) -> Self {
         Self {
             backend: Arc::new(backend),
+            conflict_policy: ConflictPolicy::default(),
         }
     }
 
-    /// Request cancellation of a workflow.
+    /// Create a runner from a shared backend reference.
     ///
-    /// This requests cancellation of the specified workflow instance.
-    /// The workflow will be cancelled at the next task boundary.
-    ///
-    /// # Parameters
-    ///
-    /// - `instance_id`: The workflow instance ID to cancel
-    /// - `reason`: Optional reason for the cancellation
-    /// - `cancelled_by`: Optional identifier of who requested the cancellation
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the workflow cannot be cancelled (not found or in terminal state).
-    pub async fn cancel(
-        &self,
-        instance_id: &str,
-        reason: Option<String>,
-        cancelled_by: Option<String>,
-    ) -> Result<(), RuntimeError> {
-        self.backend
-            .store_signal(
-                instance_id,
-                SignalKind::Cancel,
-                SignalRequest::new(reason, cancelled_by),
-            )
-            .await?;
-
-        Ok(())
+    /// Useful when the same backend is shared with a [`WorkflowClient`](crate::WorkflowClient).
+    pub fn from_shared(backend: Arc<B>) -> Self {
+        Self {
+            backend,
+            conflict_policy: ConflictPolicy::default(),
+        }
     }
 
-    /// Request pausing of a workflow.
-    ///
-    /// The workflow will be paused at the next task boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backend fails to store the pause request.
-    pub async fn pause(
-        &self,
-        instance_id: &str,
-        reason: Option<String>,
-        paused_by: Option<String>,
-    ) -> Result<(), RuntimeError> {
-        self.backend
-            .store_signal(
-                instance_id,
-                SignalKind::Pause,
-                SignalRequest::new(reason, paused_by),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Unpause a paused workflow and return the updated snapshot.
-    ///
-    /// Transitions the workflow from Paused back to `InProgress`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backend fails to unpause the workflow.
-    pub async fn unpause(&self, instance_id: &str) -> Result<WorkflowSnapshot, RuntimeError> {
-        let snapshot = self.backend.unpause(instance_id).await?;
-        Ok(snapshot)
+    /// Set the conflict policy for duplicate instance IDs.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
     }
 
     /// Get a reference to the backend.
@@ -168,12 +121,13 @@ where
     /// Run a workflow from the beginning, saving checkpoints after each task.
     ///
     /// The `instance_id` uniquely identifies this workflow execution instance.
-    /// If a snapshot with this ID already exists, it will be overwritten.
+    /// The [`ConflictPolicy`] (set via [`with_conflict_policy`](Self::with_conflict_policy))
+    /// controls behaviour when a snapshot with this ID already exists.
     ///
     /// # Errors
     ///
-    /// Returns an error if the workflow cannot be executed or if snapshot
-    /// operations fail.
+    /// Returns an error if the workflow cannot be executed, if snapshot
+    /// operations fail, or if the conflict policy rejects a duplicate.
     pub async fn run<C, Input, M>(
         &self,
         workflow: &Workflow<C, Input, M>,
@@ -189,24 +143,44 @@ where
             + sealed::DecodeValue<Input>
             + 'static,
     {
+        use crate::{PrepareRunOutcome, check_existing_instance, prepare_run};
+
         let instance_id = instance_id.into();
         let definition_hash = workflow.definition_hash().to_string();
+        let conflict_policy = self.conflict_policy;
 
-        // Encode initial input
+        // Phase 1: check for existing instance before encoding input.
+        if let Some((status, _output)) = check_existing_instance(
+            &instance_id,
+            &definition_hash,
+            self.backend.as_ref(),
+            conflict_policy,
+        )
+        .await?
+        {
+            return Ok(status);
+        }
+
+        // Phase 2: encode input and prepare snapshot.
         let input_bytes = workflow.context().codec.encode(&input)?;
+        let first_task = workflow.continuation().first_task_hint();
 
-        // Create initial snapshot with input
-        let mut snapshot = WorkflowSnapshot::with_initial_input(
-            instance_id.clone(),
-            definition_hash.clone(),
+        let mut snapshot = match prepare_run(
+            instance_id,
+            definition_hash,
             input_bytes.clone(),
-        );
-        snapshot.update_position(ExecutionPosition::AtTask {
-            task_id: workflow.continuation().first_task_id().to_string(),
-        });
-
-        // Save initial snapshot
-        self.backend.save_snapshot(&snapshot).await?;
+            first_task,
+            self.backend.as_ref(),
+            conflict_policy,
+            true, // prechecked — check_existing_instance already ran
+        )
+        .await?
+        {
+            PrepareRunOutcome::Fresh(s) => *s,
+            PrepareRunOutcome::ExistingStatus(status, _output) => {
+                return Ok(status);
+            }
+        };
 
         // Execute workflow with checkpointing
         let context = workflow.context().clone();
@@ -343,9 +317,13 @@ where
                     .await?;
 
                     if let Some(next_cont) = current.get_next() {
-                        snapshot.update_position(ExecutionPosition::AtTask {
-                            task_id: next_cont.first_task_id().to_string(),
+                        let next_id = next_cont.first_task_id().to_string();
+                        snapshot.set_task_hint(&TaskHint {
+                            id: next_id.clone(),
+                            priority: continuation.get_task_priority(&next_id),
+                            tags: continuation.get_task_tags(&next_id),
                         });
+                        snapshot.update_position(ExecutionPosition::AtTask { task_id: next_id });
                     }
                     backend.save_snapshot(snapshot).await?;
                     check_guards(backend.as_ref(), &snapshot.instance_id, None).await?;
@@ -365,7 +343,7 @@ where
                         Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
                             delay_id: id.clone(),
                             wake_at,
-                            next_task_id: next.as_deref().map(|n| n.first_task_id().to_string()),
+                            next_task: next.as_deref().map(WorkflowContinuation::first_task_hint),
                             passthrough: current_input.clone(),
                         })))
                     }
@@ -391,8 +369,14 @@ where
                             Ok(Some(payload)) => {
                                 snapshot.mark_task_completed(id.clone(), payload);
                                 if let Some(next_cont) = next.as_deref() {
+                                    let next_id = next_cont.first_task_id().to_string();
+                                    snapshot.set_task_hint(&TaskHint {
+                                        id: next_id.clone(),
+                                        priority: continuation.get_task_priority(&next_id),
+                                        tags: continuation.get_task_tags(&next_id),
+                                    });
                                     snapshot.update_position(ExecutionPosition::AtTask {
-                                        task_id: next_cont.first_task_id().to_string(),
+                                        task_id: next_id,
                                     });
                                 }
                                 backend.save_snapshot(snapshot).await?;
@@ -406,9 +390,9 @@ where
                                     signal_id: id.clone(),
                                     signal_name: signal_name.clone(),
                                     timeout: compute_signal_timeout(timeout.as_ref()),
-                                    next_task_id: next
+                                    next_task: next
                                         .as_deref()
-                                        .map(|n| n.first_task_id().to_string()),
+                                        .map(WorkflowContinuation::first_task_hint),
                                 },
                             ))),
                             Err(e) => Err(RuntimeError::from(e)),
@@ -818,7 +802,7 @@ where
                             Ok(ControlFlow::Break(StepOutcome::Park(ParkReason::Delay {
                                 delay_id: id.clone(),
                                 wake_at,
-                                next_task_id: None,
+                                next_task: None,
                                 passthrough: current_input.clone(),
                             })))
                         }
@@ -839,7 +823,7 @@ where
                                     signal_id: id.clone(),
                                     signal_name: signal_name.clone(),
                                     timeout: wake_at,
-                                    next_task_id: None,
+                                    next_task: None,
                                 },
                             )))
                         }
@@ -1021,6 +1005,7 @@ mod tests {
     use sayiir_core::codec::Encoder;
     use sayiir_core::context::WorkflowContext;
     use sayiir_core::error::BoxError;
+    use sayiir_core::snapshot::SignalKind;
     use sayiir_core::snapshot::WorkflowSnapshotState;
     use sayiir_core::task::BranchOutputs;
     use sayiir_core::workflow::WorkflowBuilder;
@@ -1282,8 +1267,9 @@ mod tests {
         });
         runner.backend().save_snapshot(&snapshot).await.unwrap();
 
-        // Request cancellation
-        runner
+        // Request cancellation via WorkflowClient
+        let client = crate::WorkflowClient::from_shared(Arc::clone(runner.backend()));
+        client
             .cancel(
                 "inst-cancel",
                 Some("testing".into()),
@@ -1325,7 +1311,8 @@ mod tests {
         });
         runner.backend().save_snapshot(&snapshot).await.unwrap();
 
-        runner
+        let client = crate::WorkflowClient::from_shared(Arc::clone(runner.backend()));
+        client
             .cancel("inst-precancel", Some("pre-cancel".into()), None)
             .await
             .unwrap();
@@ -1509,8 +1496,9 @@ mod tests {
         let status = runner.run(&workflow, "inst-1", 10u32).await.unwrap();
         assert!(matches!(status, WorkflowStatus::Waiting { .. }));
 
-        // Cancel during delay
-        runner
+        // Cancel during delay via WorkflowClient
+        let client = crate::WorkflowClient::from_shared(Arc::clone(runner.backend()));
+        client
             .cancel(
                 "inst-1",
                 Some("no longer needed".into()),

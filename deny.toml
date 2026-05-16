@@ -7,11 +7,7 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
-ignore = [
-    # Transitive dev-dependency: testcontainers → bollard → rustls-pemfile.
-    # No fix available until bollard updates. Only used in tests, not shipped.
-    "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0"]

@@ -35,11 +35,13 @@ Core domain types and traits. Runtime-agnostic — no persistence, no execution 
 - `TaskExecutionContext` — Read-only context available to running tasks (workflow ID, instance ID, task ID, metadata)
 - `WorkflowSnapshot` — Checkpoint of in-flight execution state
 - `TaskRegistry` — Name → factory map for task deserialization
+- `Deps` / `DepsBuilder` / `MissingDep` (in `sayiir_core::deps`) — type-keyed dependency-injection container used by `#[task]` and `workflow! { deps: … }`
 
 **Key Traits:**
 - `CoreTask` — Task execution trait (input → output)
 - `Codec` — Pluggable serialization (JSON, rkyv, etc.)
 - `BranchKey` — Typed routing key for conditional branching
+- `DepsInjectable` — auto-implemented by `#[task]`; drives `TaskRegistry::register_from_deps` and the `workflow! { deps: … }` expansion
 
 ### sayiir-persistence
 
@@ -71,6 +73,7 @@ Execution engines and worker orchestration.
 - `PooledWorker` — Distributed, multi-machine execution
 - `PooledWorkerBuilder` — Builder for `PooledWorker` with auto-generated worker IDs
 - `WorkerHandle` — Handle to a spawned worker
+- `WorkflowClient` — Client for submitting and controlling workflow instances
 - `JsonCodec` — JSON serialization codec (feature: `json`)
 - `RkyvCodec` — Binary serialization codec (feature: `rkyv`)
 - `RuntimeError` — Execution errors
@@ -99,8 +102,9 @@ use sayiir_runtime::prelude::*;
 **Re-exports:**
 - `WorkflowBuilder`, `Workflow`, `WorkflowStatus`, `WorkflowContext`
 - `TaskRegistry`
-- `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `PooledWorkerBuilder`, `WorkerHandle`, `WorkflowRunExt`
+- `CheckpointingRunner`, `InProcessRunner`, `PooledWorker`, `PooledWorkerBuilder`, `WorkerHandle`, `WorkflowClient`, `WorkflowRunExt`
 - `InMemoryBackend`, `PersistentBackend`
+- `Deps`, `DepsBuilder`, `MissingDep`
 - `JsonCodec` (if `json` feature enabled)
 - `RkyvCodec` (if `rkyv` feature enabled)
 - `BranchKey` trait
@@ -159,9 +163,14 @@ async fn charge(
     stripe.charge(&order).await
 }
 
-// Usage
+// Manual construction (single task, no macro):
 let stripe = Arc::new(StripeClient::new("sk_test_..."));
 let charge_task = ChargeTask::new(stripe);
+
+// Or via Deps, resolved by type — required when used as a `task_name` step in
+// the `workflow!` macro (see the `deps:` field below).
+let deps = Deps::builder().insert(stripe.clone()).build();
+let charge_task = ChargeTask::from_deps(&deps);
 ```
 
 ### Attribute Options
@@ -176,6 +185,7 @@ let charge_task = ChargeTask::new(stripe);
 | `tags` | String | `tags = "io"` | Categorization tag (repeatable) |
 | `display_name` | String | `display_name = "Charge Card"` | Human-readable name |
 | `description` | String | `description = "..."` | Task description |
+| `priority` | Integer (1–5) | `priority = 1` | Execution priority (1 = Critical, 5 = Minimal) |
 
 :::caution[Always set an explicit `id` in production]
 By default, the task ID is the function name. Renaming the function silently changes the ID, which breaks in-flight workflows on resume — the engine can't find the task in the checkpoint. Always use `id = "stable_name"` for any workflow that may be running when you deploy.
@@ -203,16 +213,28 @@ The macro generates a PascalCase struct with a `Task` suffix from the function n
 
 The struct includes:
 - `new()` constructor with positional args for injected dependencies
+- `from_deps(&Deps)` — construct by resolving every `#[inject]` parameter from a `Deps` container. Used by `workflow! { deps: … }`.
+- `verify_deps(&Deps) -> Vec<MissingDep>` — report which `#[inject]` types are absent from the container, without constructing the task.
+- `register()` — register a hand-constructed instance into a `TaskRegistry`.
 - `task_id()` — returns the task ID (`id` attribute or function name)
 - `metadata()` — returns `TaskMetadata` from attributes
-- `register()` method for `TaskRegistry` integration
 - `CoreTask` trait implementation
+- `DepsInjectable` trait implementation (delegates to `from_deps` / `verify_deps`). Enables `TaskRegistry::register_from_deps::<T, _>(codec, &deps)` for task-library and worker setup.
 
 The original function is preserved for direct use/testing.
 
 ## workflow! Macro
 
-Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions — no manual `registry.register(...)` calls needed. Uses named fields: `name` and `steps` (with optional `codec` and `registry`):
+Build a workflow pipeline with a concise DSL. The macro automatically registers `#[task]`-annotated functions — no manual `registry.register(...)` calls needed. Uses named fields:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Workflow ID (string literal) |
+| `steps` | yes | Pipeline (bracketed, comma-separated) |
+| `codec` | no | Codec type path (default: `JsonCodec`) |
+| `deps` | no | `&Deps` container — when set, tasks are built via `Task::from_deps(deps)` and missing dependencies surface as `BuildError::MissingDep` entries inside the returned `BuildErrors` at construction time. |
+| `registry` | no | Pre-built `TaskRegistry` to merge into (default: `TaskRegistry::new()`) |
+| `metadata` | no | User metadata wrapped in `Arc<_>` (default: `Arc::new(())`) |
 
 ### Basic Syntax
 
@@ -220,6 +242,20 @@ Build a workflow pipeline with a concise DSL. The macro automatically registers 
 let workflow = workflow! {
     name: "workflow-id",
     steps: [task_a, task_b, task_c]
+}.unwrap();
+```
+
+With injected dependencies:
+
+```rust
+let deps = Deps::builder()
+    .insert(Arc::new(StripeClient::new("sk_test_...")))
+    .build();
+
+let workflow = workflow! {
+    name: "checkout",
+    deps: &deps,
+    steps: [validate, charge, send_email]
 }.unwrap();
 ```
 
@@ -270,6 +306,10 @@ let workflow = workflow! {
     steps: [double(x: i32) { Ok(x * 2) }, triple(x: i32) { Ok(x * 3) }]
 }.unwrap();
 ```
+
+:::caution[Inline tasks can't be injected]
+Inline tasks are anonymous closures, so they have no `#[inject]` syntax and the `deps:` field does not see them. If an inline task needs a shared service, promote it to a named `#[task]` function — that gives you `from_deps` resolution and lets the macro auto-register it.
+:::
 
 Durable delay:
 
@@ -334,7 +374,171 @@ Each branch arm uses `[task, task]` syntax for task chains. The `_` arm is the o
 
 ### Returns
 
-A `Result<SerializableWorkflow<C, Input, ()>, BuildError>` expression.
+A `Result<SerializableWorkflow<C, Input, ()>, BuildErrors>` expression. When `deps:` is set, missing dependencies appear as `BuildError::MissingDep` entries inside the returned `BuildErrors`.
+
+## Deps
+
+Type-keyed dependency-injection container, re-exported as `sayiir_runtime::Deps` and (with builder/error types) `sayiir_core::deps`. The `#[task]` macro generates `from_deps` / `verify_deps` against it, and `workflow! { deps: &deps }` consumes it.
+
+### Building
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+let deps = Deps::builder()
+    .insert(Arc::new(StripeClient::new("sk_test_...")))
+    .insert(Arc::new(Mailer::new(/* … */)))
+    .insert(HttpClient::default())   // any Clone + Send + Sync + 'static
+    .build();
+```
+
+The container stores one value per Rust type. Inserting a second value of the same type replaces the first. Lookup is by exact `TypeId` — there is no coercion to traits.
+
+### Resolving
+
+| Method | Returns | When to use |
+|--------|---------|-------------|
+| `get::<T>()` | `Option<T>` | You can handle "absent" gracefully. |
+| `try_get::<T>()` | `Result<T, MissingDep>` | You want a structured error. |
+| `expect::<T>()` | `T` (panics on miss) | Used by macro-generated `from_deps`; rely on `verify_deps` to catch misses at build time. |
+| `contains::<T>()` | `bool` | Cheap presence check. |
+
+All resolution methods clone the stored value, so wrap shared singletons in `Arc<…>` before inserting.
+
+### Layering containers
+
+`Deps::merge(other)` moves every entry from `other` into `self`; entries in `other` win on type collision. `DepsBuilder::merge(other)` is the same operation expressed mid-build. Use this to combine a library-provided base container with application-specific services:
+
+```rust
+let base = library::deps();                          // Deps from a library
+
+// Layer at build time:
+let combined = Deps::builder()
+    .merge(base)                                     // pull in everything
+    .insert(Arc::new(AppLogger::new()))              // add/override
+    .build();
+
+// Or extend an existing container in place:
+let mut deps = library::deps();
+deps.merge(application::deps());
+```
+
+### Errors
+
+`MissingDep { type_name: &'static str }` — the type name of an absent dependency. Returned by `Deps::try_get` and listed by `Task::verify_deps`.
+
+`BuildError::MissingDep { task_id: &'static str, type_name: &'static str }` — the build-time variant the `workflow!` macro emits when `verify_deps` reports a miss. Both fields come from `const fn`s (`Task::task_id()` and `std::any::type_name`), so they avoid per-error allocation. Lives in `sayiir_core::error::BuildError`.
+
+`BuildError::RegistryDepsConflict { task_id: &'static str }` — emitted when the same task is provided by both `registry:` (pre-built instance) and `deps:` (would be auto-registered via `from_deps`). The macro refuses to silently pick one; drop the duplicate from either source to resolve.
+
+### Generic registration via `DepsInjectable`
+
+Every `#[task]` struct gets an auto-generated `impl DepsInjectable`, which lets `TaskRegistry` populate itself generically — useful for hand-rolled task libraries and `PooledWorker` setup where the `workflow!` macro is not the entry point:
+
+```rust
+use sayiir_runtime::prelude::*;   // brings DepsInjectable into scope
+
+let mut reg = TaskRegistry::new();
+reg.register_from_deps::<ChargeTask, _>(codec.clone(), &deps)?;
+reg.register_from_deps::<RefundTask, _>(codec,         &deps)?;
+```
+
+The method calls `T::verify_deps` first and returns `Err(Vec<MissingDep>)` before any mutation, so the registry is never left half-populated on failure. The `_` for the `Codec` parameter is inferred from the surrounding context.
+
+### `registry:` × `deps:` interaction
+
+The two fields cover non-overlapping needs and the macro enforces that:
+
+- Use **`deps:` alone** when every `#[task]` in `steps:` has its services resolvable from the container. This is the most common shape.
+- Use **`registry:` alone** when you want to override a `#[task]`'s default `new()`-built instance (e.g. for testing) or merge in an externally-built task library. The pre-built instance wins via the existing dedup.
+- Pass **both** only when each task lives in exactly one source. If a task ID appears in both, the build returns `BuildError::RegistryDepsConflict { task_id }` — pick one source and re-run.
+
+### Sub-workflow composition
+
+The same `Deps` can build a child workflow and then be passed to the parent — `flow` works unchanged:
+
+```rust
+let refund = workflow! {
+    name: "refund",
+    deps: &deps,
+    steps: [lookup, reverse_charge]
+}.unwrap();
+
+let checkout = workflow! {
+    name: "checkout",
+    deps: &deps,
+    steps: [fetch, charge, flow refund]
+}.unwrap();
+```
+
+## TaskRegistry
+
+Name → factory map for registering task implementations. Used by workers and for workflow deserialization — only task IDs and structure are serialized, implementations are looked up from the registry at runtime.
+
+### Basic Usage
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+let codec = Arc::new(JsonCodec);
+let mut registry = TaskRegistry::new();
+
+// Register a struct implementing CoreTask
+registry.register("double", codec.clone(), DoubleTask);
+
+// Register a closure
+registry.register_fn("add_ten", codec.clone(), |i: u32| async move { Ok(i + 10) });
+```
+
+### Builder Pattern
+
+```rust
+let registry = TaskRegistry::with_codec(codec)
+    .register_fn("double", |i: u32| async move { Ok(i * 2) })
+    .register_fn("add_ten", |i: u32| async move { Ok(i + 10) })
+    .build();
+```
+
+### merge(other)
+
+Merge all entries from another registry. Existing entries are **not** overwritten — the parent's registrations take precedence on ID collision.
+
+The `#[task]` macro generates a `register()` method on each struct, so building reusable libraries is straightforward:
+
+```rust
+// billing_tasks crate — each #[task] gets a register() method
+pub fn billing_tasks(codec: Arc<JsonCodec>, stripe: Arc<StripeClient>) -> TaskRegistry {
+    let mut reg = TaskRegistry::new();
+    ChargeTask::register(&mut reg, codec.clone(), ChargeTask::new(stripe.clone()));
+    RefundTask::register(&mut reg, codec.clone(), RefundTask::new(stripe));
+    reg
+}
+
+// application — merge libraries into a single registry
+let mut registry = TaskRegistry::new();
+registry.merge(billing_tasks(codec.clone(), stripe));
+registry.merge(notification_tasks(codec.clone(), mailer));
+```
+
+### Key Methods
+
+| Method | Description |
+|--------|-------------|
+| `new()` | Create an empty registry |
+| `register(id, codec, task)` | Register a `CoreTask` implementation |
+| `register_with_metadata(id, codec, task, metadata)` | Register with metadata |
+| `register_fn(id, codec, closure)` | Register a closure as a task |
+| `register_fn_with_metadata(id, codec, closure, metadata)` | Register closure with metadata |
+| `register_join(id, codec, closure)` | Register a fork/join combiner |
+| `merge(other)` | Merge another registry (parent wins on collision) |
+| `with_codec(codec)` → `RegistryBuilder` | Start a builder with shared codec |
+| `get(id)` → `Option<UntypedCoreTask>` | Look up a task by ID |
+| `get_metadata(id)` → `Option<&TaskMetadata>` | Get task metadata |
+| `contains(id)` → `bool` | Check if a task ID is registered |
+| `len()` / `is_empty()` | Registry size |
+| `task_ids()` → `impl Iterator<Item = &str>` | Iterate registered IDs |
 
 ## WorkflowBuilder
 
@@ -622,11 +826,39 @@ runner.unpause("instance-001").await?;
 
 **Methods:**
 - `new(backend)` — Create with any `PersistentBackend`
+- `with_conflict_policy(policy)` — Set the conflict policy (builder pattern). See `ConflictPolicy` below.
 - `run(workflow, instance_id, input)` — Run to completion
 - `resume(workflow, instance_id)` — Resume from checkpoint
 - `cancel(instance_id, reason, by)` — Cancel workflow
 - `pause(instance_id, reason, by)` — Pause workflow
 - `unpause(instance_id)` — Unpause workflow
+
+### ConflictPolicy
+
+Controls what happens when `run()` is called with an `instance_id` that already has a snapshot.
+
+```rust
+use sayiir_core::workflow::ConflictPolicy;
+
+// Default: fail if instance already exists
+let runner = CheckpointingRunner::new(backend.clone());
+
+// Idempotent: return existing status
+let runner = CheckpointingRunner::new(backend.clone())
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+
+// Force restart: delete old snapshot, run fresh
+let runner = CheckpointingRunner::new(backend.clone())
+    .with_conflict_policy(ConflictPolicy::TerminateExisting);
+```
+
+**Variants:**
+
+| Variant | Behavior |
+|---|---|
+| `Fail` (default) | Returns `RuntimeError::InstanceAlreadyExists` if the instance exists. |
+| `UseExisting` | Returns the existing workflow status without re-running. |
+| `TerminateExisting` | Deletes the existing snapshot and starts a fresh execution. |
 
 ### PooledWorker
 
@@ -671,6 +903,7 @@ let worker = PooledWorker::builder(backend, registry)
 - `builder(backend, registry)` → `PooledWorkerBuilder` — Create builder with auto-generated ID
 - `with_claim_ttl(Option<Duration>)` — Set claim timeout
 - `with_batch_size(NonZeroUsize)` — Set tasks per poll (default: 1)
+- `with_aging_interval(Duration)` — Set priority aging interval (default: 300s, must be > 0)
 - `spawn(poll_interval, workflows)` → `WorkerHandle` — Start polling
 
 ### InProcessRunner
@@ -685,6 +918,49 @@ let result = runner.run(workflow, input_data).await?;
 ```
 
 No persistence, no resume. Useful for testing or short-lived workflows.
+
+### WorkflowClient
+
+Client for submitting and controlling workflow instances without executing tasks. Use this with `PooledWorker` for the distributed model.
+
+```rust
+use sayiir_runtime::WorkflowClient;
+use sayiir_core::workflow::ConflictPolicy;
+
+let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+let client = WorkflowClient::new(backend)
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+
+// Submit a workflow
+let (status, output) = client.submit(&workflow, "order-42", input).await?;
+
+// Lifecycle operations
+client.cancel("order-42", Some("Out of stock".into()), None).await?;
+client.pause("order-42", Some("Maintenance".into()), None).await?;
+client.unpause("order-42").await?;
+client.send_event("order-42", "signal_name", payload).await?;
+let status = client.status("order-42").await?;
+
+// Retrieve a single task result (requires TaskResultStore)
+let result = client.get_task_result("order-42", "validate_order").await?;
+
+// Type-safe variant using #[task]-generated struct
+let result = client.get_task_result_of::<ValidateOrderTask>("order-42").await?;
+```
+
+**Methods:**
+- `new(backend)` — Create client (wraps backend in Arc)
+- `from_shared(Arc<B>)` — Create from shared backend reference
+- `with_conflict_policy(ConflictPolicy)` — Set duplicate instance policy
+- `backend()` → `&Arc<B>` — Access the backend
+- `submit(workflow, instance_id, input)` → `(WorkflowStatus, Option<Bytes>)`
+- `cancel(instance_id, reason, cancelled_by)` — Store a cancel signal
+- `pause(instance_id, reason, paused_by)` — Store a pause signal
+- `unpause(instance_id)` — Unpause a paused workflow
+- `send_event(instance_id, signal_name, payload)` — Send an external event
+- `status(instance_id)` → `WorkflowStatus` — Query current status
+- `get_task_result(instance_id, task_id)` → `Option<Bytes>` — Get a single task result (requires `B: TaskResultStore`)
+- `get_task_result_of::<T>(instance_id)` → `Option<Bytes>` — Type-safe variant that derives task ID from a `TaskIdentifier` impl (e.g. `#[task]`-generated struct)
 
 ### WorkflowRunExt (run_once)
 
@@ -749,6 +1025,18 @@ pub trait CoreTask: Send + Sync + 'static {
 ```
 
 Usually implemented via the `#[task]` macro, but can be implemented manually if needed.
+
+### TaskIdentifier
+
+Lightweight trait that only provides the task's unique string identifier. Unlike `RegisterableTask`, it does **not** require `CoreTask` — making it usable in client-only contexts that refer to tasks by ID without pulling in the task implementation.
+
+```rust
+pub trait TaskIdentifier {
+    fn task_id() -> &'static str;
+}
+```
+
+Automatically implemented for all `RegisterableTask` types (including `#[task]`-generated structs). Used by `WorkflowClient::get_task_result_of::<T>()` for type-safe task result retrieval.
 
 ### BranchKey
 
@@ -926,6 +1214,9 @@ match result {
     Err(RuntimeError::Build(e)) => eprintln!("Build error: {e}"),
     Err(RuntimeError::Backend(e)) => eprintln!("Storage error: {e}"),
     Err(RuntimeError::Task(e)) => eprintln!("Task error: {e}"),
+    Err(RuntimeError::InstanceAlreadyExists(id)) => {
+        eprintln!("Instance already exists: {id}");
+    }
     _ => {}
 }
 ```

@@ -3,10 +3,10 @@
 //! This is a simple implementation that stores snapshots in a HashMap.
 //! Useful for testing and as a reference implementation.
 
-use crate::backend::{BackendError, SignalStore, SnapshotStore, TaskClaimStore};
+use crate::backend::{BackendError, SignalStore, SnapshotStore, TaskClaimStore, TaskResultStore};
 use chrono::{Duration, Utc};
 use sayiir_core::snapshot::{
-    ExecutionPosition, PauseRequest, SignalKind, SignalRequest, WorkflowSnapshot,
+    ExecutionPosition, PauseRequest, SignalKind, SignalRequest, TaskResult, WorkflowSnapshot,
     WorkflowSnapshotState,
 };
 use sayiir_core::task_claim::{AvailableTask, TaskClaim};
@@ -26,6 +26,9 @@ pub struct InMemoryBackend {
     /// Buffered external events per `(instance_id, signal_name)`, FIFO order.
     #[allow(clippy::type_complexity)]
     events: Arc<RwLock<HashMap<(String, String), VecDeque<bytes::Bytes>>>>,
+    /// Cached task results for workflows that have transitioned to terminal states
+    /// (Completed/Failed), where `completed_tasks` is no longer in the snapshot.
+    task_results_cache: Arc<RwLock<HashMap<String, HashMap<String, TaskResult>>>>,
 }
 
 impl InMemoryBackend {
@@ -51,6 +54,18 @@ impl InMemoryBackend {
 impl SnapshotStore for InMemoryBackend {
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
+
+        // When transitioning to Completed/Failed, cache the previous snapshot's
+        // completed_tasks so they can still be retrieved via TaskResultStore.
+        if (snapshot.state.is_completed() || snapshot.state.is_failed())
+            && let Some(prev) = snapshots.get(&snapshot.instance_id)
+            && let Some(tasks) = prev.get_all_task_results()
+            && !tasks.is_empty()
+        {
+            let mut cache = self.task_results_cache.write().map_err(Self::lock_error)?;
+            cache.insert(snapshot.instance_id.clone(), tasks.clone());
+        }
+
         snapshots.insert(snapshot.instance_id.clone(), snapshot.clone());
         Ok(())
     }
@@ -83,13 +98,49 @@ impl SnapshotStore for InMemoryBackend {
         let mut snapshots = self.snapshots.write().map_err(Self::lock_error)?;
         snapshots
             .remove(instance_id)
-            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))
-            .map(|_| ())
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+        // Clean up the task results cache for this instance.
+        if let Ok(mut cache) = self.task_results_cache.write() {
+            cache.remove(instance_id);
+        }
+        Ok(())
     }
 
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
         let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
         Ok(snapshots.keys().cloned().collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskResultStore
+// ---------------------------------------------------------------------------
+
+impl TaskResultStore for InMemoryBackend {
+    async fn load_task_result(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> Result<Option<bytes::Bytes>, BackendError> {
+        let snapshots = self.snapshots.read().map_err(Self::lock_error)?;
+        let snapshot = snapshots
+            .get(instance_id)
+            .ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
+
+        // Try the current snapshot first (works for InProgress/Cancelled/Paused).
+        if let Some(result) = snapshot.get_task_result_bytes(task_id) {
+            return Ok(Some(result));
+        }
+
+        // For terminal states (Completed/Failed), fall back to the cache.
+        if snapshot.state.is_completed() || snapshot.state.is_failed() {
+            let cache = self.task_results_cache.read().map_err(Self::lock_error)?;
+            if let Some(tasks) = cache.get(instance_id) {
+                return Ok(tasks.get(task_id).map(|r| r.output.clone()));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -410,6 +461,8 @@ impl TaskClaimStore for InMemoryBackend {
         &self,
         worker_id: &str,
         limit: usize,
+        aging_interval: chrono::Duration,
+        worker_tags: &[String],
     ) -> Result<Vec<AvailableTask>, BackendError> {
         // Clean up expired claims first
         {
@@ -596,6 +649,17 @@ impl TaskClaimStore for InMemoryBackend {
                         continue;
                     }
 
+                    // Tag-based filtering: if worker has tags, only accept tasks
+                    // whose tags are a subset of the worker's tags (or untagged).
+                    if !worker_tags.is_empty() {
+                        let task_tags = snapshot.current_task_tags();
+                        if !task_tags.is_empty()
+                            && !task_tags.iter().all(|t| worker_tags.contains(t))
+                        {
+                            continue;
+                        }
+                    }
+
                     let input = if completed_tasks.is_empty() {
                         snapshot.initial_input_bytes()
                     } else {
@@ -619,14 +683,34 @@ impl TaskClaimStore for InMemoryBackend {
             }
         }
 
-        // Soft worker bias: tasks that did NOT fail on this worker come first.
-        // `false < true`, so non-failed-on-this-worker tasks are sorted first.
-        available.sort_by_key(|t| {
-            snapshots
-                .get(&t.instance_id)
-                .and_then(|s| s.task_retries.get(&t.task_id))
-                .and_then(|rs| rs.last_failed_worker.as_deref())
-                .is_some_and(|w| w == worker_id)
+        // Sort by (worker_bias, effective_priority). Worker bias is primary
+        // (avoid re-executing on the same worker that failed), then by effective
+        // priority with aging. Lower effective priority = higher urgency.
+        // Clamp to a minimum of 1s to prevent division by zero.
+        #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        let aging_secs = (aging_interval.num_milliseconds() as f64 / 1000.0).max(1.0);
+        #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        let now_ts = Utc::now().timestamp() as f64;
+        available.sort_by(|a, b| {
+            let worker_bias = |t: &AvailableTask| -> bool {
+                snapshots
+                    .get(&t.instance_id)
+                    .is_some_and(|s| s.has_failed_on_worker(&t.task_id, worker_id))
+            };
+            let eff_priority = |t: &AvailableTask| -> f64 {
+                let snap = snapshots.get(&t.instance_id);
+                let base = snap.map_or(3.0, |s| f64::from(s.current_task_priority()));
+                let updated = snap.map_or(now_ts, |s| s.updated_at as f64);
+                let wait = now_ts - updated;
+                base - wait / aging_secs
+            };
+            let ba = worker_bias(a);
+            let bb = worker_bias(b);
+            ba.cmp(&bb).then_with(|| {
+                let ea = eff_priority(a);
+                let eb = eff_priority(b);
+                ea.partial_cmp(&eb).unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         Ok(available)
@@ -1324,7 +1408,10 @@ mod tests {
             .await
             .unwrap();
 
-        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
 
         assert!(
             !tasks.iter().any(|t| t.instance_id == "workflow-1"),
@@ -1681,7 +1768,10 @@ mod tests {
             .await
             .unwrap();
 
-        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
 
         assert!(
             !tasks.iter().any(|t| t.instance_id == "workflow-1"),
@@ -1785,7 +1875,10 @@ mod tests {
         snapshot.mark_task_completed("wait_1h".to_string(), bytes::Bytes::from(vec![42]));
         backend.save_snapshot(&snapshot).await.unwrap();
 
-        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
         assert!(
             tasks.is_empty(),
             "workflow at unexpired delay should not appear in available tasks"
@@ -1812,7 +1905,10 @@ mod tests {
         snapshot.mark_task_completed("wait_done".to_string(), bytes::Bytes::from(vec![42]));
         backend.save_snapshot(&snapshot).await.unwrap();
 
-        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
 
         // The delay has expired, so the position should have been advanced to "process"
         assert_eq!(tasks.len(), 1);
@@ -1852,7 +1948,10 @@ mod tests {
         snapshot.mark_task_completed("final_wait".to_string(), bytes::Bytes::from(vec![42]));
         backend.save_snapshot(&snapshot).await.unwrap();
 
-        let tasks = backend.find_available_tasks("worker-1", 10).await.unwrap();
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
 
         // No available tasks — the workflow should have been marked completed
         assert!(
@@ -1866,6 +1965,207 @@ mod tests {
             loaded.state.is_completed(),
             "workflow should be completed when delay is last node and expired"
         );
+    }
+
+    // ── Priority ordering & aging ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_available_tasks_returns_higher_priority_first() {
+        let backend = InMemoryBackend::new();
+        let input = bytes::Bytes::from("input");
+
+        // Create three workflows with different priorities:
+        // wf-low (priority 5), wf-normal (priority 3), wf-high (priority 1)
+        for (id, priority) in [("wf-low", 5u8), ("wf-normal", 3), ("wf-high", 1)] {
+            let mut snapshot = WorkflowSnapshot::with_initial_input(
+                id.to_string(),
+                "hash".to_string(),
+                input.clone(),
+            );
+            snapshot.task_priority = Some(priority);
+            snapshot.update_position(ExecutionPosition::AtTask {
+                task_id: "task-a".to_string(),
+            });
+            backend.save_snapshot(&snapshot).await.unwrap();
+        }
+
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].instance_id, "wf-high");
+        assert_eq!(tasks[1].instance_id, "wf-normal");
+        assert_eq!(tasks[2].instance_id, "wf-low");
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_aging_promotes_low_priority() {
+        let backend = InMemoryBackend::new();
+        let input = bytes::Bytes::from("input");
+
+        // Fresh high-priority workflow (priority 1).
+        let mut high = WorkflowSnapshot::with_initial_input(
+            "wf-high".to_string(),
+            "hash".to_string(),
+            input.clone(),
+        );
+        high.task_priority = Some(1);
+        high.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".to_string(),
+        });
+        // updated_at stays at "now"
+        backend.save_snapshot(&high).await.unwrap();
+
+        // Low-priority workflow (priority 5) that has been waiting a long time.
+        let mut low = WorkflowSnapshot::with_initial_input(
+            "wf-low".to_string(),
+            "hash".to_string(),
+            input.clone(),
+        );
+        low.task_priority = Some(5);
+        low.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".to_string(),
+        });
+        // Simulate long wait: push updated_at 10 minutes into the past.
+        low.updated_at = (chrono::Utc::now().timestamp() - 600) as u64;
+        backend.save_snapshot(&low).await.unwrap();
+
+        // With a 60s aging interval, the low-priority task's effective priority:
+        //   5 - (600 / 60) = 5 - 10 = -5
+        // The high-priority task's effective priority:
+        //   1 - (~0 / 60) ≈ 1
+        // So the aged low-priority task should come first.
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::seconds(60), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks[0].instance_id, "wf-low",
+            "aged low-priority task should be promoted ahead of fresh high-priority task"
+        );
+        assert_eq!(tasks[1].instance_id, "wf-high");
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_zero_aging_interval_no_panic() {
+        let backend = InMemoryBackend::new();
+        let input = bytes::Bytes::from("input");
+
+        let mut snapshot =
+            WorkflowSnapshot::with_initial_input("wf-1".to_string(), "hash".to_string(), input);
+        snapshot.task_priority = Some(3);
+        snapshot.update_position(ExecutionPosition::AtTask {
+            task_id: "task-a".to_string(),
+        });
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Zero aging interval should not panic or divide by zero.
+        let tasks = backend
+            .find_available_tasks("worker-1", 10, chrono::Duration::zero(), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.len(), 1);
+    }
+
+    // ── Worker tag filtering ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_available_tasks_filters_by_worker_tags() {
+        let backend = InMemoryBackend::new();
+
+        // Task tagged ["gpu"]
+        let mut snap1 = WorkflowSnapshot::with_initial_input(
+            "wf-gpu".into(),
+            "h1".into(),
+            bytes::Bytes::from("1"),
+        );
+        snap1.update_position(ExecutionPosition::AtTask {
+            task_id: "t1".into(),
+        });
+        snap1.task_tags = vec!["gpu".into()];
+        backend.save_snapshot(&snap1).await.unwrap();
+
+        // Task tagged ["cpu"]
+        let mut snap2 = WorkflowSnapshot::with_initial_input(
+            "wf-cpu".into(),
+            "h1".into(),
+            bytes::Bytes::from("2"),
+        );
+        snap2.update_position(ExecutionPosition::AtTask {
+            task_id: "t2".into(),
+        });
+        snap2.task_tags = vec!["cpu".into()];
+        backend.save_snapshot(&snap2).await.unwrap();
+
+        // Worker with ["gpu"] should only see the gpu task
+        let tasks = backend
+            .find_available_tasks("w1", 10, chrono::Duration::seconds(300), &["gpu".into()])
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].instance_id, "wf-gpu");
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_untagged_worker_accepts_all() {
+        let backend = InMemoryBackend::new();
+
+        let mut snap1 = WorkflowSnapshot::with_initial_input(
+            "wf-tagged".into(),
+            "h1".into(),
+            bytes::Bytes::from("1"),
+        );
+        snap1.update_position(ExecutionPosition::AtTask {
+            task_id: "t1".into(),
+        });
+        snap1.task_tags = vec!["gpu".into()];
+        backend.save_snapshot(&snap1).await.unwrap();
+
+        let mut snap2 = WorkflowSnapshot::with_initial_input(
+            "wf-plain".into(),
+            "h1".into(),
+            bytes::Bytes::from("2"),
+        );
+        snap2.update_position(ExecutionPosition::AtTask {
+            task_id: "t2".into(),
+        });
+        backend.save_snapshot(&snap2).await.unwrap();
+
+        // Untagged worker should see both
+        let tasks = backend
+            .find_available_tasks("w1", 10, chrono::Duration::seconds(300), &[])
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_available_tasks_untagged_tasks_accepted_by_tagged_worker() {
+        let backend = InMemoryBackend::new();
+
+        // Untagged task
+        let mut snap = WorkflowSnapshot::with_initial_input(
+            "wf-plain".into(),
+            "h1".into(),
+            bytes::Bytes::from("1"),
+        );
+        snap.update_position(ExecutionPosition::AtTask {
+            task_id: "t1".into(),
+        });
+        backend.save_snapshot(&snap).await.unwrap();
+
+        // Tagged worker should still pick up untagged tasks
+        let tasks = backend
+            .find_available_tasks("w1", 10, chrono::Duration::seconds(300), &["gpu".into()])
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].instance_id, "wf-plain");
     }
 
     // ── Event queue (send_event / consume_event) ────────────────────────
@@ -1922,5 +2222,89 @@ mod tests {
 
         let b = backend.consume_event("wf-1", "sig_b").await.unwrap();
         assert_eq!(b.as_deref(), Some(b"b_payload".as_slice()));
+    }
+
+    // ─── TaskResultStore ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_load_task_result_in_progress() {
+        let backend = InMemoryBackend::new();
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+        assert_eq!(result, Some(bytes::Bytes::from("out1")));
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_not_found() {
+        let backend = InMemoryBackend::new();
+        let snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend
+            .load_task_result("wf-1", "no-such-task")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_nonexistent_instance() {
+        let backend = InMemoryBackend::new();
+        let result = backend.load_task_result("no-such-wf", "task-1").await;
+        assert!(matches!(result, Err(BackendError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_after_completion() {
+        let backend = InMemoryBackend::new();
+
+        // Create workflow with a completed task
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Complete the workflow — save_snapshot caches the task results
+        snapshot.mark_completed(bytes::Bytes::from("final"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Task result should still be accessible from cache
+        let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+        assert_eq!(result, Some(bytes::Bytes::from("out1")));
+    }
+
+    #[tokio::test]
+    async fn test_load_task_result_after_failure() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        snapshot.mark_failed("boom".into());
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        let result = backend.load_task_result("wf-1", "task-1").await.unwrap();
+        assert_eq!(result, Some(bytes::Bytes::from("out1")));
+    }
+
+    #[tokio::test]
+    async fn test_delete_cleans_task_results_cache() {
+        let backend = InMemoryBackend::new();
+
+        let mut snapshot = WorkflowSnapshot::new("wf-1".into(), "hash".into());
+        snapshot.mark_task_completed("task-1".into(), bytes::Bytes::from("out1"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        snapshot.mark_completed(bytes::Bytes::from("final"));
+        backend.save_snapshot(&snapshot).await.unwrap();
+
+        // Delete should clean both snapshot and cache
+        backend.delete_snapshot("wf-1").await.unwrap();
+
+        let result = backend.load_task_result("wf-1", "task-1").await;
+        assert!(matches!(result, Err(BackendError::NotFound(_))));
     }
 }

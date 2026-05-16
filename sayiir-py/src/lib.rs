@@ -23,6 +23,7 @@ mod flow;
 mod task;
 mod telemetry;
 mod worker;
+mod workflow_client;
 
 /// Python module for Sayiir workflow library.
 #[pymodule]
@@ -33,6 +34,7 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(task::get_task_context, m)?)?;
     m.add_class::<flow::PyFlowBuilder>()?;
     m.add_class::<flow::PyWorkflow>()?;
+    m.add_class::<flow::PyNodeInfo>()?;
     m.add_class::<engine::PyWorkflowEngine>()?;
     m.add_class::<engine::PyWorkflowStatus>()?;
     m.add_class::<backend::PyInMemoryBackend>()?;
@@ -40,6 +42,7 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<durable_engine::PyDurableEngine>()?;
     m.add_class::<worker::PyWorker>()?;
     m.add_class::<worker::PyWorkerHandle>()?;
+    m.add_class::<workflow_client::PyWorkflowClient>()?;
 
     // Telemetry
     m.add_function(wrap_pyfunction!(telemetry::init_tracing, m)?)?;
@@ -58,6 +61,10 @@ fn _sayiir(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "DeserializationError",
         m.py().get_type::<exceptions::DeserializationError>(),
+    )?;
+    m.add(
+        "InstanceAlreadyExistsError",
+        m.py().get_type::<exceptions::InstanceAlreadyExistsError>(),
     )?;
     Ok(())
 }

@@ -8,6 +8,8 @@
 export type {
   Duration,
   LoopOptions,
+  NodeKind,
+  NodeInfo,
   RetryPolicy,
   TaskCallback,
   TaskOptions,
@@ -46,7 +48,7 @@ export {
   InMemoryBackend,
   PostgresBackend,
 } from "./executor.js";
-export type { Backend, DurableRunOptions } from "./executor.js";
+export type { Backend, ConflictPolicy, DurableRunOptions } from "./executor.js";
 
 // Telemetry
 export { initTracing, shutdownTracing } from "./telemetry.js";
@@ -57,3 +59,7 @@ export { parseDuration } from "./duration.js";
 // Worker
 export { Worker, WorkerHandle } from "./worker.js";
 export type { WorkerOptions } from "./worker.js";
+
+// Client
+export { WorkflowClient } from "./workflow-client.js";
+export type { WorkflowClientOptions } from "./workflow-client.js";

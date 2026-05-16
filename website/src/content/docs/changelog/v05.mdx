@@ -1,0 +1,80 @@
+---
+title: What's New in v0.5
+description: User-facing changes in Sayiir v0.5 — first-class Deps container for the Rust macros, letting tasks with #[inject] parameters drop straight into the workflow! DSL.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="note">
+Sayiir v0.5 is backward-compatible. Existing v0.4 workflows continue to work without changes — the new `deps:` field on the `workflow!` macro is opt-in.
+</Aside>
+
+---
+
+## New features
+
+### Dependency injection with `Deps` (Rust)
+
+The Rust macros gained a first-class DI container. Tasks declared with `#[inject]` parameters can now be referenced directly in the `workflow!` macro — no more dropping down to `WorkflowBuilder::then_task_with(Task::new(...))` to wire each service by hand.
+
+```rust
+use sayiir_runtime::prelude::*;
+use std::sync::Arc;
+
+#[task(id = "charge")]
+async fn charge(order: Order, #[inject] stripe: Arc<Stripe>) -> Result<Receipt, BoxError> {
+    stripe.charge(&order).await
+}
+
+let deps = Deps::builder().insert(Arc::new(Stripe::new("sk_test"))).build();
+
+let wf = workflow! {
+    name: "checkout",
+    deps: &deps,
+    steps: [validate, charge, send_email]
+}.unwrap();
+```
+
+The same `Deps` can be shared between a parent workflow and its `flow`-embedded children, so you construct each service exactly once. Missing dependencies surface as `BuildError::MissingDep { task_id, type_name }` at construction time — there is no runtime panic at first invocation.
+
+`Deps` lives in `sayiir_core::deps`, re-exported via `sayiir_runtime::prelude`. See the [Rust API reference](/reference/rust-api/#deps) and the [composing workflows guide](/guides/composing-workflows/#sharing-dependencies-across-parent-and-child) for details.
+
+### `TaskRegistry::register_from_deps` for task libraries and workers (Rust)
+
+The same DI plumbing is now available to code that builds a `TaskRegistry` by hand — typically task libraries and `PooledWorker` setup. `TaskRegistry` gained a generic `register_from_deps::<T, _>(codec, &deps)` method that delegates through a new `DepsInjectable` trait (auto-implemented by `#[task]`). It verifies dependencies first and returns `Err(Vec<MissingDep>)` if any are missing — the registry is never left partially populated:
+
+```rust
+pub fn billing_tasks(
+    codec: Arc<JsonCodec>,
+    deps: &Deps,
+) -> Result<TaskRegistry, Vec<MissingDep>> {
+    let mut reg = TaskRegistry::new();
+    reg.register_from_deps::<ChargeTask, _>(codec.clone(), deps)?;
+    reg.register_from_deps::<RefundTask, _>(codec, deps)?;
+    Ok(reg)
+}
+```
+
+See the [reusable task libraries section](/guides/composing-workflows/#reusable-task-libraries) for the full pattern.
+
+### Layering with `Deps::merge`
+
+`Deps::merge(other)` and `DepsBuilder::merge(other)` let you combine containers — start from a base provided by a library, then layer in application-specific services before passing the result to `workflow! { deps: … }`. Entries in `other` win on type collision.
+
+```rust
+let mut deps = library::deps();
+deps.merge(application::deps());
+
+// Or mid-build:
+let combined = Deps::builder()
+    .merge(library::deps())
+    .insert(Arc::new(AppLogger::new()))
+    .build();
+```
+
+---
+
+## New exports
+
+**Rust** — new types in `sayiir_runtime::prelude` and `sayiir_core::deps`:
+`Deps`, `DepsBuilder`, `MissingDep`, `DepsInjectable` (trait, auto-implemented by `#[task]`). New variants on `sayiir_core::error::BuildError`: `MissingDep { task_id, type_name }` and `RegistryDepsConflict { task_id }` (raised when `workflow! { registry: …, deps: … }` would re-register the same task via both sources). New method on `TaskRegistry`: `register_from_deps::<T, _>(codec, &deps)`. New inherent methods on `#[task]`-generated structs: `from_deps`, `verify_deps`.

@@ -14,6 +14,7 @@ def run_workflow(
     *,
     instance_id: str | None = None,
     backend: Any = None,
+    conflict_policy: str | None = None,
 ) -> Any:
     """Run a workflow to completion and return its output.
 
@@ -33,6 +34,9 @@ def run_workflow(
         instance_id: Unique execution instance ID (enables durability)
         backend: Persistence backend (``InMemoryBackend`` or
             ``PostgresBackend``).  Required when ``instance_id`` is given.
+        conflict_policy: What happens when ``instance_id`` already exists.
+            One of ``"fail"`` (default), ``"use_existing"``, or
+            ``"terminate_existing"``.
 
     Returns:
         The workflow output.
@@ -50,7 +54,11 @@ def run_workflow(
     """
     if instance_id is not None:
         status = run_durable_workflow(
-            workflow, instance_id, input_data, backend=backend
+            workflow,
+            instance_id,
+            input_data,
+            backend=backend,
+            conflict_policy=conflict_policy,
         )
         if not status.is_completed():
             from ._sayiir import WorkflowError
@@ -72,6 +80,7 @@ def run_durable_workflow(
     instance_id: str,
     input_data: Any,
     backend: Any = None,
+    conflict_policy: str | None = None,
 ) -> Any:
     """Run a workflow with checkpointing and durability.
 
@@ -80,6 +89,9 @@ def run_durable_workflow(
         instance_id: Unique identifier for this execution instance
         input_data: Input to the first task
         backend: Persistence backend (defaults to InMemoryBackend)
+        conflict_policy: What happens when ``instance_id`` already exists.
+            One of ``"fail"`` (default), ``"use_existing"``, or
+            ``"terminate_existing"``.
 
     Returns:
         WorkflowStatus indicating the outcome
@@ -97,7 +109,7 @@ def run_durable_workflow(
 
     if backend is None:
         backend = PyInMemoryBackend()
-    engine = PyDurableEngine(backend)
+    engine = PyDurableEngine(backend, conflict_policy)
     return engine.run(workflow._inner, instance_id, input_data, workflow._task_registry)
 
 

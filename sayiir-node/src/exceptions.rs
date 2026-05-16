@@ -22,11 +22,22 @@ pub fn codec_error(msg: impl Into<String>) -> Error {
     )
 }
 
+/// Create an instance-already-exists error.
+pub fn instance_already_exists_error(msg: impl Into<String>) -> Error {
+    Error::new(
+        Status::GenericFailure,
+        format!("INSTANCE_ALREADY_EXISTS: {}", msg.into()),
+    )
+}
+
 /// Convert a `RuntimeError` to a napi `Error` with proper dispatch.
 pub fn runtime_err_to_napi(e: sayiir_runtime::RuntimeError) -> Error {
     match &e {
         sayiir_runtime::RuntimeError::Codec(_) => codec_error(e.to_string()),
         sayiir_runtime::RuntimeError::Backend(_) => backend_error(e.to_string()),
+        sayiir_runtime::RuntimeError::InstanceAlreadyExists(_) => {
+            instance_already_exists_error(e.to_string())
+        }
         _ => workflow_error(e.to_string()),
     }
 }

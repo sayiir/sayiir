@@ -2,15 +2,16 @@
 
 use sayiir_core::snapshot::WorkflowSnapshot;
 use sayiir_persistence::{BackendError, SnapshotStore};
-use wasm_bindgen::JsValue;
+use sqlx::{Executor, Row};
 
-use crate::backend::D1Backend;
-use crate::bindings::{get_blob_col, get_str_col};
-use crate::error::D1Error;
+use crate::backend::SQLiteBackend;
 use crate::helpers::dt_to_sqlite;
-use crate::js_future::JsFutureExt as _;
 
-impl SnapshotStore for D1Backend {
+impl<T> SnapshotStore for SQLiteBackend<T>
+where
+    for<'c> &'c T: Executor<'c, Database = crate::backend::BackendDB>,
+    T: Clone + Send + Sync,
+{
     async fn save_snapshot(&self, snapshot: &WorkflowSnapshot) -> Result<(), BackendError> {
         let data = self.encode(snapshot)?;
         let status = snapshot.state.as_ref();
@@ -46,34 +47,21 @@ impl SnapshotStore for D1Backend {
             terminal = if terminal { "1" } else { "0" },
         );
 
-        let upsert_args = js_sys::Array::new();
-        upsert_args.push(&JsValue::from_str(&snapshot.instance_id)); // ?1
-        upsert_args.push(&JsValue::from_str(status)); // ?2
-        upsert_args.push(&JsValue::from_str(&snapshot.definition_hash)); // ?3
-        upsert_args.push(&match &task_id {
-            Some(t) => JsValue::from_str(t),
-            None => JsValue::NULL,
-        }); // ?4
-        upsert_args.push(&JsValue::from_f64(f64::from(task_count))); // ?5
-        upsert_args.push(&js_sys::Uint8Array::from(data.as_slice()).into()); // ?6
-        upsert_args.push(&match &error {
-            Some(e) => JsValue::from_str(e),
-            None => JsValue::NULL,
-        }); // ?7
-        upsert_args.push(&match pos_kind {
-            Some(p) => JsValue::from_str(p),
-            None => JsValue::NULL,
-        }); // ?8
-        upsert_args.push(&match &wake_at {
-            Some(w) => JsValue::from_str(w),
-            None => JsValue::NULL,
-        }); // ?9
-        upsert_args.push(&match snapshot.trace_parent.as_deref() {
-            Some(tp) => JsValue::from_str(tp),
-            None => JsValue::NULL,
-        }); // ?10
-
-        let upsert_stmt = self.db().prepare(&upsert_sql).bind(&upsert_args);
+        let exec = self.exec();
+        sqlx::query(upsert_sql.as_str())
+            .bind(&snapshot.instance_id) // ?1
+            .bind(status) // ?2
+            .bind(&snapshot.definition_hash) // ?3
+            .bind(&task_id) // ?4
+            .bind(i64::from(task_count)) // ?5
+            .bind(&data) // ?6
+            .bind(&error) // ?7
+            .bind(pos_kind) // ?8
+            .bind(&wake_at) // ?9
+            .bind(snapshot.trace_parent.as_deref()) // ?10
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
         let history_sql = "INSERT INTO sayiir_workflow_snapshot_history
                 (instance_id, version, status, current_task_id, data)
@@ -84,26 +72,14 @@ impl SnapshotStore for D1Backend {
                 ?2, ?3, ?4
              )";
 
-        let history_args = js_sys::Array::new();
-        history_args.push(&JsValue::from_str(&snapshot.instance_id));
-        history_args.push(&JsValue::from_str(status));
-        history_args.push(&match &task_id {
-            Some(t) => JsValue::from_str(t),
-            None => JsValue::NULL,
-        });
-        history_args.push(&js_sys::Uint8Array::from(data.as_slice()).into());
-
-        let history_stmt = self.db().prepare(history_sql).bind(&history_args);
-
-        let batch = js_sys::Array::new();
-        batch.push(&upsert_stmt);
-        batch.push(&history_stmt);
-
-        self.db()
-            .batch(&batch)
-            .into_send_future()
+        sqlx::query(history_sql)
+            .bind(&snapshot.instance_id)
+            .bind(status)
+            .bind(&task_id)
+            .bind(&data)
+            .execute(&exec)
             .await
-            .map_err(D1Error)?;
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
         Ok(())
     }
@@ -123,40 +99,39 @@ impl SnapshotStore for D1Backend {
     async fn load_snapshot(&self, instance_id: &str) -> Result<WorkflowSnapshot, BackendError> {
         let sql = "SELECT data, trace_parent FROM sayiir_workflow_snapshots WHERE instance_id = ?1";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
+        let exec = self.exec();
+        let row = sqlx::query(sql)
+            .bind(instance_id)
+            .fetch_optional(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        let stmt = self.db().prepare(sql).bind(&args);
-        let result = stmt.first().into_send_future().await.map_err(D1Error)?;
+        let row = row.ok_or_else(|| BackendError::NotFound(instance_id.to_string()))?;
 
-        if result.is_null() || result.is_undefined() {
-            return Err(BackendError::NotFound(instance_id.to_string()));
-        }
+        let data: Vec<u8> = row.get("data");
+        let trace_parent: Option<String> = row.get("trace_parent");
 
-        let data = get_blob_col(&result, "data")
-            .ok_or_else(|| BackendError::Backend("missing data column".to_string()))?;
         let mut snapshot = self.decode(&data)?;
-        snapshot.trace_parent = get_str_col(&result, "trace_parent");
+        snapshot.trace_parent = trace_parent;
         Ok(snapshot)
     }
 
     async fn delete_snapshot(&self, instance_id: &str) -> Result<(), BackendError> {
         let sql = "DELETE FROM sayiir_workflow_snapshots WHERE instance_id = ?1";
 
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(instance_id));
+        let exec = self.exec();
+        let result = sqlx::query(sql)
+            .bind(instance_id)
+            .execute(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        let stmt = self.db().prepare(sql).bind(&args);
-        let result = stmt.run().into_send_future().await.map_err(D1Error)?;
+        #[cfg(feature = "d1")]
+        let rows_affected = result.rows_affected;
+        #[cfg(not(feature = "d1"))]
+        let rows_affected = result.rows_affected();
 
-        // Check meta.changes to see if a row was actually deleted.
-        let meta = js_sys::Reflect::get(&result, &JsValue::from_str("meta")).map_err(D1Error)?;
-        let changes = js_sys::Reflect::get(&meta, &JsValue::from_str("changes"))
-            .map_err(D1Error)?
-            .as_f64()
-            .unwrap_or(0.0);
-
-        if changes < 1.0 {
+        if rows_affected < 1 {
             return Err(BackendError::NotFound(instance_id.to_string()));
         }
         Ok(())
@@ -165,20 +140,13 @@ impl SnapshotStore for D1Backend {
     async fn list_snapshots(&self) -> Result<Vec<String>, BackendError> {
         let sql = "SELECT instance_id FROM sayiir_workflow_snapshots";
 
-        let stmt = self.db().prepare(sql);
-        let result = stmt.all().into_send_future().await.map_err(D1Error)?;
+        let exec = self.exec();
+        let rows = sqlx::query(sql)
+            .fetch_all(&exec)
+            .await
+            .map_err(|e| BackendError::Backend(e.to_string()))?;
 
-        let results =
-            js_sys::Reflect::get(&result, &JsValue::from_str("results")).map_err(D1Error)?;
-        let array = js_sys::Array::from(&results);
-
-        let mut ids = Vec::with_capacity(array.length() as usize);
-        for i in 0..array.length() {
-            let row = array.get(i);
-            if let Some(id) = get_str_col(&row, "instance_id") {
-                ids.push(id);
-            }
-        }
+        let ids = rows.into_iter().map(|r| r.get("instance_id")).collect();
         Ok(ids)
     }
 }

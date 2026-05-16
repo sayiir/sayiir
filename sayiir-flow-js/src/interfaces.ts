@@ -19,6 +19,7 @@ export interface TaskMetadata {
   retries?: RetryPolicyConfig;
   tags?: string[];
   version?: string;
+  priority?: number;
 }
 
 export interface BranchTask {
@@ -31,10 +32,31 @@ export interface BranchEntry {
   tasks: BranchTask[];
 }
 
+/** The kind of node in a workflow DAG. */
+export type NodeKind = "task" | "fork" | "delay" | "await_signal" | "branch" | "loop" | "child_workflow";
+
+/** Metadata about a single node in the workflow DAG. */
+export interface NodeInfo {
+  /** Unique node identifier. */
+  id: string;
+  /** Node kind. */
+  kind: NodeKind;
+  /** ID of the preceding node, or `undefined` for the root. */
+  predecessorId?: string;
+  /** Timeout in seconds (task timeout, delay duration, or signal timeout). */
+  timeoutSecs?: number;
+  /** Retry policy (tasks only). */
+  retryPolicy?: RetryPolicyConfig;
+  /** Execution priority 1–5 (tasks only). */
+  priority?: number;
+}
+
 export interface CompiledWorkflow {
   workflowId: string;
   definitionHash: string;
   metadataJson?: string;
+  /** Return all nodes in topological (execution) order. */
+  iterNodes(): NodeInfo[];
 }
 
 export interface FlowBuilderBackend {

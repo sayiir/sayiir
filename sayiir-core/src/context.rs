@@ -255,7 +255,7 @@ mod tests {
         rt.block_on(async {
             // Set only thread-local, no task-local — should still find it
             let ctx = make_task_ctx();
-            let result = with_thread_local_task_context(ctx, || get_task_context());
+            let result = with_thread_local_task_context(ctx, get_task_context);
             assert!(result.is_some());
             assert_eq!(&*result.unwrap().instance_id, "inst-1");
         });

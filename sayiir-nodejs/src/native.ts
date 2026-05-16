@@ -5,7 +5,7 @@
  * The actual native module is loaded at runtime.
  */
 
-import type { NativeWorkflowStatus, TaskCallback } from "./types.js";
+import type { NodeKind, NativeWorkflowStatus, TaskCallback } from "./types.js";
 
 export interface NapiRetryPolicy {
   maxRetries: number;
@@ -70,10 +70,25 @@ export interface NapiFlowBuilder {
   build(): NapiWorkflow;
 }
 
+export interface NapiNodeInfo {
+  id: string;
+  kind: NodeKind;
+  predecessorId?: string;
+  timeoutSecs?: number;
+  retryPolicy?: {
+    maxRetries: number;
+    initialDelaySecs: number;
+    backoffMultiplier: number;
+    maxDelaySecs?: number;
+  };
+  priority?: number;
+}
+
 export interface NapiWorkflow {
   workflowId: string;
   definitionHash: string;
   metadataJson?: string;
+  iterNodes(): NapiNodeInfo[];
 }
 
 export interface NapiWorkflowEngine {
@@ -139,22 +154,32 @@ export interface NapiWorker {
 
 export interface NapiWorkerHandle {
   shutdown(): void;
-  cancelWorkflow(
+}
+
+export interface NapiWorkflowClient {
+  submit(
+    workflow: NapiWorkflow,
+    instanceId: string,
+    input: unknown,
+  ): NativeWorkflowStatus;
+  cancel(
     instanceId: string,
     reason?: string,
     cancelledBy?: string,
   ): void;
-  pauseWorkflow(
+  pause(
     instanceId: string,
     reason?: string,
     pausedBy?: string,
   ): void;
-  unpauseWorkflow(instanceId: string): void;
+  unpause(instanceId: string): void;
   sendSignal(
     instanceId: string,
     signalName: string,
     payloadJson: string,
   ): void;
+  status(instanceId: string): NativeWorkflowStatus;
+  getTaskResult(instanceId: string, taskId: string): string | null;
 }
 
 export interface NativeAddon {
@@ -170,8 +195,8 @@ export interface NativeAddon {
   NapiInMemoryBackend: new () => NapiInMemoryBackend;
   NapiPostgresBackend: { connect(url: string): NapiPostgresBackend };
   NapiDurableEngine: {
-    withInMemory(backend: NapiInMemoryBackend): NapiDurableEngine;
-    withPostgres(backend: NapiPostgresBackend): NapiDurableEngine;
+    withInMemory(backend: NapiInMemoryBackend, conflictPolicy?: string): NapiDurableEngine;
+    withPostgres(backend: NapiPostgresBackend, conflictPolicy?: string): NapiDurableEngine;
   };
   NapiWorker: {
     withInMemory(
@@ -179,13 +204,19 @@ export interface NativeAddon {
       backend: NapiInMemoryBackend,
       pollIntervalMs?: number,
       claimTtlMs?: number,
+      tags?: string[],
     ): NapiWorker;
     withPostgres(
       workerId: string,
       backend: NapiPostgresBackend,
       pollIntervalMs?: number,
       claimTtlMs?: number,
+      tags?: string[],
     ): NapiWorker;
+  };
+  NapiWorkflowClient: {
+    withInMemory(backend: NapiInMemoryBackend, conflictPolicy?: string): NapiWorkflowClient;
+    withPostgres(backend: NapiPostgresBackend, conflictPolicy?: string): NapiWorkflowClient;
   };
 }
 

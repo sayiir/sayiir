@@ -8,6 +8,7 @@ Runtime execution strategies for durable workflows.
 |----------|----------|
 | [`CheckpointingRunner`](#checkpointingrunner) | Single-process with crash recovery |
 | [`PooledWorker`](#pooledworker) | Multi-worker horizontal scaling |
+| [`WorkflowClient`](#workflowclient) | Submit and control workflows without executing tasks |
 | `InProcessRunner` | Simple in-memory execution (no persistence) |
 
 ---
@@ -96,6 +97,38 @@ let handle = worker.spawn(Duration::from_secs(1), workflows);
 // ... later, shut down gracefully ...
 handle.shutdown();
 handle.join().await?;
+```
+
+---
+
+### WorkflowClient
+
+Submits workflows and controls their lifecycle (cancel, pause, unpause, signal, status) without executing tasks. Use this with `PooledWorker` for the distributed model, or standalone for submitting workflows to be picked up by workers.
+
+**When to use:**
+
+- Distributed model — submit workflows from a web server, workers execute elsewhere
+- Idempotent submission — conflict policies for duplicate instance IDs
+- Lifecycle control — cancel, pause, unpause, signal workflows from any process
+
+**Example:**
+
+```rust
+use sayiir_runtime::WorkflowClient;
+use sayiir_core::workflow::ConflictPolicy;
+
+let backend = PostgresBackend::<JsonCodec>::connect(url).await?;
+let client = WorkflowClient::new(backend)
+    .with_conflict_policy(ConflictPolicy::UseExisting);
+
+// Submit — creates a snapshot, does not execute
+let (status, output) = client.submit(&workflow, "order-42", input).await?;
+
+// Lifecycle operations
+client.cancel("order-42", Some("reason".into()), None).await?;
+client.pause("order-42", None, None).await?;
+client.unpause("order-42").await?;
+let status = client.status("order-42").await?;
 ```
 
 ---
