@@ -5,7 +5,12 @@
  * The `flow()` factory function injects the WASM builder backend.
  */
 
-import { createFlowFactory, type FlowOptions, type Flow } from "sayiir-flow-js";
+import {
+  createFlowFactory,
+  type FlowBuilderBackend,
+  type FlowOptions,
+  type Flow,
+} from "sayiir-flow-js";
 
 import { WasmFlowBuilder } from "../wasm/sayiir_cloudflare.js";
 
@@ -27,4 +32,9 @@ export type {
 
 /** Create a new flow with the WASM builder backend. */
 export const flow: <TInput>(name: string, opts?: FlowOptions) => Flow<TInput> =
-  createFlowFactory((name) => new WasmFlowBuilder(name));
+  createFlowFactory(
+    // `WasmFlowBuilder` carries an extra `free()` method from wasm-bindgen
+    // that has no place on the pure-TS `FlowBuilderBackend` interface, so
+    // the structural compatibility check rejects the bare instance.
+    (name) => new WasmFlowBuilder(name) as unknown as FlowBuilderBackend,
+  );

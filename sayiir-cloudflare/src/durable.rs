@@ -28,6 +28,7 @@ use sayiir_core::snapshot::{ExecutionPosition, WorkflowSnapshot};
 use sayiir_core::workflow::WorkflowContinuation;
 use sayiir_d1::{D1Backend, D1Database};
 use sayiir_persistence::{SignalStore, SnapshotStore};
+use wasm_bindgen::JsCast;
 
 use crate::codec::{
     decode_json_string, decode_loop_result, decode_to_js_value, encode_branch_envelope,
@@ -48,13 +49,19 @@ pub struct WasmDurableEngine {
 impl WasmDurableEngine {
     /// Create a durable engine with a D1 backend.
     ///
-    /// `db` must be a Cloudflare D1 database binding from the Worker env.
+    /// `db` must be a Cloudflare D1 database binding from the Worker env
+    /// (the JS object exposed as `env.DB`). It is dyn-cast into the Rust
+    /// `worker::D1Database` wrapper before being handed to sayiir-d1.
     ///
     /// # Errors
     ///
-    /// Returns a JS error if the D1 backend initialisation fails.
-    pub async fn create(db: D1Database) -> Result<WasmDurableEngine, JsValue> {
-        let backend = D1Backend::connect(db).await.map_err(to_js_error)?;
+    /// Returns a JS error if `db` is not a `D1Database`, or if backend
+    /// initialisation fails.
+    pub async fn create(db: JsValue) -> Result<WasmDurableEngine, JsValue> {
+        let d1: D1Database = db
+            .dyn_into()
+            .map_err(|v| JsValue::from_str(&format!("expected a D1Database binding, got {v:?}")))?;
+        let backend = D1Backend::connect(d1).await.map_err(to_js_error)?;
         Ok(Self {
             backend: Arc::new(backend),
         })

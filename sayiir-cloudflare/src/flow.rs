@@ -89,6 +89,7 @@ impl From<TaskMetadataJs> for sayiir_core::task::TaskMetadata {
             }),
             tags: m.tags.unwrap_or_default(),
             version: m.version,
+            priority: None,
         }
     }
 }
