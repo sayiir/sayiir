@@ -103,7 +103,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.28.2
 
       - name: Install dependencies
         working-directory: sayiir-nodejs
