@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:24-slim
 RUN useradd --home-dir /sandbox --create-home sandbox
 # Install sayiir under /opt, then symlink to /node_modules so ESM resolution
 # finds it (walks up from /sandbox/main.mjs → /sandbox/node_modules → /node_modules)

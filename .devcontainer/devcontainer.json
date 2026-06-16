@@ -9,7 +9,7 @@
       "version": "3.12"
     },
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "22"
+      "version": "24"
     }
   },
   "postCreateCommand": "npm install -g pnpm && cargo build && pip install -e sayiir-python/ && cd sayiir-nodejs && pnpm install",
