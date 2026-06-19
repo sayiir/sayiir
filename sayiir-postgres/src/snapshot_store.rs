@@ -376,7 +376,7 @@ where
              del AS (DELETE FROM sayiir_workflow_snapshots WHERE instance_id = $1 RETURNING 1)
              SELECT EXISTS (SELECT 1 FROM del) AS deleted"
         );
-        let row = sqlx::query(&query)
+        let row = sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(instance_id)
             .fetch_one(&self.pool)
             .await

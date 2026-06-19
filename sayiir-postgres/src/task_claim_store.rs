@@ -368,7 +368,8 @@ where
                ON h.instance_id = r.instance_id AND h.version = r.history_version"
         );
 
-        let mut q = sqlx::query(&query).bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        let mut q =
+            sqlx::query(sqlx::AssertSqlSafe(query)).bind(i64::try_from(limit).unwrap_or(i64::MAX));
         if !worker_tags.is_empty() {
             q = q.bind(&worker_tags_vec);
         }
@@ -533,7 +534,7 @@ where
                AND s.status = 'InProgress'
                AND {ELIGIBILITY_PREDICATE}"
         );
-        let row = sqlx::query(&query)
+        let row = sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(&hint.instance_id)
             .bind(hint.task_id.as_slice())
             .fetch_optional(&self.pool)
