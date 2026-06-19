@@ -285,7 +285,7 @@ pub fn write_report(report: &Report, results_dir: &str) -> Result<PathBuf> {
 /// Best-effort: query a few PG-state SHOWs + a version() for the report.
 pub async fn collect_postgres_info(pool: &sqlx::PgPool) -> PostgresInfo {
     async fn show(pool: &sqlx::PgPool, name: &str) -> Option<String> {
-        sqlx::query(&format!("SHOW {name}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!("SHOW {name}")))
             .fetch_one(pool)
             .await
             .ok()

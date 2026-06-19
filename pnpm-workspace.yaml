@@ -4,3 +4,30 @@ packages:
   - "sayiir-nodejs/npm/*"
   - "sayiir-cloudflare-js"
   - "examples/rag-agent-cf"
+
+# Dependencies allowed to run install/build scripts. pnpm v10+ blocks these by
+# default; without this allowlist `pnpm install` exits 1 with
+# ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  cpu-features: true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+  ssh2: true
+  workerd: true
+
+# Moved from package.json `pnpm.overrides` — pnpm v11 no longer reads that field
+# and silently ignored these pins. Lives in the workspace manifest now.
+overrides:
+  postcss: "^8.5.14"
+  undici: "^7.25.0"
+  uuid: "^13.0.2"
+  picomatch@^2: "^2.3.2"
+  picomatch@^4: "^4.0.4"
+  protobufjs: "^7.5.8"
+  yaml: "^2.9.0"
+  tmp: "^0.2.7"
+  ws: "^8.21.0"
+  brace-expansion@^1: "^1.1.13"
+  brace-expansion@^2: "^2.0.3"
+  brace-expansion@^5: "^5.0.6"
