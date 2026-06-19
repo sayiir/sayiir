@@ -12,7 +12,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/sayiir.svg)](https://pypi.org/project/sayiir/)
 [![PyPI downloads](https://static.pepy.tech/badge/sayiir/month)](https://pepy.tech/project/sayiir)
-[![Python](https://img.shields.io/badge/python-3.10–3.13-3776ab.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.10–3.14-3776ab.svg)](https://www.python.org)
 
 [![npm](https://img.shields.io/npm/v/sayiir.svg)](https://www.npmjs.com/package/sayiir)
 [![npm downloads](https://img.shields.io/npm/dm/sayiir.svg)](https://www.npmjs.com/package/sayiir)
