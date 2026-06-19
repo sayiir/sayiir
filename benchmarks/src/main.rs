@@ -342,7 +342,7 @@ pub async fn reset_sayiir_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         .chain(std::iter::once("sayiir_workflow_snapshots"))
         .collect::<Vec<_>>()
         .join(", ");
-    sqlx::query(&format!("TRUNCATE TABLE {tables} RESTART IDENTITY"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("TRUNCATE TABLE {tables} RESTART IDENTITY")))
         .execute(pool)
         .await
         .map(|_| ())

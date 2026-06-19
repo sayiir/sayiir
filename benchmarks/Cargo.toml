@@ -19,7 +19,7 @@ sayiir-postgres = { path = "../sayiir-postgres" }
 
 # Async runtime + Postgres pool
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "postgres"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -27,12 +27,12 @@ clap = { version = "4", features = ["derive", "env"] }
 # Measurement
 hdrhistogram = "7"
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 # Reporting + HTTP client for Prometheus snapshot
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 # Markdown table rendering for `compare --format markdown` (the PR
 # comment body). `ASCII_MARKDOWN` preset emits GFM-compatible pipe

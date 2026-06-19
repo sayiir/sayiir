@@ -25,4 +25,4 @@ sayiir-runtime = { workspace = true, features = ["json", "otel"] }
 tracing = { workspace = true }
 
 [build-dependencies]
-pyo3-build-config = "0.28"
+pyo3-build-config = "0.29"
