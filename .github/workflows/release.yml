@@ -197,7 +197,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@0b3c57e0207eaf23cf1d05a80fdeb3d620df6dae # wasm-pack
+        uses: taiki-e/install-action@b588f34917d3dc00449561a6c3d0201d3ed47f75 # wasm-pack
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
