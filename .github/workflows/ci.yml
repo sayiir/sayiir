@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
+        uses: taiki-e/install-action@ea2ee51eb0d48fc4f895702355487d299a6f3b22 # cargo-deny
 
       - name: Run cargo deny check
         run: cargo deny check
@@ -102,7 +102,7 @@ jobs:
         run: cargo clippy -p sayiir-cloudflare --target wasm32-unknown-unknown -- -D warnings
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@0b3c57e0207eaf23cf1d05a80fdeb3d620df6dae # wasm-pack
+        uses: taiki-e/install-action@b588f34917d3dc00449561a6c3d0201d3ed47f75 # wasm-pack
 
       - name: Run wasm-pack tests (Cloudflare)
         run: wasm-pack test --node sayiir-cloudflare
@@ -272,7 +272,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@0b3c57e0207eaf23cf1d05a80fdeb3d620df6dae # wasm-pack
+        uses: taiki-e/install-action@b588f34917d3dc00449561a6c3d0201d3ed47f75 # wasm-pack
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -343,7 +343,7 @@ jobs:
         run: pnpm build
 
       - name: Install lychee
-        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2
         with:
           tool: lychee
 
