@@ -101,7 +101,7 @@ services:
       - "--web.enable-lifecycle"
 
   grafana:
-    image: grafana/grafana:11.4.0
+    image: grafana/grafana:11.6.16
     container_name: sayiir-bench-grafana
     networks: [bench]
     ports:
