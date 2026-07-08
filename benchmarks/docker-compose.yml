@@ -61,7 +61,7 @@ services:
       retries: 30
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:v0.17.1
+    image: prometheuscommunity/postgres-exporter:v0.20.1
     container_name: sayiir-bench-pg-exporter
     networks: [bench]
     environment:
