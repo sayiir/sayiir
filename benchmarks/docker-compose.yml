@@ -123,7 +123,7 @@ services:
   # numbers, run the benchmark on a Linux host (the recommended AWS c7i.4xlarge).
   # On Mac, this service may exit; `docker stats` is a usable fallback.
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
     container_name: sayiir-bench-cadvisor
     networks: [bench]
     privileged: true
