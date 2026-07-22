@@ -25,7 +25,7 @@
     "astro-mermaid": "^2.0.1",
     "codemirror": "^6.0.2",
     "mermaid": "^11.15.0",
-    "sharp": "^0.33.5"
+    "sharp": "^0.35.0"
   },
   "devDependencies": {
     "cspell": "^9.8.0",
