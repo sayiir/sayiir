@@ -83,7 +83,7 @@ services:
       - "8889:8889"   # Prometheus scrape endpoint for OTLP-derived metrics
 
   prometheus:
-    image: prom/prometheus:v3.12.0
+    image: prom/prometheus:v3.14.0
     container_name: sayiir-bench-prometheus
     networks: [bench]
     ports:
