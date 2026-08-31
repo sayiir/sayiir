@@ -3,7 +3,7 @@
 # Build context MUST be the workspace root so we can include the sibling
 # sayiir-* path deps. Docker-compose handles this via `context: ..`.
 
-FROM rust:1.83-slim AS build
+FROM rust:1.98-slim AS build
 WORKDIR /build
 
 RUN apt-get update \
