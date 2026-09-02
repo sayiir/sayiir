@@ -13,7 +13,7 @@
     "lint": "pnpm spell && pnpm build && pnpm links:external"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.39.2",
+    "@astrojs/starlight": "^0.42.0",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/lang-python": "^6.2.1",
@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "cspell": "^9.8.0",
-    "starlight-links-validator": "^0.24.0"
+    "starlight-links-validator": "^0.26.0"
   },
   "pnpm": {
     "overrides": {
