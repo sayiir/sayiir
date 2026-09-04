@@ -39,7 +39,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # tables with right-alignment for numerics — better than hand-rolling
 # the `writeln!` chains, which silently break alignment when a
 # scenario introduces a longer metric name.
-comfy-table = { version = "7", default-features = false }
+comfy-table = { version = "8", default-features = false }
 
 # Logging
 tracing = "0.1"
