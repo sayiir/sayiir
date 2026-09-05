@@ -19,7 +19,7 @@ proc-macro = true
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
-darling = "0.23"
+darling = "0.24"
 
 [dev-dependencies]
 trybuild = "1"
