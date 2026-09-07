@@ -28,7 +28,7 @@
     "sharp": "^0.33.5"
   },
   "devDependencies": {
-    "cspell": "^9.8.0",
+    "cspell": "^10.0.0",
     "starlight-links-validator": "^0.24.0"
   },
   "pnpm": {
@@ -37,14 +37,14 @@
       "lodash": "^4.18.0",
       "lodash-es": "^4.18.0",
       "svgo": "^4.0.1",
-      "picomatch@^2": "^2.3.2",
+      "picomatch@^2": "^4.0.0",
       "picomatch@^4": "^4.0.4",
       "defu": "^6.1.5",
       "devalue": "^5.7.0",
       "h3@^1": "^1.15.11",
       "postcss": "^8.5.14",
       "dompurify": "^3.4.3",
-      "uuid": "^13.0.2",
+      "uuid": "^14.0.0",
       "smol-toml": "^1.6.1",
       "yaml": "^2.9.0"
     }
