@@ -67,7 +67,7 @@ sha2 = "0.11"
 hex = "0.4"
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
-base64 = "0.22"
+base64 = "0.23"
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "chrono"] }
 proptest = "1"
 backon = "1"
