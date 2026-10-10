@@ -24,7 +24,7 @@ serde_json = { workspace = true }
 # Pinned to 0.8 to match sqlx-d1 0.4.x, which depends on sqlx 0.8. The workspace
 # sqlx (0.9, used by sayiir-postgres) is independent — sayiir-d1 shares no sqlx
 # types with other crates, so the two versions coexist without conflict.
-sqlx = { version = "0.8" }
+sqlx = { version = "0.9" }
 
 # D1
 sqlx-d1 = { version = "0.4", optional = true }
