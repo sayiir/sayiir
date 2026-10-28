@@ -50,7 +50,7 @@ importers:
         specifier: ^2.1.3
         version: 2.1.3
       zod:
-        specifier: ^3.0.0
+        specifier: ^3.0.0 || ^4.0.0
         version: 3.25.76
     devDependencies:
       '@eslint/js':
@@ -75,7 +75,7 @@ importers:
         specifier: ^2.1.3
         version: 2.1.3
       zod:
-        specifier: ^3.0.0
+        specifier: ^3.0.0 || ^4.0.0
         version: 3.25.76
     devDependencies:
       '@types/ms':
@@ -94,7 +94,7 @@ importers:
         specifier: ^2.1.3
         version: 2.1.3
       zod:
-        specifier: ^3.0.0
+        specifier: ^3.0.0 || ^4.0.0
         version: 3.25.76
     devDependencies:
       '@eslint/js':
