@@ -38,5 +38,5 @@ sayiir-core = { workspace = true }
 sayiir-runtime = { workspace = true, features = ["rkyv", "json", "macros"] }
 serde_json = { workspace = true }
 bytes = { workspace = true }
-testcontainers = "0.27"
+testcontainers = "0.28"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
