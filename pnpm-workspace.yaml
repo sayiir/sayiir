@@ -20,11 +20,11 @@ allowBuilds:
 # and silently ignored these pins. Lives in the workspace manifest now.
 overrides:
   postcss: "^8.5.14"
-  undici: "^7.25.0"
-  uuid: "^13.0.2"
-  picomatch@^2: "^2.3.2"
+  undici: "^8.0.0"
+  uuid: "^14.0.0"
+  picomatch@^2: "^4.0.0"
   picomatch@^4: "^4.0.4"
-  protobufjs: "^7.5.8"
+  protobufjs: "^8.0.0"
   yaml: "^2.9.0"
   tmp: "^0.2.7"
   ws: "^8.21.0"
