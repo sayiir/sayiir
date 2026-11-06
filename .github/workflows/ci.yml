@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@d865e9aac326f15b06ac52b57abb58cd0e3330e4 # cargo-deny
+        uses: taiki-e/install-action@faedfc82a08b7a1fdaf8cb7434a981276b02039e # cargo-deny
 
       - name: Run cargo deny check
         run: cargo deny check
@@ -85,7 +85,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: wasm32-unknown-unknown
 
@@ -102,7 +102,7 @@ jobs:
         run: cargo clippy -p sayiir-cloudflare --target wasm32-unknown-unknown -- -D warnings
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@644436aca60cb198d1f681f650065fe83037d385 # wasm-pack
+        uses: taiki-e/install-action@598fbd606eacc17169074a47ad63c41a77e455d8 # wasm-pack
 
       - name: Run wasm-pack tests (Cloudflare)
         run: wasm-pack test --node sayiir-cloudflare
@@ -134,7 +134,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Run ruff check
         run: uvx ruff check sayiir-python/
@@ -161,7 +161,7 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -202,7 +202,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Set up Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -218,9 +218,9 @@ jobs:
           cp target/release/libsayiir_node.so sayiir-nodejs/native/sayiir-node.node
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
-          version: 11.24.0
+          version: 11.28.11
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -267,12 +267,12 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@644436aca60cb198d1f681f650065fe83037d385 # wasm-pack
+        uses: taiki-e/install-action@598fbd606eacc17169074a47ad63c41a77e455d8 # wasm-pack
 
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -280,9 +280,9 @@ jobs:
           node-version: 24
 
       - name: Install pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
-          version: 11.24.0
+          version: 11.28.11
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -320,9 +320,9 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
-          version: 11.24.0
+          version: 11.28.11
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -343,7 +343,7 @@ jobs:
         run: pnpm build
 
       - name: Install lychee
-        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2
         with:
           tool: lychee
 
