@@ -37,7 +37,7 @@
       "lodash": "^4.18.0",
       "lodash-es": "^4.18.0",
       "svgo": "^4.0.1",
-      "picomatch@^2": "^2.3.2",
+      "picomatch@^2": "^4.0.0",
       "picomatch@^4": "^4.0.4",
       "defu": "^6.1.5",
       "devalue": "^5.7.0",
