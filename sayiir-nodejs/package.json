@@ -40,15 +40,15 @@
     }
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.3",
-    "@testcontainers/postgresql": "^11.14.0",
+    "@eslint/js": "^10.0.0",
+    "@testcontainers/postgresql": "^12.0.0",
     "@types/ms": "^2.1.0",
-    "@types/node": "^25.3.1",
-    "eslint": "^9.39.3",
-    "testcontainers": "^11.14.0",
-    "typescript": "^5.9.3",
+    "@types/node": "^26.0.0",
+    "eslint": "^10.0.0",
+    "testcontainers": "^12.0.0",
+    "typescript": "^7.0.0",
     "typescript-eslint": "^8.56.1",
-    "vitest": "^4.1.8"
+    "vitest": "^5.0.0"
   },
   "engines": {
     "node": ">=20"
